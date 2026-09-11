@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build output (regenerate via build_exe.bat)
+build/
+dist/
+*.spec
+
+# Inno Setup output
+installer_output/
+
+# Built distributables -- regenerate from source, or publish as GitHub
+# Releases instead of tracking in git
+BBVideoCutter-Setup.exe
+BBVideoCutter-Portable.zip
+
+# ffmpeg/ffprobe binaries used only for bundling into the build, not part
+# of the source itself
+ffmpeg.exe
+ffprobe.exe
+
+# Local tooling config
+.claude/
+
+# Not tracked per request
+TODO.md
