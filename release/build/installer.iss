@@ -1,0 +1,54 @@
+; Inno Setup script for BarkBark Lossless Video Cutter.
+; Builds a real Windows installer (Setup.exe) around the PyInstaller
+; --onedir output in dist\BBVideoCutter\ -- installs to Program Files,
+; adds a Start Menu shortcut (and optional Desktop shortcut), and
+; registers a proper uninstaller in "Add or Remove Programs".
+;
+; Not meant to be run directly -- build_setup.bat (in this same
+; release\build\ folder) runs the PyInstaller build first, then
+; compiles this with Inno Setup's ISCC.exe.
+
+#define MyAppName "BarkBark Lossless Video Cutter"
+#define MyAppVersion "1.0"
+#define MyAppPublisher "Thmyris"
+#define MyAppExeName "BBVideoCutter.exe"
+
+[Setup]
+; Fixed GUID so re-installs/upgrades are recognized as the same app
+; instead of installing side-by-side -- do not change this once shipped.
+AppId={{9E7A6B8B-5C2E-4C9A-9E3B-2B7B6D1E4F21}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+DisableProgramGroupPage=yes
+SetupIconFile=..\..\assets\barkbark2.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+OutputDir=installer_output
+OutputBaseFilename=BBVideoCutter-Setup
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+; The onedir build already contains ffmpeg.exe/ffprobe.exe (~200MB) and
+; compresses further here, so a real install shrinks the download size.
+ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+
+[Files]
+Source: "dist\BBVideoCutter\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent

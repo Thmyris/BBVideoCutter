@@ -6,12 +6,13 @@ video while avoiding unnecessary re-encoding wherever ffmpeg stream copy
 
 ## Download
 
-Two ready-to-use builds (both bundle ffmpeg/ffprobe internally — nothing
-else to install):
+Two ready-to-use builds in `release/` (both bundle ffmpeg/ffprobe
+internally — nothing else to install):
 
-- **`BBVideoCutter-Setup.exe`** — standard Windows installer. Installs a
-  Start Menu shortcut and a proper uninstaller in Add/Remove Programs.
-- **`BBVideoCutter-Portable.zip`** — extract anywhere and run
+- **`release/BBVideoCutter-Setup.exe`** — standard Windows installer.
+  Installs a Start Menu shortcut and a proper uninstaller in Add/Remove
+  Programs.
+- **`release/BBVideoCutter-Portable.zip`** — extract anywhere and run
   `BBVideoCutter.exe` directly. No install, no admin rights, nothing
   written outside that folder.
 
@@ -84,21 +85,26 @@ Requires ffmpeg + ffprobe on your system `PATH`:
 
 ## Building it yourself
 
-```
-build_exe.bat
-```
+All build tooling lives in `release/build/`. Each script builds a
+PyInstaller **onedir** app (a folder, not a single self-extracting exe,
+so it starts up instantly regardless of how much is bundled) using
+`assets/barkbark2.ico` as the icon, then cleans up its own intermediate
+files afterward. Drop `ffmpeg.exe`/`ffprobe.exe` into `release/build/`
+before running any of them to have ffmpeg bundled in automatically;
+otherwise the built app falls back to requiring them on `PATH`.
 
-Builds a PyInstaller **onedir** app to `dist\BBVideoCutter\` — a folder,
-not a single self-extracting exe, so it starts up instantly regardless
-of how much is bundled. Drop `ffmpeg.exe` and `ffprobe.exe` in the same
-folder as `build_exe.bat` before running it to have them bundled in
-automatically; otherwise the built app falls back to requiring them on
-`PATH`, same as running from source.
+- `release/build/build_exe.bat` — quick onedir build for testing, output
+  stays at `release/build/dist/BBVideoCutter/`
+- `release/build/build_setup.bat` — builds the installer with
+  [Inno Setup](https://jrsoftware.org/isinfo.php) (`installer.iss`),
+  copies the result to `release/BBVideoCutter-Setup.exe`
+- `release/build/build_portable.bat` — zips the onedir build, copies the
+  result to `release/BBVideoCutter-Portable.zip`
 
-To turn that output into a real installer, package `dist\BBVideoCutter\`
-with [Inno Setup](https://jrsoftware.org/isinfo.php) (installs to Program
-Files or per-user, Start Menu shortcut, uninstaller). To make a portable
-zip instead, just zip the `dist\BBVideoCutter\` folder as-is.
+## License
+
+[MIT](LICENSE) — do what you want with it, just keep the copyright
+notice.
 
 ## Credits
 

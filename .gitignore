@@ -2,23 +2,23 @@
 __pycache__/
 *.pyc
 
-# PyInstaller build output (regenerate via build_exe.bat)
-build/
-dist/
-*.spec
+# PyInstaller/Inno Setup byproducts, scoped to inside release/build/ so
+# this doesn't accidentally match release/build/ itself (that folder
+# holds the real, tracked build scripts)
+release/build/build/
+release/build/dist/
+release/build/*.spec
+release/build/installer_output/
 
-# Inno Setup output
-installer_output/
-
-# Built distributables -- regenerate from source, or publish as GitHub
-# Releases instead of tracking in git
-BBVideoCutter-Setup.exe
-BBVideoCutter-Portable.zip
+# Built distributables -- regenerate via release/build/*.bat, or publish
+# as GitHub Releases instead of tracking in git
+release/BBVideoCutter-Setup.exe
+release/BBVideoCutter-Portable.zip
 
 # ffmpeg/ffprobe binaries used only for bundling into the build, not part
 # of the source itself
-ffmpeg.exe
-ffprobe.exe
+release/build/ffmpeg.exe
+release/build/ffprobe.exe
 
 # Local tooling config
 .claude/
