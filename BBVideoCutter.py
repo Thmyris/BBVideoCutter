@@ -39,21 +39,28 @@ a hard technical limit of stream-copy joining, not a bug here). Goes
 through an MPEG-TS intermediate step rather than feeding the files
 straight into an MP4 concat, to avoid a well-known bug where playback
 freezes on a frame while audio keeps playing after the first file ends.
+The list stays editable while combining: files removed before their turn
+are skipped, files added mid-run are included.
 
 Bulk Cut tab
 ------------
 Batch version of the Cut tab: drop in files whose names contain one or
 more cut ranges (e.g. "clip [00.00.00-00.00.17].mp4") and cut them all in
-one pass, using whichever of the three cut modes is selected.
+one pass, using whichever of the three cut modes is selected. Works as a
+live queue: rows added mid-run are picked up, rows removed before their
+turn are never processed. A file with several ranges produces
+name.cut1.<range>.ext, name.cut2.<range>.ext, and so on.
 
 Crop tab
 --------
 Visual crop editor with aspect-ratio presets -- widescreen (16:9, 16:10,
 21:9, 4:3, 1:1) and their vertical/portrait mirrors (9:16, 10:16, 9:21,
-3:4) for Shorts/Reels/TikTok-style crops. Arbitrary spatial cropping can't
-be done with stream copy, so this tab always re-encodes the video
-(GPU-accelerated when available) while copying the audio through
-untouched.
+3:4) for Shorts/Reels/TikTok-style crops. Dragging a corner keeps the
+selected ratio (the source's own ratio by default); Freeform lets it
+distort, and holding Shift/Ctrl/Alt in Freeform keeps the box's shape.
+Arbitrary spatial cropping can't be done with stream copy, so this tab
+always re-encodes the video (GPU-accelerated when available) while
+copying the audio through untouched.
 
 Audio tab
 ---------
@@ -63,7 +70,10 @@ stream-copied (untouched, lossless); only the audio is re-encoded, since
 mixing multiple tracks into one requires decoding them first.
 
 Every tab that saves a file has a "Save to current folder" checkbox that
-skips the save dialog and writes the output right next to the source.
+skips the save dialog and writes the output right next to the source. If
+that file already exists, the app asks whether to overwrite it or keep
+both (turn this off under Options). Long jobs show a percentage on the
+status bar.
 
 Requirements
 ------------
@@ -81,6 +91,7 @@ Run:
     python BBVideoCutter.py
 """
 
+import io
 import math
 import os
 import re
@@ -91,6 +102,7 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, filedialog, messagebox
 
 try:
@@ -438,6 +450,75 @@ else:
     SUBPROCESS_KWARGS = {}
 
 
+_PROGRESS_TIME_RE = re.compile(r"^out_time_(?:us|ms)=(\d+)$")
+
+
+def run_ffmpeg(cmd, total_sec=None, progress=None):
+    """Run an ffmpeg command, returning a CompletedProcess with text stdout/
+    stderr like subprocess.run(capture_output=True, text=True).
+
+    If `progress` is given along with the expected output duration
+    (`total_sec`), ffmpeg's machine-readable -progress stream is parsed and
+    progress(fraction) is called from this (worker) thread as it runs.
+    Output is decoded as UTF-8 with replacement so a filename that isn't
+    valid in the system codepage can't crash the read."""
+    if progress is None or not total_sec or total_sec <= 0:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **SUBPROCESS_KWARGS,
+        )
+
+    full_cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    proc = subprocess.Popen(
+        full_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", **SUBPROCESS_KWARGS,
+    )
+    # stderr must be drained concurrently, or ffmpeg blocks once the pipe
+    # buffer fills while this thread is busy reading stdout.
+    stderr_chunks = []
+    drain = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    drain.start()
+    for line in proc.stdout:
+        m = _PROGRESS_TIME_RE.match(line.strip())
+        if m:
+            progress(min(1.0, int(m.group(1)) / 1_000_000 / total_sec))
+    proc.wait()
+    drain.join()
+    return subprocess.CompletedProcess(full_cmd, proc.returncode, "", "".join(stderr_chunks))
+
+
+def sub_progress(progress, lo, hi):
+    """Map a stage's own 0..1 progress onto the lo..hi slice of an overall
+    job's progress. Returns None if there's no overall callback."""
+    if progress is None:
+        return None
+    return lambda frac: progress(lo + (hi - lo) * max(0.0, min(1.0, frac)))
+
+
+def unique_output_path(path: str) -> str:
+    """First "name (2).ext", "name (3).ext", ... that doesn't exist yet."""
+    root, ext = os.path.splitext(path)
+    n = 2
+    while True:
+        candidate = f"{root} ({n}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
+def probe_duration(ffprobe_exe: str, path: str):
+    """Container duration in seconds, or None if it can't be read."""
+    try:
+        result = subprocess.run(
+            [ffprobe_exe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30, **SUBPROCESS_KWARGS,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
 _HW_ENCODER_CACHE = {}
 
 
@@ -749,6 +830,9 @@ class LosslessVideoApp(_BaseTk):
         self.resize_time_sec = 0.0
         self.resize_zoom = 1.0            # 1.0 = fit-to-canvas; higher = zoomed in
         self.resize_entry_vars = {}       # "x0"/"y0"/"x1"/"y1" -> tk.StringVar
+        self.resize_aspect_lock = None    # (w, h) ratio corner drags keep, or None = Freeform
+        self.resize_aspect_key = None     # which ratio button is active: "16:9", "original", "freeform"...
+        self.resize_aspect_buttons = {}
         self._resize_bg_image_id = None   # cached canvas image item (perf)
         self._resize_bg_cache_key = None  # (frame id, dw, dh) the cached photo was built for
 
@@ -770,6 +854,12 @@ class LosslessVideoApp(_BaseTk):
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
 
         self.combine_files = []          # list of paths queued to join
+
+        self.bulk_items = []             # list of dicts: path, ranges, status, iid
+        self._bulk_lock = threading.Lock()
+        self._bulk_running = False
+
+        self.warn_overwrite_var = tk.BooleanVar(value=True)
 
         self._build_menu()
 
@@ -840,6 +930,13 @@ class LosslessVideoApp(_BaseTk):
         file_menu.add_command(label="Exit", command=self._on_app_close)
         menubar.add_cascade(label="File", menu=file_menu)
 
+        options_menu = tk.Menu(menubar, tearoff=0)
+        options_menu.add_checkbutton(
+            label="Warn before overwriting existing files",
+            variable=self.warn_overwrite_var,
+        )
+        menubar.add_cascade(label="Options", menu=options_menu)
+
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="About", command=self._show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -860,6 +957,86 @@ class LosslessVideoApp(_BaseTk):
             "arbitrary spatial cropping requires video re-encoding.\n\n"
             "Built with Python by Thmyris.",
         )
+
+    # ====================================================================
+    # Shared: status-bar progress + overwrite protection
+    # ====================================================================
+    def _progress_reporter(self, label):
+        """Returns a thread-safe callback(fraction) that shows progress on
+        the status bar. `label` is either a prefix string ("Cropping...")
+        or a callable(percent) -> full status text. Only repaints when the
+        whole-number percentage actually changes."""
+        last = {"pct": None}
+
+        def report(frac):
+            pct = int(max(0.0, min(1.0, frac)) * 100)
+            if pct == last["pct"]:
+                return
+            last["pct"] = pct
+            text = label(pct) if callable(label) else f"{label} {pct}%"
+            self.after(0, lambda: self.status_lbl.config(text=text))
+
+        return report
+
+    def _ask_overwrite(self, existing_paths, alt_hint=None):
+        """Main thread only. Asks what to do about output files that
+        already exist. Returns "overwrite", "rename", or None (cancel)."""
+        if len(existing_paths) == 1:
+            p = existing_paths[0]
+            what = f'"{os.path.basename(p)}" already exists in:\n{os.path.dirname(p)}'
+        else:
+            names = "\n".join(os.path.basename(p) for p in existing_paths[:8])
+            more = f"\n...and {len(existing_paths) - 8} more" if len(existing_paths) > 8 else ""
+            what = f"{len(existing_paths)} output files already exist:\n{names}{more}"
+        keep_both = f' (save as "{alt_hint}")' if alt_hint else " (save with a (2), (3)... suffix)"
+        answer = messagebox.askyesnocancel(
+            "File already exists",
+            f"{what}\n\n"
+            f"Yes = overwrite\n"
+            f"No = keep both{keep_both}\n"
+            f"Cancel = don't save\n\n"
+            f"(This warning can be turned off under Options.)",
+            icon="warning",
+        )
+        if answer is None:
+            return None
+        return "overwrite" if answer else "rename"
+
+    def _check_output_path(self, out_path, source_paths, prompt_overwrite=True):
+        """Main thread only. Validates a single output path before a save.
+        Returns the path to write to (possibly renamed to keep both files),
+        or None if the save should be cancelled."""
+        out_abs = os.path.normcase(os.path.abspath(out_path))
+        for src in source_paths:
+            if out_abs == os.path.normcase(os.path.abspath(src)):
+                messagebox.showerror(
+                    "Can't overwrite the source",
+                    "The output file would replace one of the videos being "
+                    "read. Choose a different name.",
+                )
+                return None
+        if prompt_overwrite and self.warn_overwrite_var.get() and os.path.exists(out_path):
+            alt = unique_output_path(out_path)
+            choice = self._ask_overwrite([out_path], alt_hint=os.path.basename(alt))
+            if choice is None:
+                return None
+            if choice == "rename":
+                return alt
+        return out_path
+
+    def _ask_overwrite_from_worker(self, existing_paths):
+        """Worker thread only: shows _ask_overwrite on the main thread and
+        blocks until the user answers."""
+        done = threading.Event()
+        box = {}
+
+        def ask():
+            box["answer"] = self._ask_overwrite(existing_paths)
+            done.set()
+
+        self.after(0, ask)
+        done.wait()
+        return box["answer"]
 
     # ====================================================================
     # CUT TAB
@@ -1277,7 +1454,8 @@ class LosslessVideoApp(_BaseTk):
         suffix = format_clip_suffix(self.start_sec, self.end_sec)
         default_name = f"{base_name}.CUT.{suffix}{ext}"
 
-        if self.save_to_source_var.get():
+        from_dialog = not self.save_to_source_var.get()
+        if not from_dialog:
             # Save straight into the source video's folder, no dialog.
             out_path = os.path.join(source_dir, default_name)
         else:
@@ -1288,12 +1466,16 @@ class LosslessVideoApp(_BaseTk):
             )
             if not out_path:
                 return
+        # The native save dialog already asks before replacing a file.
+        out_path = self._check_output_path(out_path, [self.input_path], prompt_overwrite=not from_dialog)
+        if not out_path:
+            return
 
         cut_mode = self.cut_mode_var.get()
         search_window = self._get_search_window_value(self.cut_search_window_var)
 
         self._set_cut_controls_enabled(False)
-        self.status_lbl.config(text="Cutting...")
+        self.status_lbl.config(text="Cutting... 0%")
         threading.Thread(
             target=self._run_cut, args=(out_path, cut_mode, search_window), daemon=True
         ).start()
@@ -1303,10 +1485,11 @@ class LosslessVideoApp(_BaseTk):
             result = self._lossless_cut(
                 self.input_path, self.start_sec, self.end_sec, out_path,
                 mode=cut_mode, search_window=search_window,
+                progress=self._progress_reporter("Cutting..."),
             )
             self.after(0, lambda: self._cut_done(out_path, True, result))
         except Exception as exc:
-            self.after(0, lambda: self._cut_done(str(exc), False, None))
+            self.after(0, lambda e=str(exc): self._cut_done(e, False, None))
 
     # ---- frame-accurate lossless cutting ---------------------------------
     # A pure stream copy (-c copy) can only ever *start* output at a
@@ -1342,7 +1525,8 @@ class LosslessVideoApp(_BaseTk):
                 pass
         return sorted(times)
 
-    def _ffmpeg_stream_copy_cut(self, ffmpeg, input_path, start_sec, end_sec, out_path):
+    def _ffmpeg_stream_copy_cut(self, ffmpeg, input_path, start_sec, end_sec, out_path,
+                                progress=None):
         # No -avoid_negative_ts here: on a multi-audio-track source, "make_zero"
         # was found (empirically, while building this) to pull in ~0.5s of
         # extra lead-in video to keep every stream's zero point aligned, even
@@ -1355,12 +1539,12 @@ class LosslessVideoApp(_BaseTk):
             "-to", seconds_to_ffmpeg_time(end_sec), "-i", input_path,
             "-c", "copy", out_path,
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+        proc = run_ffmpeg(cmd, end_sec - start_sec, progress)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:])
 
     def _ffmpeg_reencode_segment(self, ffmpeg, input_path, start_sec, end_sec,
-                                  out_path, encoder_args, to_ts=False):
+                                  out_path, encoder_args, to_ts=False, progress=None):
         # Every call here encodes a short segment (always under one keyframe
         # interval, by construction -- that's the whole point of only
         # re-encoding the boundary). With B-frames enabled, the encoder's
@@ -1403,7 +1587,8 @@ class LosslessVideoApp(_BaseTk):
             cmd += ["-f", "mpegts", out_path] if to_ts else ["-movflags", "+faststart", out_path]
             return cmd
 
-        proc = subprocess.run(build(encoder_args), capture_output=True, text=True, **SUBPROCESS_KWARGS)
+        duration = end_sec - start_sec
+        proc = run_ffmpeg(build(encoder_args), duration, progress)
         if proc.returncode != 0 and encoder_args[1] not in ("libx264", "libx265"):
             # Fall back to the software encoder in the SAME codec family as
             # what was requested -- falling back to libx264 unconditionally
@@ -1415,11 +1600,12 @@ class LosslessVideoApp(_BaseTk):
                 ["-c:v", "libx265", "-preset", "veryfast", "-crf", "20"] if is_hevc
                 else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
             )
-            proc = subprocess.run(build(software_args), capture_output=True, text=True, **SUBPROCESS_KWARGS)
+            proc = run_ffmpeg(build(software_args), duration, progress)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:])
 
-    def _ffmpeg_copy_segment_to_ts(self, ffmpeg, input_path, start_sec, end_sec, out_path, video_bsf):
+    def _ffmpeg_copy_segment_to_ts(self, ffmpeg, input_path, start_sec, end_sec, out_path, video_bsf,
+                                    progress=None):
         # start_sec here is always an exact probed keyframe timestamp (the
         # sole caller passes kf_at_start) -- use the ceil-rounding formatter
         # so -ss can't round it down below the real keyframe pts and snap
@@ -1433,11 +1619,12 @@ class LosslessVideoApp(_BaseTk):
         if video_bsf:
             cmd += ["-bsf:v", video_bsf]
         cmd += ["-f", "mpegts", out_path]
-        proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+        proc = run_ffmpeg(cmd, end_sec - start_sec, progress)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:])
 
-    def _concat_ts_segments(self, ffmpeg, segments, out_path, audio_bsf):
+    def _concat_ts_segments(self, ffmpeg, segments, out_path, audio_bsf,
+                            total_sec=None, progress=None):
         # Uses the concat *demuxer* (-f concat), not the concat: protocol.
         # The protocol is a literal byte-level join that assumes the pieces
         # already share one continuous timestamp timeline -- they don't
@@ -1464,14 +1651,14 @@ class LosslessVideoApp(_BaseTk):
         if audio_bsf:
             cmd += ["-bsf:a", audio_bsf]
         cmd += ["-movflags", "+faststart", out_path]
-        proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+        proc = run_ffmpeg(cmd, total_sec, progress)
         if proc.returncode != 0:
             raise RuntimeError(
                 "Couldn't join the cut segments back together.\n\n" + proc.stderr[-2000:]
             )
 
     def _lossless_cut(self, input_path, start_sec, end_sec, out_path,
-                       mode="reencode", search_window=8.0):
+                       mode="reencode", search_window=8.0, progress=None):
         """Cut [start_sec, end_sec) out of input_path into out_path.
         Raises RuntimeError on failure. Returns a dict describing what
         actually happened, for status/notification text:
@@ -1499,28 +1686,29 @@ class LosslessVideoApp(_BaseTk):
                         "reencode" so a cut never just fails outright.
         `search_window` is how far before/after the requested point to look
         for a keyframe (seconds) -- used by both "reencode" and "editlist".
+        `progress`, if given, is called with 0..1 as the cut advances.
         """
         ffmpeg = find_exe("ffmpeg")
         ffprobe = find_exe("ffprobe")
 
         if mode == "classic":
-            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path)
+            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path, progress)
             return {"mode": "classic", "encoder": None, "reencoded_sec": 0.0, "verified": True}
 
         if mode == "editlist":
             result = self._editlist_cut(
-                ffmpeg, ffprobe, input_path, start_sec, end_sec, out_path, search_window
+                ffmpeg, ffprobe, input_path, start_sec, end_sec, out_path, search_window, progress
             )
             if result is not None:
                 return result
             # Not safely possible for this cut -- fall through to smart-cut.
 
         return self._reencode_mode_cut(
-            ffmpeg, ffprobe, input_path, start_sec, end_sec, out_path, search_window
+            ffmpeg, ffprobe, input_path, start_sec, end_sec, out_path, search_window, progress
         )
 
     def _editlist_cut(self, ffmpeg, ffprobe, input_path, start_sec, end_sec,
-                       out_path, search_window):
+                       out_path, search_window, progress=None):
         """Try the edit-list trim (see _lossless_cut's docstring). Returns
         a result dict on success, or None if it's not safely possible for
         this cut -- the caller falls back to the smart-cut re-encode path."""
@@ -1531,10 +1719,11 @@ class LosslessVideoApp(_BaseTk):
         if kf_before_start is None or kf_after_end is None:
             return None
 
-        def run(cmd):
-            proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
-            return proc.returncode == 0
+        def run(cmd, total=None, stage=None):
+            return run_ffmpeg(cmd, total, stage).returncode == 0
 
+        wide_sec = kf_after_end - kf_before_start
+        clip_sec = end_sec - start_sec
         tmpdir = tempfile.mkdtemp(prefix="lossless_editlist_")
         try:
             # kf_before_start is an exact probed keyframe -- ceil-round it
@@ -1548,7 +1737,7 @@ class LosslessVideoApp(_BaseTk):
                 ffmpeg, "-y", "-ss", seconds_to_ffmpeg_time_keyframe_ss(kf_before_start),
                 "-to", seconds_to_ffmpeg_time(kf_after_end), "-i", input_path,
                 "-map", "0:v:0", "-c", "copy", video_wide,
-            ]):
+            ], wide_sec, sub_progress(progress, 0.0, 0.5)):
                 return None
 
             has_audio = self._probe_codec(ffprobe, input_path, "a") is not None
@@ -1558,19 +1747,19 @@ class LosslessVideoApp(_BaseTk):
                     ffmpeg, "-y", "-ss", seconds_to_ffmpeg_time(start_sec),
                     "-to", seconds_to_ffmpeg_time(end_sec), "-i", input_path,
                     "-map", "0:a", "-c", "copy", audio_accurate,
-                ]):
+                ], clip_sec, sub_progress(progress, 0.5, 0.7)):
                     return None
                 if not run([
                     ffmpeg, "-y", "-i", video_wide, "-i", audio_accurate,
                     "-map", "0:v:0", "-map", "1:a",
                     "-c", "copy", "-movflags", "+faststart", out_path,
-                ]):
+                ], wide_sec, sub_progress(progress, 0.7, 1.0)):
                     return None
             else:
                 if not run([
                     ffmpeg, "-y", "-i", video_wide, "-c", "copy",
                     "-movflags", "+faststart", out_path,
-                ]):
+                ], wide_sec, sub_progress(progress, 0.5, 1.0)):
                     return None
 
             try:
@@ -1606,7 +1795,7 @@ class LosslessVideoApp(_BaseTk):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _reencode_mode_cut(self, ffmpeg, ffprobe, input_path, start_sec, end_sec,
-                            out_path, search_window=8.0):
+                            out_path, search_window=8.0, progress=None):
         kf_near_start = self._probe_keyframes_near(ffprobe, input_path, start_sec, pad=search_window)
         kf_at_start = next(
             (t for t in kf_near_start if t >= start_sec - KEYFRAME_ALIGN_TOLERANCE), None
@@ -1620,14 +1809,14 @@ class LosslessVideoApp(_BaseTk):
             # No keyframe found in the probed window (extremely sparse GOPs,
             # or right at the very start/end of the file) -- fall back to a
             # plain copy rather than act on incomplete data.
-            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path)
+            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path, progress)
             return {"mode": "copy", "encoder": None, "reencoded_sec": 0.0, "verified": False}
 
         start_aligned = abs(kf_at_start - start_sec) <= KEYFRAME_ALIGN_TOLERANCE
         end_aligned = abs(kf_before_end - end_sec) <= KEYFRAME_ALIGN_TOLERANCE
 
         if start_aligned and end_aligned:
-            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path)
+            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path, progress)
             return {"mode": "copy", "encoder": None, "reencoded_sec": 0.0, "verified": True}
 
         # Re-encode with an encoder that matches the source's own video
@@ -1642,7 +1831,7 @@ class LosslessVideoApp(_BaseTk):
             # No room for a copied middle -- the whole requested range fits
             # inside one GOP. Re-encode it in a single pass.
             self._ffmpeg_reencode_segment(
-                ffmpeg, input_path, start_sec, end_sec, out_path, encoder_args
+                ffmpeg, input_path, start_sec, end_sec, out_path, encoder_args, progress=progress
             )
             return {
                 "mode": "full", "encoder": encoder_label,
@@ -1653,6 +1842,25 @@ class LosslessVideoApp(_BaseTk):
         video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
         audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
 
+        # Rough relative cost of each step, used only to split the progress
+        # bar: head/tail re-encodes are tiny but slow per second, the copied
+        # middle and the final join each pass over (almost) the whole clip.
+        weights = {"middle": 3.0, "concat": 2.0}
+        if not start_aligned:
+            weights["head"] = 1.0
+        if not end_aligned:
+            weights["tail"] = 1.0
+        stage_bounds = {}
+        acc = 0.0
+        total_weight = sum(weights.values())
+        for name in ("head", "middle", "tail", "concat"):
+            if name in weights:
+                stage_bounds[name] = (acc / total_weight, (acc + weights[name]) / total_weight)
+                acc += weights[name]
+
+        def stage(name):
+            return sub_progress(progress, *stage_bounds[name])
+
         reencoded_sec = 0.0
         tmpdir = tempfile.mkdtemp(prefix="lossless_cut_")
         try:
@@ -1661,14 +1869,15 @@ class LosslessVideoApp(_BaseTk):
                 head_path = os.path.join(tmpdir, "head.ts")
                 self._ffmpeg_reencode_segment(
                     ffmpeg, input_path, start_sec, kf_at_start, head_path,
-                    encoder_args, to_ts=True
+                    encoder_args, to_ts=True, progress=stage("head"),
                 )
                 segments.append(head_path)
                 reencoded_sec += kf_at_start - start_sec
 
             middle_path = os.path.join(tmpdir, "middle.ts")
             self._ffmpeg_copy_segment_to_ts(
-                ffmpeg, input_path, kf_at_start, kf_before_end, middle_path, video_bsf
+                ffmpeg, input_path, kf_at_start, kf_before_end, middle_path, video_bsf,
+                progress=stage("middle"),
             )
             segments.append(middle_path)
 
@@ -1676,12 +1885,15 @@ class LosslessVideoApp(_BaseTk):
                 tail_path = os.path.join(tmpdir, "tail.ts")
                 self._ffmpeg_reencode_segment(
                     ffmpeg, input_path, kf_before_end, end_sec, tail_path,
-                    encoder_args, to_ts=True
+                    encoder_args, to_ts=True, progress=stage("tail"),
                 )
                 segments.append(tail_path)
                 reencoded_sec += end_sec - kf_before_end
 
-            self._concat_ts_segments(ffmpeg, segments, out_path, audio_bsf)
+            self._concat_ts_segments(
+                ffmpeg, segments, out_path, audio_bsf,
+                total_sec=end_sec - start_sec, progress=stage("concat"),
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1773,6 +1985,14 @@ class LosslessVideoApp(_BaseTk):
         )
 
         self.combine_thumb_cache = {}    # path -> PhotoImage
+        self.combine_thumb_pending = set()  # paths with an extraction already queued
+        self.combine_thumb_labels = {}   # path -> thumbnail Labels in the current rows
+        # Few workers on purpose: decoding a frame from several large videos
+        # at once just makes them all fight over disk/CPU and finish later.
+        self.combine_thumb_pool = ThreadPoolExecutor(max_workers=2)
+        # Blank stand-in so a row's thumbnail slot is sized in pixels (a
+        # Label with no image measures width/height in text characters).
+        self.combine_thumb_blank = tk.PhotoImage(width=self.THUMB_SIZE[0], height=self.THUMB_SIZE[1])
         self.combine_selected_index = None
         self._drag_active = False
         self._drag_index = None
@@ -1814,6 +2034,7 @@ class LosslessVideoApp(_BaseTk):
     def _rebuild_combine_rows(self):
         for child in self.combine_inner.winfo_children():
             child.destroy()
+        self.combine_thumb_labels = {}
 
         if not self.combine_files:
             placeholder = tk.Label(
@@ -1831,13 +2052,14 @@ class LosslessVideoApp(_BaseTk):
             row.pack(fill="x")
             row.pack_propagate(False)
 
-            thumb_lbl = tk.Label(row, bg="#000000", width=self.THUMB_SIZE[0],
-                                  height=self.THUMB_SIZE[1])
+            thumb_lbl = tk.Label(row, bg="#000000", image=self.combine_thumb_blank,
+                                  width=self.THUMB_SIZE[0], height=self.THUMB_SIZE[1])
             cached = self.combine_thumb_cache.get(path)
-            if cached is not None:
+            if cached:
                 thumb_lbl.config(image=cached)
                 thumb_lbl.image = cached
-            else:
+            elif cached is None:
+                self.combine_thumb_labels.setdefault(path, []).append(thumb_lbl)
                 self._request_thumbnail(path)
             thumb_lbl.pack(side="left", padx=8, pady=6)
 
@@ -1850,29 +2072,48 @@ class LosslessVideoApp(_BaseTk):
                 widget.bind("<ButtonPress-1>", lambda e, idx=i: self._combine_drag_start(e, idx))
 
     def _request_thumbnail(self, path):
-        threading.Thread(target=self._extract_thumbnail, args=(path,), daemon=True).start()
+        # Every row rebuild (select, drag, add, each finished thumbnail...)
+        # used to start a brand new extraction for every row that didn't
+        # have its thumbnail yet, so the same files were decoded over and
+        # over in parallel -- the main reason thumbnails took so long.
+        if not PIL_AVAILABLE or path in self.combine_thumb_pending:
+            return
+        self.combine_thumb_pending.add(path)
+        self.combine_thumb_pool.submit(self._extract_thumbnail, path)
 
     def _extract_thumbnail(self, path):
-        if not PIL_AVAILABLE:
-            return
+        img = None
         try:
             ffmpeg = find_exe("ffmpeg")
-            tmp = os.path.join(tempfile.gettempdir(), f"_combine_thumb_{abs(hash(path))}.jpg")
-            cmd = [ffmpeg, "-y", "-ss", "00:00:00", "-i", path, "-frames:v", "1",
-                   "-vf", f"scale={self.THUMB_SIZE[0] * 2}:-1", "-q:v", "5", tmp]
-            subprocess.run(cmd, capture_output=True, check=True, **SUBPROCESS_KWARGS)
-            img = Image.open(tmp).convert("RGB")
+            # -skip_frame nokey: only keyframes get decoded (the first frame
+            # always is one), and the JPEG comes back over a pipe instead of
+            # through a temp file.
+            cmd = [ffmpeg, "-v", "error", "-skip_frame", "nokey", "-i", path,
+                   "-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", "1",
+                   "-vf", f"scale={self.THUMB_SIZE[0] * 2}:-2:flags=fast_bilinear",
+                   "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "5", "pipe:1"]
+            proc = subprocess.run(cmd, capture_output=True, check=True, timeout=60,
+                                  **SUBPROCESS_KWARGS)
+            img = Image.open(io.BytesIO(proc.stdout)).convert("RGB")
             img.thumbnail(self.THUMB_SIZE)
-            img.load()
-            self.after(0, lambda: self._on_thumbnail_ready(path, img))
         except Exception:
             pass  # thumbnail is a nice-to-have; failures are silent
+        self.after(0, lambda: self._on_thumbnail_ready(path, img))
 
     def _on_thumbnail_ready(self, path, pil_img):
+        self.combine_thumb_pending.discard(path)
+        if pil_img is None:
+            # Remember the failure so rebuilds don't keep retrying it.
+            self.combine_thumb_cache[path] = ""
+            return
         photo = ImageTk.PhotoImage(pil_img)
         self.combine_thumb_cache[path] = photo
-        if path in self.combine_files:
-            self._rebuild_combine_rows()
+        # Patch just the rows showing this file instead of rebuilding the
+        # whole list.
+        for lbl in self.combine_thumb_labels.pop(path, []):
+            if lbl.winfo_exists():
+                lbl.config(image=photo)
+                lbl.image = photo
 
     # ---- selection & drag-to-reorder ------------------------------------
     def _combine_select(self, idx):
@@ -1952,7 +2193,8 @@ class LosslessVideoApp(_BaseTk):
         first_ext = os.path.splitext(first_path)[1]
         default_name = f"{first_base}.COMBINED{first_ext}"
 
-        if self.combine_save_to_source_var.get():
+        from_dialog = not self.combine_save_to_source_var.get()
+        if not from_dialog:
             out_path = os.path.join(first_dir, default_name)
         else:
             out_path = filedialog.asksaveasfilename(
@@ -1962,9 +2204,12 @@ class LosslessVideoApp(_BaseTk):
             )
             if not out_path:
                 return
+        out_path = self._check_output_path(out_path, self.combine_files, prompt_overwrite=not from_dialog)
+        if not out_path:
+            return
 
         self.combine_btn.config(state="disabled")
-        self.status_lbl.config(text="Combining (lossless, no re-encode)...")
+        self.status_lbl.config(text="Combining... 0%")
         threading.Thread(target=self._run_combine, args=(out_path,), daemon=True).start()
 
     def _probe_codec(self, ffprobe_exe, path, stream_kind):
@@ -1990,39 +2235,88 @@ class LosslessVideoApp(_BaseTk):
         intermediate format doesn't carry, so this route avoids the problem
         entirely while remaining 100% stream-copy (no re-encoding, so still
         lossless -- only the container packaging changes, twice).
+
+        The file list stays editable while this runs and is re-read before
+        every step: a file removed before its turn is skipped, a file added
+        mid-run is included, and the final join uses the list's order at
+        that moment.
         """
         tmpdir = None
         try:
             ffmpeg = find_exe("ffmpeg")
             ffprobe = find_exe("ffprobe")
 
-            video_codec = self._probe_codec(ffprobe, self.combine_files[0], "v")
-            audio_codec = self._probe_codec(ffprobe, self.combine_files[0], "a")
-            video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
-            audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
-
             tmpdir = tempfile.mkdtemp(prefix="lossless_combine_")
-            ts_paths = []
-            for i, p in enumerate(self.combine_files):
-                ts_path = os.path.join(tmpdir, f"part_{i}.ts")
+            prepared = {}    # path -> (ts path, duration)
+            durations = {}   # path -> duration (None if unreadable)
+            audio_codec = None
+
+            def overall_fraction(current_path, current_frac):
+                # Every file costs its own duration twice: once to repackage
+                # it, once more during the final join.
+                files = list(self.combine_files)
+                for p in files:
+                    if p not in durations:
+                        durations[p] = probe_duration(ffprobe, p) or 1.0
+                total = 2 * sum(durations[p] for p in files) or 1.0
+                done = sum(durations[p] for p in files if p in prepared)
+                if current_path is not None:
+                    done += durations.get(current_path, 1.0) * current_frac
+                return done / total
+
+            while True:
+                files = list(self.combine_files)
+                remaining = list(dict.fromkeys(p for p in files if p not in prepared))
+                if not remaining:
+                    break
+                p = remaining[0]
+                step = len(prepared) + 1
+                step_total = len(prepared) + len(remaining)
+                report = self._progress_reporter(
+                    lambda pct, s=step, n=step_total: f"Combining {s}/{n}... {pct}%"
+                )
+                if audio_codec is None:
+                    audio_codec = self._probe_codec(ffprobe, p, "a") or ""
+                video_codec = self._probe_codec(ffprobe, p, "v")
+                video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
+
+                ts_path = os.path.join(tmpdir, f"part_{len(prepared)}.ts")
                 cmd = [ffmpeg, "-y", "-i", p, "-c", "copy"]
                 if video_bsf:
                     cmd += ["-bsf:v", video_bsf]
                 cmd += ["-f", "mpegts", ts_path]
-                proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+                overall_fraction(p, 0.0)  # makes sure p's duration is known
+                proc = run_ffmpeg(
+                    cmd, durations[p],
+                    lambda f, p=p, report=report: report(overall_fraction(p, f)),
+                )
                 if proc.returncode != 0:
                     raise RuntimeError(
                         f"Failed to prepare '{os.path.basename(p)}' for combining:\n\n"
                         + proc.stderr[-1500:]
                     )
-                ts_paths.append(ts_path)
+                prepared[p] = (ts_path, durations[p])
 
+            final_files = list(self.combine_files)
+            if len(final_files) < 2:
+                raise RuntimeError(
+                    "Fewer than 2 videos were left in the list, so nothing was combined."
+                )
+            audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
+            base_frac = overall_fraction(None, 0.0)
+            report = self._progress_reporter(
+                lambda pct, n=len(final_files): f"Combining: joining {n} files... {pct}%"
+            )
+            ts_paths = [prepared[p][0] for p in final_files]
             concat_arg = "concat:" + "|".join(ts_paths)
             cmd = [ffmpeg, "-y", "-i", concat_arg, "-c", "copy"]
             if audio_bsf:
                 cmd += ["-bsf:a", audio_bsf]
             cmd += [out_path]
-            proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+            proc = run_ffmpeg(
+                cmd, sum(prepared[p][1] for p in final_files),
+                lambda f: report(base_frac + (1.0 - base_frac) * f),
+            )
             if proc.returncode != 0:
                 raise RuntimeError(
                     "ffmpeg couldn't stream-copy these files together -- this "
@@ -2031,7 +2325,7 @@ class LosslessVideoApp(_BaseTk):
                 )
             self.after(0, lambda: self._combine_done(out_path, True))
         except Exception as exc:
-            self.after(0, lambda: self._combine_done(str(exc), False))
+            self.after(0, lambda e=str(exc): self._combine_done(e, False))
         finally:
             if tmpdir and os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2120,8 +2414,6 @@ class LosslessVideoApp(_BaseTk):
         )
         self.bulk_btn.grid(row=4, column=0, sticky="ew", padx=3, pady=(4, 6))
 
-        self.bulk_items = []  # list of dicts: path, start, end, status, iid
-
         self.bulk_tree.drop_target_register(DND_FILES)
         self.bulk_tree.dnd_bind("<<Drop>>", self._on_drop_bulk)
 
@@ -2166,28 +2458,54 @@ class LosslessVideoApp(_BaseTk):
                     )
                     status = "Pending"
 
-            iid = self.bulk_tree.insert(
-                "", "end", text=os.path.basename(p),
-                values=(range_txt, length_txt, status),
-            )
-            self.bulk_items.append({
-                "path": p, "ranges": valid_ranges,
-                "status": status, "iid": iid,
-            })
+            with self._bulk_lock:
+                # Added while a run is going: join its queue straight away.
+                if status == "Pending" and self._bulk_running:
+                    status = "Queued"
+                iid = self.bulk_tree.insert(
+                    "", "end", text=os.path.basename(p),
+                    values=(range_txt, length_txt, status),
+                )
+                self.bulk_items.append({
+                    "path": p, "ranges": valid_ranges,
+                    "status": status, "iid": iid,
+                })
 
+    # Removing a queued row takes it out of bulk_items, which is the list the
+    # running worker picks its next item from -- so it is never processed.
+    # A row that's already processing finishes its current ffmpeg run.
     def _bulk_remove_selected(self):
         sel = self.bulk_tree.selection()
         if not sel:
             return
         sel_set = set(sel)
-        for iid in sel:
-            self.bulk_tree.delete(iid)
-        self.bulk_items = [it for it in self.bulk_items if it["iid"] not in sel_set]
+        with self._bulk_lock:
+            for iid in sel:
+                self.bulk_tree.delete(iid)
+            self.bulk_items = [it for it in self.bulk_items if it["iid"] not in sel_set]
 
     def _bulk_clear(self):
-        for iid in self.bulk_tree.get_children():
-            self.bulk_tree.delete(iid)
-        self.bulk_items = []
+        with self._bulk_lock:
+            for iid in self.bulk_tree.get_children():
+                self.bulk_tree.delete(iid)
+            self.bulk_items = []
+
+    @staticmethod
+    def _bulk_output_paths(item, output_dir):
+        """Output path for each of an item's ranges: name.CUT.<range>.ext for
+        a single range, name.cut1.<range>.ext, name.cut2.<range>.ext... for
+        several."""
+        path = item["path"]
+        ranges = item["ranges"]
+        name_no_ext, ext = os.path.splitext(os.path.basename(path))
+        stripped_name = strip_bracket_from_name(name_no_ext)
+        dest_dir = output_dir or os.path.dirname(os.path.abspath(path))
+        outs = []
+        for idx, (start_sec, end_sec) in enumerate(ranges, 1):
+            tag = f"cut{idx}" if len(ranges) > 1 else "CUT"
+            suffix = format_clip_suffix(start_sec, end_sec)
+            outs.append(os.path.join(dest_dir, f"{stripped_name}.{tag}.{suffix}{ext}"))
+        return outs
 
     # ---- status helpers (always called back on the main thread via .after) --
     def _bulk_set_status(self, item, status_text):
@@ -2215,67 +2533,119 @@ class LosslessVideoApp(_BaseTk):
                 return
             output_dir = chosen
 
+        # Decide up front what to do about outputs that already exist, so the
+        # user is asked once instead of once per clip. None = nothing clashes
+        # yet; the worker asks later if a file added mid-run does clash.
+        warn_overwrite = self.warn_overwrite_var.get()
+        overwrite_policy = None if warn_overwrite else "overwrite"
+        if warn_overwrite:
+            existing = [
+                p for it in pending for p in self._bulk_output_paths(it, output_dir)
+                if os.path.exists(p)
+            ]
+            if existing:
+                overwrite_policy = self._ask_overwrite(existing)
+                if overwrite_policy is None:
+                    return
+
         cut_mode = self.bulk_cut_mode_var.get()
         search_window = self._get_search_window_value(self.bulk_cut_search_window_var)
 
+        with self._bulk_lock:
+            for it in pending:
+                it["status"] = "Queued"
+                if self.bulk_tree.exists(it["iid"]):
+                    self.bulk_tree.set(it["iid"], "status", "Queued")
+            self._bulk_running = True
+
         self.bulk_btn.config(state="disabled")
-        self.status_lbl.config(text=f"Bulk cutting {len(pending)} file(s)...")
+        self.status_lbl.config(text="Bulk cutting... 0%")
         threading.Thread(
-            target=self._run_bulk, args=(pending, output_dir, cut_mode, search_window), daemon=True
+            target=self._run_bulk,
+            args=(output_dir, cut_mode, search_window, overwrite_policy),
+            daemon=True,
         ).start()
 
-    def _run_bulk(self, items, output_dir, cut_mode, search_window):
-        try:
-            ffmpeg = find_exe("ffmpeg")
-        except Exception as exc:
-            reason = str(exc)
-            for it in items:
-                self.after(0, lambda it=it, r=reason: self._bulk_set_status(
-                    it, f"Failed: {r}"
-                ))
-            self.after(0, lambda: self.bulk_btn.config(state="normal"))
-            self.after(0, lambda: self.status_lbl.config(text="Bulk cut failed"))
-            return
+    def _run_bulk(self, output_dir, cut_mode, search_window, overwrite_policy):
+        """Works through bulk_items as a live queue: each round it takes the
+        first row still marked "Queued", so rows added mid-run are picked up
+        and rows removed before their turn are never processed."""
+        clips_ok = 0
+        clips_failed = 0
+        files_failed = 0
+        last_status = {"text": None}
 
-        completed = 0
-        failed = 0
+        def queued_clip_count():
+            with self._bulk_lock:
+                return sum(len(it["ranges"]) for it in self.bulk_items if it["status"] == "Queued")
 
-        for item in items:
-            self.after(0, lambda it=item: self._bulk_set_status(it, "Processing"))
+        def show_status(text):
+            if text != last_status["text"]:
+                last_status["text"] = text
+                self.after(0, lambda: self.status_lbl.config(text=text))
+
+        while True:
+            with self._bulk_lock:
+                item = next((it for it in self.bulk_items if it["status"] == "Queued"), None)
+                if item is None:
+                    self._bulk_running = False
+                    break
+                item["status"] = "Processing"
+
+            path = item["path"]
+            ranges = item["ranges"]
+            n_clips = len(ranges)
+            finished_before = clips_ok + clips_failed
+            generated = []
+            results = []
             try:
-                path = item["path"]
-                ranges = item["ranges"]
-                source_dir = os.path.dirname(os.path.abspath(path))
-                name_no_ext, ext = os.path.splitext(os.path.basename(path))
-                stripped_name = strip_bracket_from_name(name_no_ext)
-                dest_dir = output_dir if output_dir else source_dir
-
-                generated = []
-                results = []
-                for idx, (start_sec, end_sec) in enumerate(ranges, 1):
+                for idx, ((start_sec, end_sec), out_path) in enumerate(
+                    zip(ranges, self._bulk_output_paths(item, output_dir)), 1
+                ):
                     if end_sec <= start_sec:
                         raise RuntimeError(
                             f"Bracket {idx} has an end time that is not after its start time."
                         )
-
-                    suffix = format_clip_suffix(start_sec, end_sec)
-                    multi_suffix = f".{idx:02d}" if len(ranges) > 1 else ""
-                    out_name = f"{stripped_name}.CUT{multi_suffix}.{suffix}{ext}"
-                    out_path = os.path.join(dest_dir, out_name)
-
-                    # Avoid overwriting an existing output silently.
-                    if os.path.abspath(out_path) == os.path.abspath(path):
+                    if os.path.normcase(os.path.abspath(out_path)) == os.path.normcase(os.path.abspath(path)):
                         raise RuntimeError("Output path would overwrite the source video.")
 
+                    if os.path.exists(out_path):
+                        if overwrite_policy is None:
+                            overwrite_policy = self._ask_overwrite_from_worker([out_path]) or "skip"
+                        if overwrite_policy == "skip":
+                            raise RuntimeError(
+                                f"Skipped: {os.path.basename(out_path)} already exists."
+                            )
+                        if overwrite_policy == "rename":
+                            out_path = unique_output_path(out_path)
+
+                    item_status = f"Processing clip {idx}/{n_clips}" if n_clips > 1 else "Processing"
+                    self.after(0, lambda it=item, s=item_status: self._bulk_set_status(it, s))
+
+                    def clip_progress(frac, idx=idx):
+                        total = finished_before + n_clips + queued_clip_count()
+                        overall = (finished_before + (idx - 1) + frac) / max(1, total)
+                        pct = int(max(0.0, min(1.0, overall)) * 100)
+                        if total > 1:
+                            failed_txt = f", {clips_failed} failed" if clips_failed else ""
+                            show_status(
+                                f"Bulk cutting: {clips_ok}/{total} clips done{failed_txt} — {pct}%"
+                            )
+                        else:
+                            show_status(f"Bulk cutting... {pct}%")
+
+                    clip_progress(0.0)
                     try:
                         results.append(self._lossless_cut(
                             path, start_sec, end_sec, out_path,
                             mode=cut_mode, search_window=search_window,
+                            progress=clip_progress,
                         ))
                     except Exception as cut_exc:
                         err = str(cut_exc)[-1000:].replace("\n", " ").strip()
                         raise RuntimeError(f"Bracket {idx} failed: {err}")
                     generated.append(out_path)
+                    clips_ok += 1
 
                 if not generated:
                     raise RuntimeError("No valid ranges found.")
@@ -2293,19 +2663,19 @@ class LosslessVideoApp(_BaseTk):
                     lambda it=item, n=len(generated), how=how:
                         self._bulk_set_status(it, f"Completed ({n} clip(s) -- {how})")
                 )
-                completed += len(generated)
             except Exception as exc:
+                clips_failed += n_clips - len(generated)
+                files_failed += 1
                 self.after(
                     0,
                     lambda it=item, e=str(exc):
                         self._bulk_set_status(it, f"Failed: {e}")
                 )
-                failed += 1
 
         self.after(0, lambda: self.bulk_btn.config(state="normal"))
         self.after(
             0,
-            lambda c=completed, f=failed: self.status_lbl.config(
+            lambda c=clips_ok, f=files_failed: self.status_lbl.config(
                 text=f"Bulk cut finished — {c} clip(s) completed, {f} file(s) failed"
             )
         )
@@ -2412,17 +2782,28 @@ class LosslessVideoApp(_BaseTk):
         # (for Shorts/Reels/TikTok-style crops) in the same relative order
         # -- so 16:9/21:9 sit side by side, and 9:16/9:21 do too further
         # down the row, rather than interleaving landscape and portrait.
+        # The highlighted button is the ratio corner drags keep; Freeform
+        # lets corners distort the box (hold Shift/Ctrl/Alt to keep its
+        # shape anyway).
+        self.resize_aspect_buttons = {}
         for w, h in (
             (1, 1), (4, 3), (16, 9), (16, 10), (21, 9),   # widescreen
             (3, 4), (9, 16), (10, 16), (9, 21),           # vertical
         ):
-            tk.Button(
+            btn = tk.Button(
                 button_row, text=f"{w}:{h}", width=4,
                 command=lambda w=w, h=h: self._resize_set_aspect(w, h),
-            ).pack(side="left", padx=1)
-        tk.Button(button_row, text="Original", command=self._resize_set_original_aspect).pack(
-            side="left", padx=(4, 2)
-        )
+            )
+            btn.pack(side="left", padx=1)
+            self.resize_aspect_buttons[f"{w}:{h}"] = btn
+        btn = tk.Button(button_row, text="Original", command=self._resize_set_original_aspect)
+        btn.pack(side="left", padx=(4, 2))
+        self.resize_aspect_buttons["original"] = btn
+        btn = tk.Button(button_row, text="Freeform", command=self._resize_set_freeform)
+        btn.pack(side="left", padx=(2, 2))
+        self.resize_aspect_buttons["freeform"] = btn
+        self._resize_button_default_bg = btn.cget("bg")
+        self._resize_highlight_aspect_button()
 
         # Precise crop entry: type the four corner coordinates directly.
         # These are overwritten automatically whenever the crop changes via
@@ -2464,8 +2845,8 @@ class LosslessVideoApp(_BaseTk):
             side="left", padx=(6, 2)
         )
         tk.Label(
-            zoom_row, text="(scroll wheel over the preview also zooms; the view "
-            "follows the crop area)",
+            zoom_row, text="(scroll wheel zooms · in Freeform, hold Shift/Ctrl/Alt "
+            "while dragging to keep the box's shape)",
             bg="#f0f0f0", fg="#777777"
         ).pack(side="left", padx=(8, 2))
 
@@ -2571,6 +2952,9 @@ class LosslessVideoApp(_BaseTk):
         self.resize_src_h = src_h
         self.resize_time_sec = 0.0
         self.resize_crop = (0, 0, src_w, src_h)
+        self.resize_aspect_lock = (src_w, src_h)
+        self.resize_aspect_key = "original"
+        self._resize_highlight_aspect_button()
         self.resize_zoom = 1.0
         self._resize_update_zoom_label()
 
@@ -2940,7 +3324,10 @@ class LosslessVideoApp(_BaseTk):
         x0, y0, x1, y1 = self.resize_crop_start
         min_size = 2
 
-        if self.resize_drag_mode == "move":
+        ratio = None if self.resize_drag_mode == "move" else self._resize_drag_ratio(event)
+        if ratio:
+            self.resize_crop = self._resize_ratio_rect(self.resize_drag_mode, mx, my, ratio)
+        elif self.resize_drag_mode == "move":
             sx, sy = self.resize_drag_start
             dx, dy = mx - sx, my - sy
             w, h = x1 - x0, y1 - y0
@@ -3011,6 +3398,79 @@ class LosslessVideoApp(_BaseTk):
         self._resize_update_labels()
         self._redraw_resize_canvas()
 
+    # Modifier bits in a Tk event's .state: Shift, Control, and Alt -- which
+    # is 0x20000 on Windows, where 0x0008 means NumLock instead of Alt.
+    _RATIO_LOCK_MODIFIERS = 0x0001 | 0x0004 | (0x20000 if os.name == "nt" else 0x0008)
+
+    def _resize_drag_ratio(self, event):
+        """Width/height ratio the current drag must keep, or None to let it
+        distort freely (Freeform with no modifier key held)."""
+        if self.resize_aspect_lock:
+            w, h = self.resize_aspect_lock
+            return w / h
+        if event.state & self._RATIO_LOCK_MODIFIERS:
+            if self.resize_drag_mode == "new":
+                return 1.0  # a brand-new box has no shape to keep yet: square
+            x0, y0, x1, y1 = self.resize_crop_start
+            return max(1, x1 - x0) / max(1, y1 - y0)
+        return None
+
+    def _resize_ratio_rect(self, mode, mx, my, ratio):
+        """New crop rect for a corner/edge/new-box drag that keeps `ratio`,
+        following the mouse as closely as the ratio and frame edges allow."""
+        x0, y0, x1, y1 = self.resize_crop_start
+        src_w, src_h = self.resize_src_w, self.resize_src_h
+        min_size = 2
+
+        if mode in ("n", "s", "e", "w"):
+            # One edge follows the mouse; the other dimension follows the
+            # ratio, growing/shrinking evenly around the box's center.
+            if mode in ("e", "w"):
+                w = (mx - x0) if mode == "e" else (x1 - mx)
+                w = max(min_size, min(w, (src_w - x0) if mode == "e" else x1))
+                h = w / ratio
+                if h > src_h:
+                    h = src_h
+                    w = h * ratio
+                nx0 = x0 if mode == "e" else x1 - w
+                ny0 = max(0, min(src_h - h, (y0 + y1) / 2 - h / 2))
+            else:
+                h = (my - y0) if mode == "s" else (y1 - my)
+                h = max(min_size, min(h, (src_h - y0) if mode == "s" else y1))
+                w = h * ratio
+                if w > src_w:
+                    w = src_w
+                    h = w / ratio
+                ny0 = y0 if mode == "s" else y1 - h
+                nx0 = max(0, min(src_w - w, (x0 + x1) / 2 - w / 2))
+            return (int(round(nx0)), int(round(ny0)),
+                    int(round(nx0 + w)), int(round(ny0 + h)))
+
+        # Corners (and drawing a new box): the opposite corner stays put.
+        if mode == "new":
+            ax, ay = self.resize_drag_start
+            dir_x = 1 if mx >= ax else -1
+            dir_y = 1 if my >= ay else -1
+        else:
+            dir_x = 1 if mode in ("ne", "se") else -1
+            dir_y = 1 if mode in ("sw", "se") else -1
+            ax = x0 if dir_x > 0 else x1
+            ay = y0 if dir_y > 0 else y1
+        want_w = (mx - ax) * dir_x
+        want_h = (my - ay) * dir_y
+        max_w = (src_w - ax) if dir_x > 0 else ax
+        max_h = (src_h - ay) if dir_y > 0 else ay
+
+        # Follow whichever axis the mouse has pulled further, then shrink
+        # to fit inside the frame.
+        w = max(min_size, want_w, want_h * ratio)
+        w = min(w, max_w, max_h * ratio)
+        h = w / ratio
+        nx0 = ax if dir_x > 0 else ax - w
+        ny0 = ay if dir_y > 0 else ay - h
+        return (int(round(nx0)), int(round(ny0)),
+                int(round(nx0 + w)), int(round(ny0 + h)))
+
     def _resize_mouse_up(self, event):
         self.resize_drag_mode = None
         self.resize_drag_start = None
@@ -3027,19 +3487,45 @@ class LosslessVideoApp(_BaseTk):
         }
         self.resize_canvas.config(cursor=cursors.get(hit, ""))
 
+    def _resize_highlight_aspect_button(self):
+        for key, btn in self.resize_aspect_buttons.items():
+            active = key == self.resize_aspect_key
+            btn.config(
+                relief="sunken" if active else "raised",
+                bg="#cfe2ff" if active else self._resize_button_default_bg,
+            )
+
     def _resize_reset_crop(self):
         if not self.resize_input_path:
             return
         self.resize_crop = (0, 0, self.resize_src_w, self.resize_src_h)
+        # A full-frame box only matches the source's own ratio, so a preset
+        # lock (say 9:16 on a 16:9 video) goes back to Original. Freeform
+        # stays Freeform.
+        if self.resize_aspect_key != "freeform":
+            self.resize_aspect_lock = (self.resize_src_w, self.resize_src_h)
+            self.resize_aspect_key = "original"
+            self._resize_highlight_aspect_button()
         self._resize_update_labels()
         self._redraw_resize_canvas()
 
     def _resize_set_original_aspect(self):
+        if not self.resize_input_path:
+            return
+        self.resize_aspect_key = "original"
         self._resize_reset_crop()
+
+    def _resize_set_freeform(self):
+        self.resize_aspect_lock = None
+        self.resize_aspect_key = "freeform"
+        self._resize_highlight_aspect_button()
 
     def _resize_set_aspect(self, aspect_w, aspect_h):
         if not self.resize_input_path:
             return
+        self.resize_aspect_lock = (aspect_w, aspect_h)
+        self.resize_aspect_key = f"{aspect_w}:{aspect_h}"
+        self._resize_highlight_aspect_button()
 
         x0, y0, x1, y1 = self.resize_crop
         cx = (x0 + x1) / 2
@@ -3079,7 +3565,8 @@ class LosslessVideoApp(_BaseTk):
         base_name = os.path.splitext(os.path.basename(self.resize_input_path))[0]
         default_name = f"{base_name}.CROP.{crop_w}x{crop_h}.mp4"
 
-        if self.resize_save_to_source_var.get():
+        from_dialog = not self.resize_save_to_source_var.get()
+        if not from_dialog:
             out_path = os.path.join(source_dir, default_name)
             if os.path.abspath(out_path) == os.path.abspath(self.resize_input_path):
                 out_path = os.path.join(source_dir, base_name + ".CROP.mp4")
@@ -3091,9 +3578,14 @@ class LosslessVideoApp(_BaseTk):
             )
             if not out_path:
                 return
+        out_path = self._check_output_path(
+            out_path, [self.resize_input_path], prompt_overwrite=not from_dialog
+        )
+        if not out_path:
+            return
 
         self.resize_save_btn.config(state="disabled")
-        self.status_lbl.config(text="Cropping — video must be re-encoded...")
+        self.status_lbl.config(text="Cropping (re-encoding video)... 0%")
         crop = self.resize_crop
         threading.Thread(
             target=self._resize_run_crop,
@@ -3125,18 +3617,15 @@ class LosslessVideoApp(_BaseTk):
                     out_path
                 ]
 
+            report = self._progress_reporter("Cropping (re-encoding video)...")
             encoder_args, _label = get_video_encoder_args(ffmpeg)
-            proc = subprocess.run(
-                build_cmd(encoder_args), capture_output=True, text=True, **SUBPROCESS_KWARGS
-            )
+            proc = run_ffmpeg(build_cmd(encoder_args), self.resize_duration, report)
             if proc.returncode != 0 and encoder_args[1] != "libx264":
                 # The hardware encoder can occasionally fail for a clip it
                 # doesn't like (resolution/profile limits, driver hiccup) --
                 # fall back to the software encoder once before giving up.
                 software_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
-                proc = subprocess.run(
-                    build_cmd(software_args), capture_output=True, text=True, **SUBPROCESS_KWARGS
-                )
+                proc = run_ffmpeg(build_cmd(software_args), self.resize_duration, report)
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr[-3000:])
 
@@ -3862,13 +4351,17 @@ class LosslessVideoApp(_BaseTk):
             null_target = "NUL" if os.name == "nt" else "/dev/null"
             mean_re = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
             means = {}
-            for track in self.audio_tracks:
+            n_tracks = len(self.audio_tracks)
+            report = self._progress_reporter("Analyzing track loudness...")
+            for i, track in enumerate(self.audio_tracks):
                 cmd = [
                     ffmpeg, "-i", self.audio_input_path,
                     "-map", f"0:a:{track['a_index']}",
                     "-af", "volumedetect", "-f", "null", null_target,
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+                proc = run_ffmpeg(
+                    cmd, self.audio_duration, sub_progress(report, i / n_tracks, (i + 1) / n_tracks)
+                )
                 m = mean_re.search(proc.stderr)
                 means[track["a_index"]] = float(m.group(1)) if m else None
 
@@ -3923,7 +4416,8 @@ class LosslessVideoApp(_BaseTk):
         ext = os.path.splitext(self.audio_input_path)[1] or ".mp4"
         default_name = f"{base_name}.AUDIOMIX{ext}"
 
-        if self.audio_save_to_source_var.get():
+        from_dialog = not self.audio_save_to_source_var.get()
+        if not from_dialog:
             out_path = os.path.join(source_dir, default_name)
             if os.path.abspath(out_path) == os.path.abspath(self.audio_input_path):
                 out_path = os.path.join(source_dir, base_name + ".AUDIOMIX2" + ext)
@@ -3935,6 +4429,11 @@ class LosslessVideoApp(_BaseTk):
             )
             if not out_path:
                 return
+        out_path = self._check_output_path(
+            out_path, [self.audio_input_path], prompt_overwrite=not from_dialog
+        )
+        if not out_path:
+            return
 
         track_settings = [
             (t["a_index"], t["volume_slider"].get() if t["volume_slider"] else 1.0)
@@ -3942,9 +4441,7 @@ class LosslessVideoApp(_BaseTk):
         ]
 
         self.audio_finalize_btn.config(state="disabled")
-        self.status_lbl.config(
-            text="Mixing audio tracks (video stream-copied, audio re-encoded)..."
-        )
+        self.status_lbl.config(text="Mixing audio tracks... 0%")
         threading.Thread(
             target=self._audio_run_finalize, args=(out_path, track_settings), daemon=True
         ).start()
@@ -3962,7 +4459,9 @@ class LosslessVideoApp(_BaseTk):
                 "-movflags", "+faststart",
                 out_path,
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
+            proc = run_ffmpeg(
+                cmd, self.audio_duration, self._progress_reporter("Mixing audio tracks...")
+            )
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr[-3000:])
 
