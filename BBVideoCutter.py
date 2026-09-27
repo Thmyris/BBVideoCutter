@@ -1105,9 +1105,9 @@ class LosslessVideoApp(_BaseTk):
         self.step_buttons = []
         for label, secs in (("1 sec", 1), ("5 sec", 5), ("30 sec", 30), ("3 min", 180)):
             tk.Label(step_row, text=f"{label}:", bg="#f0f0f0").pack(side="left", padx=(10, 2))
-            b1 = tk.Button(step_row, text="<", width=3, command=lambda s=secs: self._nudge(-s))
+            b1 = tk.Button(step_row, text="<", width=7, command=lambda s=secs: self._nudge(-s))
             b1.pack(side="left")
-            b2 = tk.Button(step_row, text=">", width=3, command=lambda s=secs: self._nudge(s))
+            b2 = tk.Button(step_row, text=">", width=7, command=lambda s=secs: self._nudge(s))
             b2.pack(side="left", padx=(0, 4))
             self.step_buttons += [b1, b2]
 
