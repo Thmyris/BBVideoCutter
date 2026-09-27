@@ -2873,8 +2873,8 @@ class LosslessVideoApp(_BaseTk):
 
     @staticmethod
     def _bulk_output_paths(item, output_dir):
-        """Output path for each of an item's ranges: name.CUT.<range>.ext for
-        a single range, name.CUT01.(<range>).ext, name.CUT02.(<range>).ext...
+        """Output path for each of an item's ranges: name.CUT.(<range>).ext
+        for a single range, name.CUT01.(<range>).ext, name.CUT02.(<range>).ext...
         for several."""
         path = item["path"]
         ranges = item["ranges"]
@@ -2884,11 +2884,8 @@ class LosslessVideoApp(_BaseTk):
         outs = []
         for idx, (start_sec, end_sec) in enumerate(ranges, 1):
             suffix = format_clip_suffix(start_sec, end_sec)
-            if len(ranges) > 1:
-                name = f"{stripped_name}.CUT{idx:02d}.({suffix}){ext}"
-            else:
-                name = f"{stripped_name}.CUT.{suffix}{ext}"
-            outs.append(os.path.join(dest_dir, name))
+            tag = f"CUT{idx:02d}" if len(ranges) > 1 else "CUT"
+            outs.append(os.path.join(dest_dir, f"{stripped_name}.{tag}.({suffix}){ext}"))
         return outs
 
     # ---- status helpers (always called back on the main thread via .after) --
