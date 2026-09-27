@@ -4825,7 +4825,10 @@ class LosslessVideoApp(_BaseTk):
     # ====================================================================
     def _build_status_bar(self):
         bar = tk.Frame(self, bg="#e6e6e6")
-        bar.pack(fill="x", side="bottom")
+        # Packed ahead of the notebook so it claims its row first. Otherwise,
+        # once a tall tab (Crop, Audio) has been built, the notebook asks for
+        # more height than the window has and pack drops the status bar.
+        bar.pack(fill="x", side="bottom", before=self.notebook)
         self.status_lbl = tk.Label(
             bar, text="Ready", bg="#e6e6e6", anchor="w", font=("Segoe UI", 8)
         )
