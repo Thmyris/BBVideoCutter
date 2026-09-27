@@ -20,7 +20,7 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 - **Crop** — visual crop editor with widescreen/vertical aspect presets.
 - **Audio** — mute/mix individual audio tracks.
 
-Drag & drop supported throughout.
+Drag & drop supported throughout. Dark mode under **View**.
 
 ## Running from source
 

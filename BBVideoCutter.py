@@ -75,6 +75,9 @@ that file already exists, the app asks whether to overwrite it or keep
 both (turn this off under Options). Long jobs show a percentage on the
 status bar. Dragging an empty drop area (a preview with no video loaded,
 the blank part of the Combine or Bulk Cut list) moves the whole window.
+View > Dark mode switches the whole app (title bar included on Windows)
+to a dark theme; the choice is remembered in
+%APPDATA%\\BBVideoCutter\\settings.json.
 
 Requirements
 ------------
@@ -92,7 +95,9 @@ Run:
     python BBVideoCutter.py
 """
 
+import ctypes
 import io
+import json
 import math
 import os
 import re
@@ -692,6 +697,121 @@ def strip_bracket_from_name(name_no_ext: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Settings -- the few preferences that survive a restart (dark mode), kept
+# in %APPDATA%\BBVideoCutter\settings.json (~/.config/... elsewhere).
+# --------------------------------------------------------------------------
+def _settings_path():
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "BBVideoCutter", "settings.json")
+
+
+def load_settings():
+    try:
+        with open(_settings_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings):
+    path = _settings_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        pass  # a preference that can't be saved just won't survive a restart
+
+
+# --------------------------------------------------------------------------
+# Themes
+#
+# The light theme is the app's original look: the literal colors every
+# widget is created with. Dark mode swaps only the light "chrome" colors
+# (window and panel backgrounds, buttons, entries, their text); areas that
+# are already dark in the light theme (video previews, the Combine list,
+# the audio track rows) look the same in both.
+# --------------------------------------------------------------------------
+DARK = {
+    "panel": "#202023",
+    "button": "#38383c",
+    "button_active": "#46464b",
+    "field": "#18181b",
+    "status": "#2b2b2f",
+    "border": "#4a4a50",
+    "text": "#e4e4e7",
+    "text_dim": "#a9a9ae",
+    "text_hint": "#8e8e93",
+    "text_disabled": "#6e6e73",
+    "select": "#3d8bfd",
+}
+
+# Colors that code draws or sets itself (canvas items, highlights), per theme.
+THEME_COLORS = {
+    "light": {
+        "slider_track": "#c0c0c0",
+        "slider_start": "#1a1a1a",
+        "timeslider_track": "#d5d5d5",
+        "aspect_active": "#cfe2ff",
+    },
+    "dark": {
+        "slider_track": "#505056",
+        "slider_start": "#d0d0d4",
+        "timeslider_track": "#505056",
+        "aspect_active": "#28456f",
+    },
+}
+
+# Light chrome backgrounds. A widget whose background is one of these is
+# part of the chrome and gets themed; any other background (black, #1e1e1e,
+# #2a2a2a...) is a content area and is left alone, text colors included.
+_CHROME_BG = {
+    "systembuttonface": "panel", "#f0f0f0": "panel", "#d9d9d9": "panel",
+    "systemwindow": "field",
+    "#e6e6e6": "status",
+    "#cfe2ff": None,  # the Crop tab's active ratio button, see _dark_bg
+}
+_BG_OPTIONS = ("background", "activebackground", "highlightbackground",
+               "selectcolor", "disabledbackground", "readonlybackground")
+_FG_OPTIONS = {
+    "systembuttontext": "text", "systemwindowtext": "text",
+    "black": "text", "#000000": "text",
+    "systemdisabledtext": "text_disabled", "#a3a3a3": "text_disabled",
+    "#555555": "text_dim", "#777777": "text_hint",
+    "systemwindowframe": "border",
+}
+_FG_OPTION_NAMES = ("foreground", "activeforeground", "disabledforeground",
+                    "insertbackground", "highlightcolor")
+
+
+def _dark_bg(widget_class, option, value):
+    """Dark replacement for a light chrome background option, or None."""
+    value = value.lower()
+    if widget_class in ("Entry", "Spinbox") and value in ("white", "#ffffff"):
+        return DARK["field"]
+    if option == "selectcolor" and value in ("systemwindow", "white", "#ffffff"):
+        return DARK["field"]
+    if value == "#cfe2ff":
+        return THEME_COLORS["dark"]["aspect_active"]
+    role = _CHROME_BG.get(value)
+    if role is None:
+        return None
+    if widget_class == "Button" and role == "panel":
+        if option == "background":
+            return DARK["button"]
+        if option == "activebackground":
+            return DARK["button_active"]
+        return DARK["panel"]  # the focus ring's surround matches the panel
+    if widget_class in ("Entry", "Spinbox") and option in ("disabledbackground",
+                                                          "readonlybackground"):
+        return DARK["panel"]
+    return DARK[role]
+
+
+# --------------------------------------------------------------------------
 # TimeSlider -- a flat, modern single-handle scrubber bar.
 #
 # Replaces the native tk.Scale widget, which renders as the dated, grooved
@@ -738,6 +858,10 @@ class TimeSlider(tk.Canvas):
 
     def get(self):
         return self._value
+
+    def set_track_color(self, color):
+        self._track_color = color
+        self._redraw()
 
     def _track_bounds(self):
         w = self.winfo_width()
@@ -862,6 +986,10 @@ class LosslessVideoApp(_BaseTk):
 
         self.warn_overwrite_var = tk.BooleanVar(value=True)
 
+        self.settings = load_settings()
+        self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", False)))
+        self._ttk_light_theme = ttk.Style(self).theme_use()
+
         self._build_menu()
 
         self.notebook = ttk.Notebook(self)
@@ -902,6 +1030,12 @@ class LosslessVideoApp(_BaseTk):
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
+        # Widgets created later (lazily built tabs, rebuilt list rows) pick
+        # up the current theme the moment they are first shown.
+        self.bind_all("<Map>", self._on_widget_mapped, add="+")
+        if self.dark_mode_var.get():
+            self._apply_theme()
+
     def _on_notebook_tab_changed(self, event=None):
         self._ensure_tab_built(self.notebook.index("current"))
 
@@ -930,6 +1064,12 @@ class LosslessVideoApp(_BaseTk):
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_app_close)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_checkbutton(
+            label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
+        )
+        menubar.add_cascade(label="View", menu=view_menu)
 
         options_menu = tk.Menu(menubar, tearoff=0)
         options_menu.add_checkbutton(
@@ -991,6 +1131,147 @@ class LosslessVideoApp(_BaseTk):
             return
         self._window_drag_offset = None
         event.widget.config(cursor="")
+
+    # ====================================================================
+    # Shared: light / dark theme (View menu)
+    # ====================================================================
+    def _is_dark(self):
+        return self.dark_mode_var.get()
+
+    def _theme_color(self, name):
+        return THEME_COLORS["dark" if self._is_dark() else "light"][name]
+
+    def _on_dark_mode_toggled(self):
+        self.settings["dark_mode"] = self._is_dark()
+        save_settings(self.settings)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Re-themes every existing widget, the ttk widgets, the title bar,
+        and everything code draws with theme colors."""
+        self._apply_ttk_theme()
+        self._theme_tree(self)
+        self._set_title_bar_dark(self._is_dark())
+        self._redraw_slider()  # canvas items drawn with theme colors
+
+    def _configure_light(self, w, **options):
+        """Configure w using light-theme colors, as code always does; in dark
+        mode they are swapped for their dark versions right away."""
+        saved = getattr(w, "_bbvc_light_colors", None)
+        if saved is not None:
+            w.configure(saved)
+            del w._bbvc_light_colors
+        w.configure(**options)
+        self._theme_widget(w)
+
+    def _theme_tree(self, widget):
+        self._theme_widget(widget)
+        for child in widget.winfo_children():
+            self._theme_tree(child)
+
+    def _on_widget_mapped(self, event):
+        if isinstance(event.widget, tk.Misc):
+            self._theme_widget(event.widget)
+
+    def _theme_widget(self, w):
+        """Dark: swap w's light chrome colors for dark ones, remembering the
+        originals on the widget. Light: put the originals back. Widgets
+        whose background is not light chrome (content areas) and ttk
+        widgets (styled separately) are left alone."""
+        saved = getattr(w, "_bbvc_light_colors", None)
+        if not self._is_dark():
+            if saved is None:
+                return
+            for option, original in saved.items():
+                w.configure({option: original})
+            del w._bbvc_light_colors
+            if isinstance(w, TimeSlider):
+                w.set_track_color(self._theme_color("timeslider_track"))
+            return
+        if saved is not None or isinstance(w, (tk.Menu, ttk.Widget)):
+            return
+        try:
+            options = w.keys()
+            cls = w.winfo_class()
+            bg = str(w.cget("background"))
+        except (tk.TclError, AttributeError):
+            return
+        if _dark_bg(cls, "background", bg) is None:
+            return
+        saved = {}
+        changes = {}
+        for option in _BG_OPTIONS:
+            if option in options:
+                value = str(w.cget(option))
+                new = _dark_bg(cls, option, value)
+                if new:
+                    saved[option], changes[option] = value, new
+        for option in _FG_OPTION_NAMES:
+            if option in options:
+                value = str(w.cget(option))
+                role = _FG_OPTIONS.get(value.lower())
+                if role:
+                    saved[option], changes[option] = value, DARK[role]
+        if changes:
+            w.configure(changes)
+        w._bbvc_light_colors = saved
+        if isinstance(w, TimeSlider):
+            w.set_track_color(self._theme_color("timeslider_track"))
+
+    def _apply_ttk_theme(self):
+        style = ttk.Style(self)
+        if not self._is_dark():
+            style.theme_use(self._ttk_light_theme)
+            return
+        # The native Windows ttk theme can't be recolored; clam can.
+        style.theme_use("clam")
+        d = DARK
+        style.configure(
+            ".", background=d["panel"], foreground=d["text"], fieldbackground=d["field"],
+            bordercolor=d["border"], lightcolor=d["panel"], darkcolor=d["panel"],
+            troughcolor=d["panel"], selectbackground=d["select"],
+            selectforeground="#ffffff", insertcolor=d["text"], arrowcolor=d["text"],
+        )
+        style.map(".", foreground=[("disabled", d["text_disabled"])])
+        style.configure("TNotebook", background=d["panel"], bordercolor=d["border"])
+        style.configure("TNotebook.Tab", background=d["button"], foreground=d["text"],
+                        bordercolor=d["border"], lightcolor=d["button"])
+        style.map("TNotebook.Tab",
+                  background=[("selected", d["panel"]), ("active", d["button_active"])],
+                  lightcolor=[("selected", d["panel"])])
+        style.configure("Treeview", background=d["field"], fieldbackground=d["field"],
+                        foreground=d["text"])
+        style.map("Treeview", background=[("selected", d["select"])],
+                  foreground=[("selected", "#ffffff")])
+        style.configure("Treeview.Heading", background=d["button"], foreground=d["text"],
+                        bordercolor=d["border"], lightcolor=d["button"])
+        style.map("Treeview.Heading", background=[("active", d["button_active"])])
+        style.configure("TScrollbar", background=d["button"], troughcolor=d["panel"],
+                        bordercolor=d["border"], arrowcolor=d["text"],
+                        lightcolor=d["button"], darkcolor=d["button"])
+        style.map("TScrollbar", background=[("active", d["button_active"])])
+
+    def _set_title_bar_dark(self, dark):
+        """Windows 10 1809+ / 11: a dark caption to match. Anywhere else,
+        or if it fails, the title bar just stays as the system draws it."""
+        if os.name != "nt":
+            return
+        try:
+            self.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            value = ctypes.c_int(1 if dark else 0)
+            # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE; 19 on builds before 20H1.
+            for attribute in (20, 19):
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                    break
+            # Repaint the caption now instead of on the next activation.
+            SWP_FLAGS = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020  # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
+            RDW_FLAGS = 0x0001 | 0x0100 | 0x0400  # INVALIDATE|UPDATENOW|FRAME
+            ctypes.windll.user32.RedrawWindow(hwnd, None, None, RDW_FLAGS)
+        except Exception:
+            pass
 
     # ====================================================================
     # Shared: status-bar progress + overwrite protection
@@ -1351,7 +1632,8 @@ class LosslessVideoApp(_BaseTk):
         # Always draw the bare track, even with no file loaded yet, so the
         # slider doesn't visibly pop into existence the moment a video is
         # opened -- it's there from the start, just inert.
-        c.create_line(track_x0, y, track_x1, y, fill="#c0c0c0", width=4, capstyle="round")
+        c.create_line(track_x0, y, track_x1, y, fill=self._theme_color("slider_track"),
+                      width=4, capstyle="round")
         self._track_x0, self._track_x1 = track_x0, track_x1
         if not self.input_path or self.duration <= 0:
             return
@@ -1362,7 +1644,8 @@ class LosslessVideoApp(_BaseTk):
 
         sx, ex = x_for(self.start_sec), x_for(self.end_sec)
         c.create_line(sx, y, ex, y, fill="#3d8bfd", width=4, capstyle="round")
-        c.create_oval(sx - 7, y - 7, sx + 7, y + 7, fill="#1a1a1a", outline="")
+        c.create_oval(sx - 7, y - 7, sx + 7, y + 7, fill=self._theme_color("slider_start"),
+                      outline="")
         c.create_oval(ex - 7, y - 7, ex + 7, y + 7, fill="#1a73e8", outline="")
 
     def _x_to_time(self, x):
@@ -1999,7 +2282,7 @@ class LosslessVideoApp(_BaseTk):
         list_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
 
-        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.combine_canvas = tk.Canvas(list_frame, bg="#1e1e1e", highlightthickness=0,
                                          yscrollcommand=scrollbar.set)
@@ -2415,7 +2698,7 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_tree.column("status", width=140, anchor="center")
         self.bulk_tree.grid(row=0, column=0, sticky="nsew")
 
-        vsb = tk.Scrollbar(body, command=self.bulk_tree.yview)
+        vsb = ttk.Scrollbar(body, command=self.bulk_tree.yview)
         vsb.grid(row=0, column=1, sticky="ns")
         self.bulk_tree.configure(yscrollcommand=vsb.set)
 
@@ -3535,7 +3818,8 @@ class LosslessVideoApp(_BaseTk):
     def _resize_highlight_aspect_button(self):
         for key, btn in self.resize_aspect_buttons.items():
             active = key == self.resize_aspect_key
-            btn.config(
+            self._configure_light(
+                btn,
                 relief="sunken" if active else "raised",
                 bg="#cfe2ff" if active else self._resize_button_default_bg,
             )
@@ -3802,7 +4086,7 @@ class LosslessVideoApp(_BaseTk):
         tracks_body.rowconfigure(0, weight=1)
         tracks_body.columnconfigure(0, weight=1)
 
-        tracks_scrollbar = tk.Scrollbar(tracks_body)
+        tracks_scrollbar = ttk.Scrollbar(tracks_body)
         tracks_scrollbar.grid(row=0, column=1, sticky="ns")
         self.audio_tracks_canvas = tk.Canvas(
             tracks_body, bg="#1e1e1e", highlightthickness=0,
