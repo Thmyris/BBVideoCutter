@@ -73,7 +73,8 @@ Every tab that saves a file has a "Save to current folder" checkbox that
 skips the save dialog and writes the output right next to the source. If
 that file already exists, the app asks whether to overwrite it or keep
 both (turn this off under Options). Long jobs show a percentage on the
-status bar.
+status bar. Dragging an empty drop area (a preview with no video loaded,
+the blank part of the Combine or Bulk Cut list) moves the whole window.
 
 Requirements
 ------------
@@ -959,6 +960,39 @@ class LosslessVideoApp(_BaseTk):
         )
 
     # ====================================================================
+    # Shared: move the window by dragging an empty "drop a video" area
+    # ====================================================================
+    def _bind_window_drag(self, widget, is_empty):
+        """Dragging `widget` with the left button moves the whole window,
+        but only while `is_empty(event)` is true, i.e. while the press lands
+        on an empty drop-here area where a click has no other meaning."""
+        widget.bind("<ButtonPress-1>", lambda e: self._window_drag_start(e, is_empty), add="+")
+        widget.bind("<B1-Motion>", self._window_drag_motion, add="+")
+        widget.bind("<ButtonRelease-1>", self._window_drag_end, add="+")
+
+    def _window_drag_start(self, event, is_empty):
+        self._window_drag_offset = None
+        if not is_empty(event) or self.state() == "zoomed":
+            return
+        # winfo_x/y of a toplevel is its outer frame, the same corner that
+        # geometry("+x+y") positions, so the offset stays exact.
+        self._window_drag_offset = (event.x_root - self.winfo_x(),
+                                    event.y_root - self.winfo_y())
+        event.widget.config(cursor="fleur")
+
+    def _window_drag_motion(self, event):
+        offset = getattr(self, "_window_drag_offset", None)
+        if offset is None:
+            return
+        self.geometry(f"+{event.x_root - offset[0]}+{event.y_root - offset[1]}")
+
+    def _window_drag_end(self, event):
+        if getattr(self, "_window_drag_offset", None) is None:
+            return
+        self._window_drag_offset = None
+        event.widget.config(cursor="")
+
+    # ====================================================================
     # Shared: status-bar progress + overwrite protection
     # ====================================================================
     def _progress_reporter(self, label):
@@ -1075,6 +1109,7 @@ class LosslessVideoApp(_BaseTk):
         self.preview_canvas = tk.Canvas(preview_frame, bg="black", highlightthickness=0)
         self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda e: self._redraw_preview_canvas())
+        self._bind_window_drag(self.preview_canvas, lambda e: not self.input_path)
         self._draw_preview_placeholder("Open or drop a video to begin")
 
         # ---- bottom controls (fixed height, full width)
@@ -1983,6 +2018,9 @@ class LosslessVideoApp(_BaseTk):
             "<Configure>",
             lambda e: self.combine_canvas.itemconfig(self._combine_inner_window, width=e.width),
         )
+        # Rows and the placeholder cover the canvas where they are, so a
+        # press that reaches the canvas itself is on the blank area below.
+        self._bind_window_drag(self.combine_canvas, lambda e: True)
 
         self.combine_thumb_cache = {}    # path -> PhotoImage
         self.combine_thumb_pending = set()  # paths with an extraction already queued
@@ -2043,6 +2081,7 @@ class LosslessVideoApp(_BaseTk):
                 bg="#1e1e1e", fg="#888888", anchor="w", font=("Consolas", 10),
             )
             placeholder.pack(fill="x", ipady=16)
+            self._bind_window_drag(placeholder, lambda e: not self.combine_files)
             return
 
         for i, path in enumerate(self.combine_files):
@@ -2416,6 +2455,11 @@ class LosslessVideoApp(_BaseTk):
 
         self.bulk_tree.drop_target_register(DND_FILES)
         self.bulk_tree.dnd_bind("<<Drop>>", self._on_drop_bulk)
+        # Only the blank area below the rows; headings keep column resizing.
+        self._bind_window_drag(
+            self.bulk_tree,
+            lambda e: self.bulk_tree.identify_region(e.x, e.y) == "nothing",
+        )
 
     # ---- adding / removing rows ------------------------------------------
     def add_files_for_bulk(self):
@@ -2749,6 +2793,7 @@ class LosslessVideoApp(_BaseTk):
         self.resize_canvas.bind("<MouseWheel>", self._resize_mouse_wheel)
         self.resize_canvas.bind("<Button-4>", self._resize_mouse_wheel)
         self.resize_canvas.bind("<Button-5>", self._resize_mouse_wheel)
+        self._bind_window_drag(self.resize_canvas, lambda e: not self.resize_input_path)
         self._draw_resize_placeholder("Open or drop a video to begin")
 
         controls = tk.Frame(root, bg="#f0f0f0")
@@ -3702,6 +3747,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_canvas = tk.Canvas(preview_frame, bg="black", highlightthickness=0)
         self.audio_canvas.pack(fill="both", expand=True)
         self.audio_canvas.bind("<Configure>", lambda e: self._redraw_audio_canvas())
+        self._bind_window_drag(self.audio_canvas, lambda e: not self.audio_input_path)
         self._draw_audio_placeholder("Open or drop a video to begin")
 
         # ---- playback controls
