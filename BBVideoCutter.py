@@ -49,7 +49,7 @@ more cut ranges (e.g. "clip [00.00.00-00.00.17].mp4") and cut them all in
 one pass, using whichever of the three cut modes is selected. Works as a
 live queue: rows added mid-run are picked up, rows removed before their
 turn are never processed. A file with several ranges produces
-name.cut1.<range>.ext, name.cut2.<range>.ext, and so on.
+name.CUT01.(<range>).ext, name.CUT02.(<range>).ext, and so on.
 
 Crop tab
 --------
@@ -2874,8 +2874,8 @@ class LosslessVideoApp(_BaseTk):
     @staticmethod
     def _bulk_output_paths(item, output_dir):
         """Output path for each of an item's ranges: name.CUT.<range>.ext for
-        a single range, name.cut1.<range>.ext, name.cut2.<range>.ext... for
-        several."""
+        a single range, name.CUT01.(<range>).ext, name.CUT02.(<range>).ext...
+        for several."""
         path = item["path"]
         ranges = item["ranges"]
         name_no_ext, ext = os.path.splitext(os.path.basename(path))
@@ -2883,9 +2883,12 @@ class LosslessVideoApp(_BaseTk):
         dest_dir = output_dir or os.path.dirname(os.path.abspath(path))
         outs = []
         for idx, (start_sec, end_sec) in enumerate(ranges, 1):
-            tag = f"cut{idx}" if len(ranges) > 1 else "CUT"
             suffix = format_clip_suffix(start_sec, end_sec)
-            outs.append(os.path.join(dest_dir, f"{stripped_name}.{tag}.{suffix}{ext}"))
+            if len(ranges) > 1:
+                name = f"{stripped_name}.CUT{idx:02d}.({suffix}){ext}"
+            else:
+                name = f"{stripped_name}.CUT.{suffix}{ext}"
+            outs.append(os.path.join(dest_dir, name))
         return outs
 
     # ---- status helpers (always called back on the main thread via .after) --
