@@ -2924,7 +2924,6 @@ class LosslessVideoApp(_BaseTk):
             n_clips = len(ranges)
             finished_before = clips_ok + clips_failed
             generated = []
-            results = []
             try:
                 for idx, ((start_sec, end_sec), out_path) in enumerate(
                     zip(ranges, self._bulk_output_paths(item, output_dir)), 1
@@ -2963,11 +2962,11 @@ class LosslessVideoApp(_BaseTk):
 
                     clip_progress(0.0)
                     try:
-                        results.append(self._lossless_cut(
+                        self._lossless_cut(
                             path, start_sec, end_sec, out_path,
                             mode=cut_mode, search_window=search_window,
                             progress=clip_progress,
-                        ))
+                        )
                     except Exception as cut_exc:
                         err = str(cut_exc)[-1000:].replace("\n", " ").strip()
                         raise RuntimeError(f"Bracket {idx} failed: {err}")
@@ -2977,19 +2976,9 @@ class LosslessVideoApp(_BaseTk):
                 if not generated:
                     raise RuntimeError("No valid ranges found.")
 
-                lossless_modes = ("copy", "classic", "editlist")
-                if all(r["mode"] in lossless_modes for r in results):
-                    how = "all lossless"
-                elif len(results) == 1:
-                    how = self._describe_cut_result(results[0])
-                else:
-                    n_touched = sum(1 for r in results if r["mode"] not in lossless_modes)
-                    how = f"{n_touched}/{len(results)} re-encoded near cut edges for accuracy"
-                self.after(
-                    0,
-                    lambda it=item, n=len(generated), how=how:
-                        self._bulk_set_status(it, f"Completed ({n} clip(s) -- {how})")
-                )
+                n_done = len(generated)
+                done_text = f"Completed {n_done} clip" + ("" if n_done == 1 else "s")
+                self.after(0, lambda it=item, s=done_text: self._bulk_set_status(it, s))
             except Exception as exc:
                 clips_failed += n_clips - len(generated)
                 files_failed += 1
@@ -3000,12 +2989,10 @@ class LosslessVideoApp(_BaseTk):
                 )
 
         self.after(0, lambda: self.bulk_btn.config(state="normal"))
-        self.after(
-            0,
-            lambda c=clips_ok, f=files_failed: self.status_lbl.config(
-                text=f"Bulk cut finished — {c} clip(s) completed, {f} file(s) failed"
-            )
-        )
+        done_text = f"Bulk cut finished — {clips_ok} clip" + ("" if clips_ok == 1 else "s") + " completed"
+        if files_failed:
+            done_text += f", {files_failed} file" + ("" if files_failed == 1 else "s") + " failed"
+        self.after(0, lambda t=done_text: self.status_lbl.config(text=t))
 
     # ====================================================================
     # RESIZE / CROP TAB
