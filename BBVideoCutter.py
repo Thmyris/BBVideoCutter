@@ -72,8 +72,8 @@ mixing multiple tracks into one requires decoding them first.
 Every tab that saves a file has a "Save to current folder" checkbox that
 skips the save dialog and writes the output right next to the source. If
 that file already exists, the app asks whether to overwrite it or keep
-both (turn this off under Options). Long jobs show a percentage on the
-status bar. Dragging an empty drop area (a preview with no video loaded,
+both (turn this off under Options). Long jobs show a percentage, a
+progress bar and a time-left estimate on the status bar. Dragging an empty drop area (a preview with no video loaded,
 the blank part of the Combine or Bulk Cut list) moves the whole window.
 View > Dark mode switches the whole app (title bar included on Windows)
 to a dark theme; the choice is remembered in
@@ -107,6 +107,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, filedialog, messagebox
@@ -405,6 +406,19 @@ def format_size(num_bytes: int) -> str:
         if size < 1024 or unit == "TB":
             return f"{size:.2f} {unit}"
         size /= 1024
+
+
+def format_duration(seconds: float) -> str:
+    """A short, human time span for time-left estimates: "45s", "3m 05s",
+    "1h 12m"."""
+    seconds = max(1, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
 
 
 def _app_dir() -> str:
@@ -985,6 +999,7 @@ class LosslessVideoApp(_BaseTk):
         self._bulk_running = False
 
         self.warn_overwrite_var = tk.BooleanVar(value=True)
+        self._progress_jobs = {}         # running job name -> time.monotonic() it started
 
         self.settings = load_settings()
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", False)))
@@ -1250,6 +1265,8 @@ class LosslessVideoApp(_BaseTk):
                         bordercolor=d["border"], arrowcolor=d["text"],
                         lightcolor=d["button"], darkcolor=d["button"])
         style.map("TScrollbar", background=[("active", d["button_active"])])
+        style.configure("Horizontal.TProgressbar", background=d["select"], troughcolor=d["field"],
+                        bordercolor=d["border"], lightcolor=d["select"], darkcolor=d["select"])
 
     def _set_title_bar_dark(self, dark):
         """Windows 10 1809+ / 11: a dark caption to match. Anywhere else,
@@ -1276,22 +1293,57 @@ class LosslessVideoApp(_BaseTk):
     # ====================================================================
     # Shared: status-bar progress + overwrite protection
     # ====================================================================
-    def _progress_reporter(self, label):
+    def _progress_reporter(self, label, job):
         """Returns a thread-safe callback(fraction) that shows progress on
-        the status bar. `label` is either a prefix string ("Cropping...")
-        or a callable(percent) -> full status text. Only repaints when the
-        whole-number percentage actually changes."""
+        the status bar: the text, the progress bar and a time-left estimate.
+        `label` is either a prefix string ("Cropping...") or a
+        callable(percent) -> full status text. `job` names the running
+        operation ("cut", "crop"...); _end_progress(job) hides the bar
+        again. The text only repaints when the whole-number percentage
+        changes; the bar and estimate follow every report."""
         last = {"pct": None}
 
         def report(frac):
-            pct = int(max(0.0, min(1.0, frac)) * 100)
-            if pct == last["pct"]:
-                return
-            last["pct"] = pct
-            text = label(pct) if callable(label) else f"{label} {pct}%"
-            self.after(0, lambda: self.status_lbl.config(text=text))
+            frac = max(0.0, min(1.0, frac))
+            pct = int(frac * 100)
+            text = None
+            if pct != last["pct"]:
+                last["pct"] = pct
+                text = label(pct) if callable(label) else f"{label} {pct}%"
+            self.after(0, lambda: self._show_progress(job, frac, text))
 
         return report
+
+    def _show_progress(self, job, frac, text=None):
+        """Main thread only. Shows `job`'s progress on the status bar. The
+        time left is extrapolated from how long the job has taken so far
+        for the fraction it has done, so it firms up as the job goes on."""
+        now = time.monotonic()
+        started = self._progress_jobs.setdefault(job, now)
+        if text is not None:
+            self.status_lbl.config(text=text)
+        if not self.progress_bar.winfo_manager():
+            self.progress_bar.pack(side="right", padx=(4, 6), pady=2)
+            self.progress_eta_lbl.pack(side="right")
+        self.progress_bar["value"] = frac * 1000
+        elapsed = now - started
+        if frac >= 0.02 and elapsed >= 2.0 and frac < 1.0:
+            self.progress_eta_lbl.config(
+                text=f"about {format_duration(elapsed * (1.0 - frac) / frac)} left"
+            )
+        elif frac >= 1.0:
+            self.progress_eta_lbl.config(text="finishing...")
+        else:
+            self.progress_eta_lbl.config(text="estimating time...")
+
+    def _end_progress(self, job):
+        """Main thread only. `job` is done; the bar goes away once no other
+        job is still reporting."""
+        self._progress_jobs.pop(job, None)
+        if not self._progress_jobs and self.progress_bar.winfo_manager():
+            self.progress_bar.pack_forget()
+            self.progress_eta_lbl.pack_forget()
+            self.progress_eta_lbl.config(text="")
 
     def _ask_overwrite(self, existing_paths, alt_hint=None):
         """Main thread only. Asks what to do about output files that
@@ -1803,7 +1855,7 @@ class LosslessVideoApp(_BaseTk):
             result = self._lossless_cut(
                 self.input_path, self.start_sec, self.end_sec, out_path,
                 mode=cut_mode, search_window=search_window,
-                progress=self._progress_reporter("Cutting..."),
+                progress=self._progress_reporter("Cutting...", "cut"),
             )
             self.after(0, lambda: self._cut_done(out_path, True, result))
         except Exception as exc:
@@ -2243,6 +2295,7 @@ class LosslessVideoApp(_BaseTk):
         return f"mostly lossless -- {secs:.2f}s re-encoded near the cut edges (via {encoder})"
 
     def _cut_done(self, info, success, result=None):
+        self._end_progress("cut")
         self._set_cut_controls_enabled(True)
         if success:
             how = self._describe_cut_result(result)
@@ -2595,7 +2648,7 @@ class LosslessVideoApp(_BaseTk):
                 step = len(prepared) + 1
                 step_total = len(prepared) + len(remaining)
                 report = self._progress_reporter(
-                    lambda pct, s=step, n=step_total: f"Combining {s}/{n}... {pct}%"
+                    lambda pct, s=step, n=step_total: f"Combining {s}/{n}... {pct}%", "combine"
                 )
                 if audio_codec is None:
                     audio_codec = self._probe_codec(ffprobe, p, "a") or ""
@@ -2627,7 +2680,7 @@ class LosslessVideoApp(_BaseTk):
             audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
             base_frac = overall_fraction(None, 0.0)
             report = self._progress_reporter(
-                lambda pct, n=len(final_files): f"Combining: joining {n} files... {pct}%"
+                lambda pct, n=len(final_files): f"Combining: joining {n} files... {pct}%", "combine"
             )
             ts_paths = [prepared[p][0] for p in final_files]
             concat_arg = "concat:" + "|".join(ts_paths)
@@ -2653,6 +2706,7 @@ class LosslessVideoApp(_BaseTk):
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _combine_done(self, info, success):
+        self._end_progress("combine")
         self.combine_btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
@@ -2900,16 +2954,27 @@ class LosslessVideoApp(_BaseTk):
         clips_ok = 0
         clips_failed = 0
         files_failed = 0
+        # Progress is weighted by clip length: cutting time grows with how
+        # long the clip is, so a 10-minute clip counts 10x a 1-minute one.
+        done_sec = 0.0  # total length of the clips already finished (or failed)
         last_status = {"text": None}
 
-        def queued_clip_count():
-            with self._bulk_lock:
-                return sum(len(it["ranges"]) for it in self.bulk_items if it["status"] == "Queued")
+        def clip_seconds(rng):
+            return max(0.0, rng[1] - rng[0])
 
-        def show_status(text):
-            if text != last_status["text"]:
+        def queued_clips():
+            """(clip count, total clip seconds) of the rows still queued."""
+            with self._bulk_lock:
+                queued = [it for it in self.bulk_items if it["status"] == "Queued"]
+                return (sum(len(it["ranges"]) for it in queued),
+                        sum(clip_seconds(r) for it in queued for r in it["ranges"]))
+
+        def show_progress(text, frac):
+            if text == last_status["text"]:
+                text = None
+            else:
                 last_status["text"] = text
-                self.after(0, lambda: self.status_lbl.config(text=text))
+            self.after(0, lambda: self._show_progress("bulk", frac, text))
 
         while True:
             with self._bulk_lock:
@@ -2922,7 +2987,9 @@ class LosslessVideoApp(_BaseTk):
             path = item["path"]
             ranges = item["ranges"]
             n_clips = len(ranges)
+            clip_lengths = [clip_seconds(r) for r in ranges]
             finished_before = clips_ok + clips_failed
+            done_sec_before = done_sec
             generated = []
             try:
                 for idx, ((start_sec, end_sec), out_path) in enumerate(
@@ -2949,16 +3016,25 @@ class LosslessVideoApp(_BaseTk):
                     self.after(0, lambda it=item, s=item_status: self._bulk_set_status(it, s))
 
                     def clip_progress(frac, idx=idx):
-                        total = finished_before + n_clips + queued_clip_count()
-                        overall = (finished_before + (idx - 1) + frac) / max(1, total)
-                        pct = int(max(0.0, min(1.0, overall)) * 100)
+                        q_count, q_sec = queued_clips()
+                        total = finished_before + n_clips + q_count
+                        total_sec = done_sec_before + sum(clip_lengths) + q_sec
+                        if total_sec > 0:
+                            cur_sec = (done_sec_before + sum(clip_lengths[:idx - 1])
+                                       + frac * clip_lengths[idx - 1])
+                            overall = cur_sec / total_sec
+                        else:
+                            overall = (finished_before + (idx - 1) + frac) / max(1, total)
+                        overall = max(0.0, min(1.0, overall))
+                        pct = int(overall * 100)
                         if total > 1:
                             failed_txt = f", {clips_failed} failed" if clips_failed else ""
-                            show_status(
-                                f"Bulk cutting: {clips_ok}/{total} clips done{failed_txt} — {pct}%"
+                            show_progress(
+                                f"Bulk cutting: {clips_ok}/{total} clips done{failed_txt} — {pct}%",
+                                overall,
                             )
                         else:
-                            show_status(f"Bulk cutting... {pct}%")
+                            show_progress(f"Bulk cutting... {pct}%", overall)
 
                     clip_progress(0.0)
                     try:
@@ -2987,7 +3063,9 @@ class LosslessVideoApp(_BaseTk):
                     lambda it=item, e=str(exc):
                         self._bulk_set_status(it, f"Failed: {e}")
                 )
+            done_sec = done_sec_before + sum(clip_lengths)
 
+        self.after(0, lambda: self._end_progress("bulk"))
         self.after(0, lambda: self.bulk_btn.config(state="normal"))
         done_text = f"Bulk cut finished — {clips_ok} clip" + ("" if clips_ok == 1 else "s") + " completed"
         if files_failed:
@@ -3933,7 +4011,7 @@ class LosslessVideoApp(_BaseTk):
                     out_path
                 ]
 
-            report = self._progress_reporter("Cropping (re-encoding video)...")
+            report = self._progress_reporter("Cropping (re-encoding video)...", "crop")
             encoder_args, _label = get_video_encoder_args(ffmpeg)
             proc = run_ffmpeg(build_cmd(encoder_args), self.resize_duration, report)
             if proc.returncode != 0 and encoder_args[1] != "libx264":
@@ -3950,6 +4028,7 @@ class LosslessVideoApp(_BaseTk):
             self.after(0, lambda e=str(exc): self._resize_done(e, False))
 
     def _resize_done(self, info, success):
+        self._end_progress("crop")
         self.resize_save_btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
@@ -4669,7 +4748,7 @@ class LosslessVideoApp(_BaseTk):
             mean_re = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
             means = {}
             n_tracks = len(self.audio_tracks)
-            report = self._progress_reporter("Analyzing track loudness...")
+            report = self._progress_reporter("Analyzing track loudness...", "audio_balance")
             for i, track in enumerate(self.audio_tracks):
                 cmd = [
                     ffmpeg, "-i", self.audio_input_path,
@@ -4702,6 +4781,7 @@ class LosslessVideoApp(_BaseTk):
             self.after(0, lambda e=str(exc): self._audio_auto_balance_done({}, False, e))
 
     def _audio_auto_balance_done(self, gains, success, error):
+        self._end_progress("audio_balance")
         self.audio_balance_btn.config(state="normal")
         if not success:
             self.status_lbl.config(text="Auto balance failed")
@@ -4777,7 +4857,7 @@ class LosslessVideoApp(_BaseTk):
                 out_path,
             ]
             proc = run_ffmpeg(
-                cmd, self.audio_duration, self._progress_reporter("Mixing audio tracks...")
+                cmd, self.audio_duration, self._progress_reporter("Mixing audio tracks...", "audio_mix")
             )
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr[-3000:])
@@ -4787,6 +4867,7 @@ class LosslessVideoApp(_BaseTk):
             self.after(0, lambda e=str(exc): self._audio_finalize_done(e, False))
 
     def _audio_finalize_done(self, info, success):
+        self._end_progress("audio_mix")
         self.audio_finalize_btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
@@ -4820,6 +4901,11 @@ class LosslessVideoApp(_BaseTk):
             bar, text="Ready", bg="#e6e6e6", anchor="w", font=("Segoe UI", 8)
         )
         self.status_lbl.pack(side="left", padx=4, pady=0)
+        # Shown (packed on the right) only while a job is running.
+        self.progress_bar = ttk.Progressbar(bar, mode="determinate", maximum=1000, length=180)
+        self.progress_eta_lbl = tk.Label(
+            bar, text="", bg="#e6e6e6", fg="#555555", anchor="e", font=("Segoe UI", 8)
+        )
 
     # ====================================================================
     # Drag & drop
