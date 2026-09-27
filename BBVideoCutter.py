@@ -1133,7 +1133,6 @@ class LosslessVideoApp(_BaseTk):
         # geometry("+x+y") positions, so the offset stays exact.
         self._window_drag_offset = (event.x_root - self.winfo_x(),
                                     event.y_root - self.winfo_y())
-        event.widget.config(cursor="fleur")
 
     def _window_drag_motion(self, event):
         offset = getattr(self, "_window_drag_offset", None)
@@ -1142,10 +1141,7 @@ class LosslessVideoApp(_BaseTk):
         self.geometry(f"+{event.x_root - offset[0]}+{event.y_root - offset[1]}")
 
     def _window_drag_end(self, event):
-        if getattr(self, "_window_drag_offset", None) is None:
-            return
         self._window_drag_offset = None
-        event.widget.config(cursor="")
 
     # ====================================================================
     # Shared: light / dark theme (View menu)
