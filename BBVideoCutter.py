@@ -46,7 +46,10 @@ Bulk Cut tab
 ------------
 Batch version of the Cut tab: drop in files whose names contain one or
 more cut ranges (e.g. "clip [00.00.00-00.00.17].mp4") and cut them all in
-one pass, using whichever of the three cut modes is selected. Works as a
+one pass, using whichever of the three cut modes is selected. A bracket
+like [-43.-51] means second 43 to 51 of the last minute that has them
+(19:43-19:51 in a 20:10 video), so it is resolved from the video's
+length when the file is added. Works as a
 live queue: rows added mid-run are picked up, rows removed before their
 turn are never processed. A file with several ranges produces
 name.CUT01.(<range>).ext, name.CUT02.(<range>).ext, and so on.
@@ -682,17 +685,52 @@ def parse_bracket_time(token: str) -> float:
     return h * 3600 + mnt * 60 + sec
 
 
-def find_bulk_cut_ranges(filename: str):
-    """Return every [start-end] range in a filename, in filename order."""
-    ranges = []
+# "Last minute" form: [-43.-51] means second 43 to second 51 of the last
+# minute in the video that has them. Which minute that is depends on the
+# video's length, so it can only be resolved once the duration is known.
+BULK_LAST_MINUTE_RE = re.compile(r"\[-(\d{1,2})\.-(\d{1,2})\]")
+
+
+def resolve_last_minute_range(start_s: int, end_s: int, duration: float):
+    """Seconds start_s..end_s of the last minute that has them, as absolute
+    (start_sec, end_sec), or None if the video is too short.
+
+    The end is the latest MM:end_s that is still inside the video; the start
+    is the latest MM:start_s before that end. So for a 20:10 video,
+    [-43.-51] -> 19:43-19:51 (20:51 would be past the end). A start second
+    bigger than the end second wraps back a minute: [-50.-10] -> 19:50-20:10.
+    """
+    end_minute = math.floor((duration - end_s) / 60)
+    if end_minute < 0:
+        return None
+    end_sec = end_minute * 60 + end_s
+    start_minute = (end_sec - start_s - 1) // 60
+    if start_minute < 0:
+        return None
+    return start_minute * 60 + start_s, end_sec
+
+
+def find_bulk_cut_ranges(filename: str, duration=None):
+    """Return every [start-end] and [-SS.-SS] range in a filename, in
+    filename order. A [-SS.-SS] range needs the video's duration; without
+    it (or when the video is too short for it) it comes back as
+    (None, None), same as an unreadable bracket."""
+    found = []
     for match in BULK_BRACKET_RE.finditer(filename):
         try:
             start_sec = parse_bracket_time(match.group(1))
             end_sec = parse_bracket_time(match.group(2))
-            ranges.append((start_sec, end_sec))
+            found.append((match.start(), (start_sec, end_sec)))
         except ValueError:
-            ranges.append((None, None))
-    return ranges
+            found.append((match.start(), (None, None)))
+    for match in BULK_LAST_MINUTE_RE.finditer(filename):
+        start_s, end_s = int(match.group(1)), int(match.group(2))
+        resolved = None
+        if duration is not None and start_s <= 59 and end_s <= 59:
+            resolved = resolve_last_minute_range(start_s, end_s, duration)
+        found.append((match.start(), resolved or (None, None)))
+    found.sort(key=lambda pair: pair[0])
+    return [rng for _pos, rng in found]
 
 
 def find_bulk_cut_range(filename: str):
@@ -706,7 +744,7 @@ def find_bulk_cut_range(filename: str):
 
 def strip_bracket_from_name(name_no_ext: str) -> str:
     """Remove all [start-end] brackets from a filename and tidy separators."""
-    stripped = BULK_BRACKET_RE.sub("", name_no_ext)
+    stripped = BULK_LAST_MINUTE_RE.sub("", BULK_BRACKET_RE.sub("", name_no_ext))
     return stripped.strip(" _-.") or name_no_ext
 
 
@@ -2725,7 +2763,8 @@ class LosslessVideoApp(_BaseTk):
             header,
             text="Drop video files whose name contains one or more cut ranges, e.g. "
                  "\"clip [00.00.00-00.00.17] [01.10-01.25].mp4\". "
-                 "MM.SS and HH.MM.SS are both accepted. Each bracket creates its own lossless clip.",
+                 "MM.SS and HH.MM.SS are both accepted, and [-43.-51] counts from the end "
+                 "(see below). Each bracket creates its own lossless clip.",
             bg="#f0f0f0", anchor="w", wraplength=850, justify="left",
         ).pack(side="left", fill="x", expand=True)
 
@@ -2770,7 +2809,10 @@ class LosslessVideoApp(_BaseTk):
             footer,
             text="Bracket rule: 3 dot-separated numbers = HH.MM.SS, 2 numbers = MM.SS. "
                  "Multiple brackets create multiple clips. A seconds typo such as 01.25.272 "
-                 "is normalized to 01.25.27. Files without a valid bracket are skipped.",
+                 "is normalized to 01.25.27. Files without a valid bracket are skipped.\n"
+                 "Last minute: [-43.-51] cuts second 43 to second 51 of the last minute that "
+                 "has them. Example: in a 20:10 long video, 20:51 is past the end, so it cuts "
+                 "19:43 - 19:51. In a 20:55 long video it cuts 20:43 - 20:51.",
             bg="#f0f0f0", fg="#555555", wraplength=850, justify="left",
         ).pack(fill="x")
 
@@ -2808,11 +2850,31 @@ class LosslessVideoApp(_BaseTk):
             if not p.lower().endswith(VIDEO_EXTS):
                 continue
 
-            ranges = find_bulk_cut_ranges(os.path.basename(p))
+            name = os.path.basename(p)
+            # A [-SS.-SS] range is relative to the end of the video, so only
+            # those files pay for an ffprobe call to read the length.
+            last_minute = BULK_LAST_MINUTE_RE.search(name)
+            duration = None
+            if last_minute:
+                try:
+                    duration = probe_duration(find_exe("ffprobe"), p)
+                except FileNotFoundError:
+                    duration = None
+            ranges = find_bulk_cut_ranges(name, duration)
             valid_ranges = [(s, e) for s, e in ranges if s is not None and e is not None]
             invalid_count = len(ranges) - len(valid_ranges)
 
-            if not valid_ranges:
+            if last_minute and duration is None:
+                range_txt = "—"
+                length_txt = "—"
+                status = "Failed (unreadable)"
+            elif last_minute and any(
+                    resolve_last_minute_range(int(m.group(1)), int(m.group(2)), duration) is None
+                    for m in BULK_LAST_MINUTE_RE.finditer(name)):
+                range_txt = "—"
+                length_txt = "—"
+                status = "Failed (too short)"
+            elif not valid_ranges:
                 range_txt = "—"
                 length_txt = "—"
                 status = "Failed (no valid bracket)"
