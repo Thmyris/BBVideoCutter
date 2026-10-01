@@ -31,7 +31,8 @@ pip install pillow tkinterdnd2
 python BBVideoCutter.py
 ```
 
-Requires ffmpeg + ffprobe on `PATH`.
+Requires ffmpeg + ffprobe on `PATH`. On Windows, double-click `run.pyw`
+to start it without a console window.
 
 ## Building it yourself
 
