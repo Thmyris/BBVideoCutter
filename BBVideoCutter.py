@@ -48,8 +48,10 @@ Batch version of the Cut tab: drop in files whose names contain one or
 more cut ranges (e.g. "clip [00.00.00-00.00.17].mp4") and cut them all in
 one pass, using whichever of the three cut modes is selected. A bracket
 like [-43.-51] means second 43 to 51 of the last minute that has them
-(19:43-19:51 in a 20:10 video), so it is resolved from the video's
-length when the file is added. Works as a
+(19:43-19:51 in a 20:10 video), and [-27] means from second 27 of the
+last minute that has it to the end (19:27-20:10 in a 20:10 video), so
+these are resolved from the video's length when the file is added.
+Works as a
 live queue: rows added mid-run are picked up, rows removed before their
 turn are never processed. A file with several ranges produces
 name.CUT01.(<range>).ext, name.CUT02.(<range>).ext, and so on.
@@ -686,33 +688,51 @@ def parse_bracket_time(token: str) -> float:
 
 
 # "Last minute" form: [-43.-51] means second 43 to second 51 of the last
-# minute in the video that has them. Which minute that is depends on the
-# video's length, so it can only be resolved once the duration is known.
-BULK_LAST_MINUTE_RE = re.compile(r"\[-(\d{1,2})\.-(\d{1,2})\]")
+# minute in the video that has them, and [-27] means from second 27 of the
+# last minute that has it to the end of the video. Which minute that is
+# depends on the video's length, so it can only be resolved once the
+# duration is known.
+BULK_LAST_MINUTE_RE = re.compile(r"\[-(\d{1,2})(?:\.-(\d{1,2}))?\]")
 
 
-def resolve_last_minute_range(start_s: int, end_s: int, duration: float):
+def resolve_last_minute_range(start_s: int, end_s, duration: float):
     """Seconds start_s..end_s of the last minute that has them, as absolute
-    (start_sec, end_sec), or None if the video is too short.
+    (start_sec, end_sec), or None if the video is too short. end_s=None
+    means "to the end of the video".
 
     The end is the latest MM:end_s that is still inside the video; the start
     is the latest MM:start_s before that end. So for a 20:10 video,
     [-43.-51] -> 19:43-19:51 (20:51 would be past the end). A start second
     bigger than the end second wraps back a minute: [-50.-10] -> 19:50-20:10.
+    [-27] -> 19:27-20:10 (20:27 would be past the end).
     """
-    end_minute = math.floor((duration - end_s) / 60)
-    if end_minute < 0:
-        return None
-    end_sec = end_minute * 60 + end_s
-    start_minute = (end_sec - start_s - 1) // 60
+    if end_s is None:
+        end_sec = duration
+    else:
+        end_minute = math.floor((duration - end_s) / 60)
+        if end_minute < 0:
+            return None
+        end_sec = end_minute * 60 + end_s
+    # Latest minute whose MM:start_s is still before the end.
+    start_minute = math.ceil((end_sec - start_s) / 60) - 1
     if start_minute < 0:
         return None
     return start_minute * 60 + start_s, end_sec
 
 
+def resolve_last_minute_match(match, duration):
+    """resolve_last_minute_range for a BULK_LAST_MINUTE_RE match. None when
+    the duration is unknown, a second is over 59, or the video is too short."""
+    start_s = int(match.group(1))
+    end_s = None if match.group(2) is None else int(match.group(2))
+    if duration is None or start_s > 59 or (end_s is not None and end_s > 59):
+        return None
+    return resolve_last_minute_range(start_s, end_s, duration)
+
+
 def find_bulk_cut_ranges(filename: str, duration=None):
-    """Return every [start-end] and [-SS.-SS] range in a filename, in
-    filename order. A [-SS.-SS] range needs the video's duration; without
+    """Return every [start-end], [-SS.-SS] and [-SS] range in a filename, in
+    filename order. A [-SS.-SS] / [-SS] range needs the video's duration; without
     it (or when the video is too short for it) it comes back as
     (None, None), same as an unreadable bracket."""
     found = []
@@ -724,10 +744,7 @@ def find_bulk_cut_ranges(filename: str, duration=None):
         except ValueError:
             found.append((match.start(), (None, None)))
     for match in BULK_LAST_MINUTE_RE.finditer(filename):
-        start_s, end_s = int(match.group(1)), int(match.group(2))
-        resolved = None
-        if duration is not None and start_s <= 59 and end_s <= 59:
-            resolved = resolve_last_minute_range(start_s, end_s, duration)
+        resolved = resolve_last_minute_match(match, duration)
         found.append((match.start(), resolved or (None, None)))
     found.sort(key=lambda pair: pair[0])
     return [rng for _pos, rng in found]
@@ -2763,7 +2780,7 @@ class LosslessVideoApp(_BaseTk):
             header,
             text="Drop video files whose name contains one or more cut ranges, e.g. "
                  "\"clip [00.00.00-00.00.17] [01.10-01.25].mp4\". "
-                 "MM.SS and HH.MM.SS are both accepted, and [-43.-51] counts from the end "
+                 "MM.SS and HH.MM.SS are both accepted, and [-43.-51] / [-27] count from the end "
                  "(see below). Each bracket creates its own lossless clip.",
             bg="#f0f0f0", anchor="w", wraplength=850, justify="left",
         ).pack(side="left", fill="x", expand=True)
@@ -2812,7 +2829,9 @@ class LosslessVideoApp(_BaseTk):
                  "is normalized to 01.25.27. Files without a valid bracket are skipped.\n"
                  "Last minute: [-43.-51] cuts second 43 to second 51 of the last minute that "
                  "has them. Example: in a 20:10 long video, 20:51 is past the end, so it cuts "
-                 "19:43 - 19:51. In a 20:55 long video it cuts 20:43 - 20:51.",
+                 "19:43 - 19:51. In a 20:55 long video it cuts 20:43 - 20:51.\n"
+                 "To the end: [-27] cuts from second 27 of the last minute that has it to the "
+                 "end of the video. Example: in a 20:10 long video it cuts 19:27 - 20:10.",
             bg="#f0f0f0", fg="#555555", wraplength=850, justify="left",
         ).pack(fill="x")
 
@@ -2851,7 +2870,7 @@ class LosslessVideoApp(_BaseTk):
                 continue
 
             name = os.path.basename(p)
-            # A [-SS.-SS] range is relative to the end of the video, so only
+            # A [-SS.-SS] / [-SS] range is relative to the end of the video, so only
             # those files pay for an ffprobe call to read the length.
             last_minute = BULK_LAST_MINUTE_RE.search(name)
             duration = None
@@ -2869,7 +2888,8 @@ class LosslessVideoApp(_BaseTk):
                 length_txt = "—"
                 status = "Failed (unreadable)"
             elif last_minute and any(
-                    resolve_last_minute_range(int(m.group(1)), int(m.group(2)), duration) is None
+                    resolve_last_minute_match(m, duration) is None
+                    and all(int(g) <= 59 for g in m.groups() if g is not None)
                     for m in BULK_LAST_MINUTE_RE.finditer(name)):
                 range_txt = "—"
                 length_txt = "—"

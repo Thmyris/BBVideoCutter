@@ -18,7 +18,8 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 - **Combine** — join videos without re-encoding (same codec/format).
 - **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
-  minute that has them: 19:43–19:51 in a 20:10 video.
+  minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
+  second 27 of the last minute that has it to the end: 19:27–20:10.
 - **Crop** — visual crop editor with widescreen/vertical aspect presets.
 - **Audio** — mute/mix individual audio tracks.
 
