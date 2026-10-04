@@ -825,13 +825,33 @@ THEME_COLORS = {
         "slider_start": "#1a1a1a",
         "timeslider_track": "#d5d5d5",
         "aspect_active": "#cfe2ff",
+        # The menu bar matches the title bar above it, so the two read as
+        # one header: white like the Windows 10 caption in light mode...
+        "menubar_bg": "#ffffff",
+        "menubar_fg": "#000000",
+        "menubar_hover": "#e5f3ff",
     },
     "dark": {
         "slider_track": "#505056",
         "slider_start": "#d0d0d4",
         "timeslider_track": "#505056",
         "aspect_active": "#28456f",
+        # ...and the panel color, next to the dark caption, in dark mode.
+        "menubar_bg": DARK["panel"],
+        "menubar_fg": DARK["text"],
+        "menubar_hover": DARK["button"],
     },
+}
+
+# Dropdown menu colors in dark mode. In light mode the dropdowns keep the
+# system menu colors Tk gives them.
+DARK_MENU = {
+    "background": DARK["status"],
+    "foreground": DARK["text"],
+    "activebackground": DARK["button_active"],
+    "activeforeground": DARK["text"],
+    "disabledforeground": DARK["text_disabled"],
+    "selectcolor": DARK["text"],  # the Dark mode / overwrite check marks
 }
 
 # Light chrome backgrounds. A widget whose background is one of these is
@@ -909,6 +929,82 @@ def enable_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()  # Vista/7 fallback
         except (AttributeError, OSError):
             pass
+
+
+_menu_margin_brushes = {}  # "#rrggbb" -> GDI brush, made once and kept
+
+
+def post_with_menu_margin(post, color):
+    """Runs post(), which opens a Tk menu and (on Windows) returns once it
+    has closed, with the menu's margin painted `color` ("#rrggbb"), or the
+    system menu color for None.
+
+    Tk draws every menu item itself, in the menu's own colors, but Windows
+    paints the 2 px margin around the items with the menu's background
+    brush, which Tk leaves at the system menu color: a light frame around a
+    dark menu. Tk keeps the menu handle to itself, so a hook on this thread
+    catches it as Windows opens the menu (WM_INITMENUPOPUP, before anything
+    is drawn) and sets the brush. The hook exists only while post() runs."""
+    if os.name != "nt":
+        return post()
+    from ctypes import wintypes
+
+    class CWPSTRUCT(ctypes.Structure):
+        _fields_ = [("lParam", wintypes.LPARAM), ("wParam", wintypes.WPARAM),
+                    ("message", wintypes.UINT), ("hwnd", wintypes.HWND)]
+
+    class MENUINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.DWORD),
+                    ("dwStyle", wintypes.DWORD), ("cyMax", wintypes.UINT),
+                    ("hbrBack", wintypes.HBRUSH), ("dwContextHelpID", wintypes.DWORD),
+                    ("dwMenuData", ctypes.c_size_t)]
+
+    WH_CALLWNDPROC, WM_INITMENUPOPUP, MIM_BACKGROUND = 4, 0x0117, 0x2
+    try:
+        # Private handles, so these argtypes don't leak into other ctypes calls.
+        user32 = ctypes.WinDLL("user32")
+        gdi32 = ctypes.WinDLL("gdi32")
+        hookproc_t = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                        wintypes.WPARAM, wintypes.LPARAM)
+        user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, hookproc_t,
+                                             wintypes.HINSTANCE, wintypes.DWORD]
+        user32.CallNextHookEx.restype = ctypes.c_ssize_t
+        user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int,
+                                          wintypes.WPARAM, wintypes.LPARAM]
+        user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+        user32.SetMenuInfo.argtypes = [wintypes.HMENU, ctypes.POINTER(MENUINFO)]
+        gdi32.CreateSolidBrush.restype = wintypes.HBRUSH
+        gdi32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
+        brush = None
+        if color:
+            brush = _menu_margin_brushes.get(color)
+            if brush is None:
+                r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+                brush = _menu_margin_brushes[color] = gdi32.CreateSolidBrush(r | g << 8 | b << 16)
+    except (AttributeError, OSError):
+        return post()
+
+    def on_message(code, wparam, lparam):
+        try:
+            if code >= 0:
+                msg = CWPSTRUCT.from_address(lparam)
+                if msg.message == WM_INITMENUPOPUP:
+                    info = MENUINFO(cbSize=ctypes.sizeof(MENUINFO),
+                                    fMask=MIM_BACKGROUND, hbrBack=brush)
+                    user32.SetMenuInfo(msg.wParam, ctypes.byref(info))
+        except Exception:
+            pass
+        return user32.CallNextHookEx(None, code, wparam, lparam)
+
+    proc = hookproc_t(on_message)  # kept referenced until unhooked below
+    hook = user32.SetWindowsHookExW(WH_CALLWNDPROC, proc, None,
+                                    ctypes.windll.kernel32.GetCurrentThreadId())
+    try:
+        return post()
+    finally:
+        if hook:
+            user32.UnhookWindowsHookEx(hook)
 
 
 # --------------------------------------------------------------------------
@@ -1033,11 +1129,14 @@ class LosslessVideoApp(_BaseTk):
         self.THUMB_SIZE = (px(self.THUMB_SIZE[0]), px(self.THUMB_SIZE[1]))
         self.title("BarkBark Lossless Video Cutter")
         # 900x700 at 100% scaling, never bigger than the screen at high scaling.
+        # Plus the app-drawn menu bar, which is inside this size where the
+        # native one (20 px at 100%) was outside it, so the tabs get as much
+        # room as they always had.
         screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
         win_w = min(px(900), int(screen_w * 0.95))
-        win_h = min(px(700), int(screen_h * 0.9))
+        win_h = min(px(700 + 20), int(screen_h * 0.9))
         self.geometry(f"{win_w}x{win_h}")
-        self.minsize(min(px(720), win_w), min(px(560), win_h))   # <-- real minimum window size, enforced
+        self.minsize(min(px(720), win_w), min(px(560 + 20), win_h))   # <-- real minimum window size, enforced
 
         self.input_path = None
         self.duration = 0.0
@@ -1169,33 +1268,110 @@ class LosslessVideoApp(_BaseTk):
     # Menu
     # ====================================================================
     def _build_menu(self):
-        menubar = tk.Menu(self)
-        file_menu = tk.Menu(menubar, tearoff=0)
+        """The menu bar is drawn by the app (a strip of menubuttons) rather
+        than being the native Windows menu bar, which Windows 10 always
+        paints light, so it can follow the light / dark theme. Each button
+        opens an ordinary Tk dropdown menu."""
+        self.menu_bar = tk.Frame(self, bg=self._theme_color("menubar_bg"))
+        self.menu_bar.pack(side="top", fill="x")
+        # The empty part of the bar moves the window, like a title bar.
+        self._bind_window_drag(self.menu_bar, lambda e: True)
+        self._menu_bar_items = []        # (menubutton, its dropdown menu)
+
+        file_menu = self._add_menu_bar_menu("File")
         file_menu.add_command(label="Open Video (Cut tab)...", command=self.open_file_for_cut)
         file_menu.add_command(label="Open Video (Crop tab)...", command=self.open_file_for_resize)
         file_menu.add_command(label="Open Video (Audio tab)...", command=self.open_file_for_audio)
         file_menu.add_command(label="Add Videos (Combine tab)...", command=self.add_files_for_combine)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_app_close)
-        menubar.add_cascade(label="File", menu=file_menu)
 
-        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu = self._add_menu_bar_menu("View")
         view_menu.add_checkbutton(
             label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
         )
-        menubar.add_cascade(label="View", menu=view_menu)
 
-        options_menu = tk.Menu(menubar, tearoff=0)
+        options_menu = self._add_menu_bar_menu("Options")
         options_menu.add_checkbutton(
             label="Warn before overwriting existing files",
             variable=self.warn_overwrite_var,
         )
-        menubar.add_cascade(label="Options", menu=options_menu)
 
-        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu = self._add_menu_bar_menu("Help")
         help_menu.add_command(label="About", command=self._show_about)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        self.config(menu=menubar)
+
+        # The system menu colors, put back on the dropdowns in light mode.
+        self._menu_light_colors = {opt: str(file_menu.cget(opt)) for opt in DARK_MENU}
+        self._style_menu_bar()
+
+        # Keyboard: Alt + the underlined letter opens that menu, F10 the
+        # first one. Tk forwards every other Alt key and F10 to Windows
+        # (Alt+F4, Alt+Space...); a menu letter is no longer forwarded,
+        # since with no native menu bar Windows would only beep at it.
+        self.bind_all("<Alt-KeyPress>", self._on_menu_bar_alt_key)
+        self.bind_all("<KeyPress-F10>", lambda e: self._post_menu_bar_menu(
+            self._menu_bar_items[0][0]))
+        self.bind_all("<KeyRelease-F10>", lambda e: "break")
+
+    def _add_menu_bar_menu(self, label):
+        """A menubutton on the menu bar plus its dropdown menu (returned)."""
+        button = tk.Menubutton(
+            self.menu_bar, text=label, underline=0, font="TkMenuFont",
+            relief="flat", borderwidth=0, highlightthickness=0,
+            padx=px(7), pady=px(3),
+        )
+        # Tk wants a menubutton's menu to be its child.
+        menu = tk.Menu(button, tearoff=0)
+        button.configure(menu=menu)
+        button.pack(side="left")
+        # Posted here, not by the class binding: on Windows the menu is
+        # open for as long as the post call runs, and Tk's own binding
+        # never clears its "posted" mark afterwards when a click (rather
+        # than a drag) chose the item.
+        button.bind("<ButtonPress-1>", lambda e: self._post_menu_bar_menu(button))
+        self._menu_bar_items.append((button, menu))
+        return menu
+
+    def _post_menu_bar_menu(self, button):
+        """Opens button's dropdown below it. On Windows this returns only
+        once the menu has closed again."""
+        # Highlighted while its menu is open, also when opened by keyboard.
+        button.configure(state="active")
+        margin = DARK_MENU["background"] if self._is_dark() else None
+        post_with_menu_margin(lambda: self.tk.call("tk::MbPost", button), margin)
+        try:
+            self.tk.call("tk::MenuUnpost", "")
+            under = self.tk.call("winfo", "containing", *self.winfo_pointerxy())
+            if str(under) != str(button):
+                button.configure(state="normal")
+        except tk.TclError:
+            pass  # the chosen item closed the app (File > Exit)
+        return "break"
+
+    def _on_menu_bar_alt_key(self, event):
+        char = (event.keysym if len(event.keysym) == 1 else event.char or "").lower()
+        for button, _menu in self._menu_bar_items:
+            text = button.cget("text")
+            if char and text[int(button.cget("underline"))].lower() == char:
+                return self._post_menu_bar_menu(button)
+        # Not a menu letter: what Tk itself does with Alt keys on Windows.
+        self.tk.call("tk::WinMenuKey", event.widget, event.keysym_num)
+        return None
+
+    def _style_menu_bar(self):
+        """Colors the menu bar and its dropdowns for the current theme.
+        Their colors are none of the light chrome ones, so the general
+        dark-mode swap (_theme_widget) leaves them to this."""
+        bg = self._theme_color("menubar_bg")
+        fg = self._theme_color("menubar_fg")
+        self.menu_bar.configure(background=bg)
+        dropdown = DARK_MENU if self._is_dark() else self._menu_light_colors
+        for button, menu in self._menu_bar_items:
+            button.configure(
+                background=bg, foreground=fg, activeforeground=fg,
+                activebackground=self._theme_color("menubar_hover"),
+            )
+            menu.configure(dropdown)
 
     def _show_about(self):
         messagebox.showinfo(
@@ -1261,6 +1437,7 @@ class LosslessVideoApp(_BaseTk):
         and everything code draws with theme colors."""
         self._apply_ttk_theme()
         self._theme_tree(self)
+        self._style_menu_bar()
         self._set_title_bar_dark(self._is_dark())
         self._redraw_slider()  # canvas items drawn with theme colors
 
