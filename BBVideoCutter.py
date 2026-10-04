@@ -1563,11 +1563,14 @@ class LosslessVideoApp(_BaseTk):
                 if ctypes.windll.dwmapi.DwmSetWindowAttribute(
                         hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0:
                     break
-            # Repaint the caption now instead of on the next activation.
-            SWP_FLAGS = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020  # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
-            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
-            RDW_FLAGS = 0x0001 | 0x0100 | 0x0400  # INVALIDATE|UPDATENOW|FRAME
-            ctypes.windll.user32.RedrawWindow(hwnd, None, None, RDW_FLAGS)
+            # Windows 10 keeps drawing the old caption until the window's
+            # active state changes (a redraw or SWP_FRAMECHANGED doesn't do
+            # it), so tell it the state changed: flip it and put it back.
+            # This only repaints the frame; nothing is activated.
+            WM_NCACTIVATE = 0x0086
+            active = ctypes.windll.user32.GetForegroundWindow() == hwnd
+            ctypes.windll.user32.SendMessageW(hwnd, WM_NCACTIVATE, int(not active), 0)
+            ctypes.windll.user32.SendMessageW(hwnd, WM_NCACTIVATE, int(active), 0)
         except Exception:
             pass
 
