@@ -63,6 +63,7 @@ class Quiet:
         self._hook = None
         self._proc = None         # the callback, kept alive for the hook
         self._inits = {}          # class -> its __init__ as it was
+        self._user32 = None       # the hook's own user32 handle
 
     def describe(self):
         how = "shown" if self.show else "hidden (transparent)"
@@ -88,7 +89,7 @@ class Quiet:
             cls.__init__ = init
         self._inits = {}
         if self._hook:
-            ctypes.windll.user32.UnhookWindowsHookEx(self._hook)
+            self._user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
         self.hooked = False
 
@@ -112,7 +113,9 @@ def _second_monitor_corner():
     """(x, y) just inside the first monitor that is not the primary, in the
     coordinates this process sees; None with one monitor."""
     from ctypes import wintypes
-    user32 = ctypes.windll.user32
+    # A private handle, so these argtypes don't leak into the app's own
+    # ctypes.windll.user32 calls.
+    user32 = ctypes.WinDLL("user32")
 
     class MONITORINFO(ctypes.Structure):
         _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
@@ -120,6 +123,13 @@ def _second_monitor_corner():
 
     proc_t = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
                                 ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    # Without these, ctypes passes the monitor handle as a 32-bit int and a
+    # handle above 2**31 fails with OverflowError, so nothing got parked.
+    user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+    user32.GetMonitorInfoW.restype = wintypes.BOOL
+    user32.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                                           proc_t, wintypes.LPARAM]
+    user32.EnumDisplayMonitors.restype = wintypes.BOOL
     found = []
 
     def cb(hmon, hdc, rect, lparam):
@@ -145,8 +155,9 @@ def _hook_activation(q):
     """A thread CBT hook: NOACTIVATE on every new top-level window, and no
     to every activation."""
     from ctypes import wintypes
-    user32 = ctypes.windll.user32
+    user32 = ctypes.WinDLL("user32")          # private: argtypes set below stay here
     kernel32 = ctypes.windll.kernel32
+    q._user32 = user32
     hookproc_t = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
                                     wintypes.WPARAM, wintypes.LPARAM)
     user32.SetWindowsHookExW.restype = wintypes.HHOOK
@@ -193,6 +204,10 @@ def _patch_init(q, cls):
         try:
             if not q.show:
                 self.attributes("-alpha", 0.0)
+            # Found again per window: the app turns DPI awareness on as it
+            # starts, which changes the coordinates this process sees.
+            if os.name == "nt":
+                q.park = _second_monitor_corner()
             if q.park:
                 self.geometry("+{}+{}".format(*q.park))
         except tk.TclError:                               # pragma: no cover
