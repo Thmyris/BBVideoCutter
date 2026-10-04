@@ -115,7 +115,7 @@ import threading
 import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, font as tkfont
 
 try:
     from PIL import Image, ImageTk
@@ -881,6 +881,37 @@ def _dark_bg(widget_class, option, value):
 
 
 # --------------------------------------------------------------------------
+# High-DPI. Without this, Windows treats the app as DPI-unaware: it draws
+# at 96 DPI and Windows stretches the finished bitmap to the display's
+# scaling (125%, 150%...), which makes all text blurry. Declaring "system
+# DPI aware" makes Windows hand Tk the real DPI instead: fonts (sized in
+# points) come out sharp and at the right size on their own, and every
+# size the code gives in raw pixels goes through px() to grow with them.
+# Per-monitor awareness is deliberately not used -- Tk 8.6 doesn't
+# re-layout when the window moves to a monitor with different scaling.
+# --------------------------------------------------------------------------
+UI_SCALE = 1.0  # display DPI / 96, set once the main window exists
+
+
+def px(n):
+    """A size designed at 100% scaling, in pixels at the current scaling."""
+    return int(round(n * UI_SCALE))
+
+
+def enable_dpi_awareness():
+    """Must run before the first window is created; harmless to repeat."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # Vista/7 fallback
+        except (AttributeError, OSError):
+            pass
+
+
+# --------------------------------------------------------------------------
 # TimeSlider -- a flat, modern single-handle scrubber bar.
 #
 # Replaces the native tk.Scale widget, which renders as the dated, grooved
@@ -893,7 +924,9 @@ def _dark_bg(widget_class, option, value):
 class TimeSlider(tk.Canvas):
     def __init__(self, parent, command=None, height=28, track_color="#d5d5d5",
                  fill_color="#3d8bfd", handle_color="#1a73e8", bg="#f0f0f0", **kwargs):
-        super().__init__(parent, height=height, bg=bg, highlightthickness=0, **kwargs)
+        if "width" in kwargs:
+            kwargs["width"] = px(kwargs["width"])
+        super().__init__(parent, height=px(height), bg=bg, highlightthickness=0, **kwargs)
         self._command = command
         self._minv = 0.0
         self._maxv = 1.0
@@ -935,8 +968,8 @@ class TimeSlider(tk.Canvas):
     def _track_bounds(self):
         w = self.winfo_width()
         if w < 2:
-            w = 780
-        return 10, max(20, w - 10)
+            w = px(780)
+        return px(10), max(px(20), w - px(10))
 
     def _x_for(self, v):
         x0, x1 = self._track_bounds()
@@ -953,15 +986,15 @@ class TimeSlider(tk.Canvas):
     def _redraw(self):
         self.delete("all")
         x0, x1 = self._track_bounds()
-        h = self.winfo_height() or 28
+        h = self.winfo_height() or px(28)
         y = h / 2
-        self.create_line(x0, y, x1, y, fill=self._track_color, width=5, capstyle="round")
+        self.create_line(x0, y, x1, y, fill=self._track_color, width=px(5), capstyle="round")
         hx = self._x_for(self._value)
         if hx > x0:
-            self.create_line(x0, y, hx, y, fill=self._fill_color, width=5, capstyle="round")
-        r = 9 if self._dragging else 7
+            self.create_line(x0, y, hx, y, fill=self._fill_color, width=px(5), capstyle="round")
+        r = px(9) if self._dragging else px(7)
         self.create_oval(hx - r, y - r, hx + r, y + r,
-                          fill=self._handle_color, outline="#ffffff", width=2)
+                          fill=self._handle_color, outline="#ffffff", width=px(2))
 
     def _emit(self):
         if self._command:
@@ -991,10 +1024,20 @@ class TimeSlider(tk.Canvas):
 
 class LosslessVideoApp(_BaseTk):
     def __init__(self):
+        enable_dpi_awareness()  # before super().__init__() creates the window
         super().__init__()
+        global UI_SCALE
+        UI_SCALE = max(1.0, round(self.winfo_fpixels("1i") / 96.0, 2))
+        # Pixel sizes of the Combine rows, scaled like everything else.
+        self.ROW_HEIGHT = px(self.ROW_HEIGHT)
+        self.THUMB_SIZE = (px(self.THUMB_SIZE[0]), px(self.THUMB_SIZE[1]))
         self.title("BarkBark Lossless Video Cutter")
-        self.geometry("900x700")
-        self.minsize(720, 560)   # <-- real minimum window size, enforced
+        # 900x700 at 100% scaling, never bigger than the screen at high scaling.
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        win_w = min(px(900), int(screen_w * 0.95))
+        win_h = min(px(700), int(screen_h * 0.9))
+        self.geometry(f"{win_w}x{win_h}")
+        self.minsize(min(px(720), win_w), min(px(560), win_h))   # <-- real minimum window size, enforced
 
         self.input_path = None
         self.duration = 0.0
@@ -1059,6 +1102,7 @@ class LosslessVideoApp(_BaseTk):
         self.settings = load_settings()
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", False)))
         self._ttk_light_theme = ttk.Style(self).theme_use()
+        self._set_treeview_row_height(ttk.Style(self))
 
         self._build_menu()
 
@@ -1284,10 +1328,18 @@ class LosslessVideoApp(_BaseTk):
         if isinstance(w, TimeSlider):
             w.set_track_color(self._theme_color("timeslider_track"))
 
+    def _set_treeview_row_height(self, style):
+        """Treeview rows are a fixed 20 px by default, which is the bare line
+        height of the font at 125% scaling; size them from the font instead.
+        Style settings belong to a theme, so this runs again after a switch."""
+        linespace = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        style.configure("Treeview", rowheight=max(px(20), linespace + px(4)))
+
     def _apply_ttk_theme(self):
         style = ttk.Style(self)
         if not self._is_dark():
             style.theme_use(self._ttk_light_theme)
+            self._set_treeview_row_height(style)
             return
         # The native Windows ttk theme can't be recolored; clam can.
         style.theme_use("clam")
@@ -1307,6 +1359,7 @@ class LosslessVideoApp(_BaseTk):
                   lightcolor=[("selected", d["panel"])])
         style.configure("Treeview", background=d["field"], fieldbackground=d["field"],
                         foreground=d["text"])
+        self._set_treeview_row_height(style)
         style.map("Treeview", background=[("selected", d["select"])],
                   foreground=[("selected", "#ffffff")])
         style.configure("Treeview.Heading", background=d["button"], foreground=d["text"],
@@ -1531,7 +1584,7 @@ class LosslessVideoApp(_BaseTk):
             self.step_buttons += [b1, b2]
 
         # ---- slider
-        self.slider_canvas = tk.Canvas(controls, height=24, bg="#f0f0f0", highlightthickness=0)
+        self.slider_canvas = tk.Canvas(controls, height=px(24), bg="#f0f0f0", highlightthickness=0)
         self.slider_canvas.pack(fill="x", pady=(1, 1))
         self.slider_canvas.bind("<Configure>", lambda e: self._redraw_slider())
         self.slider_canvas.bind("<Button-1>", self._slider_click)
@@ -1729,14 +1782,14 @@ class LosslessVideoApp(_BaseTk):
     def _redraw_slider(self):
         c = self.slider_canvas
         c.delete("all")
-        w = c.winfo_width() or 780
-        y = 12
-        track_x0, track_x1 = 10, max(20, w - 10)
+        w = c.winfo_width() or px(780)
+        y = px(12)
+        track_x0, track_x1 = px(10), max(px(20), w - px(10))
         # Always draw the bare track, even with no file loaded yet, so the
         # slider doesn't visibly pop into existence the moment a video is
         # opened -- it's there from the start, just inert.
         c.create_line(track_x0, y, track_x1, y, fill=self._theme_color("slider_track"),
-                      width=4, capstyle="round")
+                      width=px(4), capstyle="round")
         self._track_x0, self._track_x1 = track_x0, track_x1
         if not self.input_path or self.duration <= 0:
             return
@@ -1746,10 +1799,11 @@ class LosslessVideoApp(_BaseTk):
             return track_x0 + frac * (track_x1 - track_x0)
 
         sx, ex = x_for(self.start_sec), x_for(self.end_sec)
-        c.create_line(sx, y, ex, y, fill="#3d8bfd", width=4, capstyle="round")
-        c.create_oval(sx - 7, y - 7, sx + 7, y + 7, fill=self._theme_color("slider_start"),
+        c.create_line(sx, y, ex, y, fill="#3d8bfd", width=px(4), capstyle="round")
+        r = px(7)
+        c.create_oval(sx - r, y - r, sx + r, y + r, fill=self._theme_color("slider_start"),
                       outline="")
-        c.create_oval(ex - 7, y - 7, ex + 7, y + 7, fill="#1a73e8", outline="")
+        c.create_oval(ex - r, y - r, ex + r, y + r, fill="#1a73e8", outline="")
 
     def _x_to_time(self, x):
         # Rounds to a whole second (.000) -- a drag is only pixel-precise,
@@ -2372,7 +2426,7 @@ class LosslessVideoApp(_BaseTk):
         header.grid(row=0, column=0, sticky="ew", padx=3, pady=(6, 2))
         tk.Label(header, text="Videos will be joined in the order listed below "
                  "(top to bottom). Drag a row to reorder it.",
-                 bg="#f0f0f0", anchor="w", wraplength=600, justify="left"
+                 bg="#f0f0f0", anchor="w", wraplength=px(600), justify="left"
                  ).pack(side="left", fill="x", expand=True)
 
         # list (custom scrollable rows with thumbnails) + side buttons
@@ -2425,11 +2479,11 @@ class LosslessVideoApp(_BaseTk):
 
         side = tk.Frame(body, bg="#f0f0f0")
         side.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        tk.Button(side, text="Add Files...", width=14, command=self.add_files_for_combine).pack(pady=2)
-        tk.Button(side, text="Remove Selected", width=14, command=self._combine_remove_selected).pack(pady=2)
-        tk.Button(side, text="Move Up", width=14, command=lambda: self._combine_move(-1)).pack(pady=2)
-        tk.Button(side, text="Move Down", width=14, command=lambda: self._combine_move(1)).pack(pady=2)
-        tk.Button(side, text="Clear All", width=14, command=self._combine_clear).pack(pady=2)
+        tk.Button(side, text="Add Files...", width=16, command=self.add_files_for_combine).pack(pady=2)
+        tk.Button(side, text="Remove Selected", width=16, command=self._combine_remove_selected).pack(pady=2)
+        tk.Button(side, text="Move Up", width=16, command=lambda: self._combine_move(-1)).pack(pady=2)
+        tk.Button(side, text="Move Down", width=16, command=lambda: self._combine_move(1)).pack(pady=2)
+        tk.Button(side, text="Clear All", width=16, command=self._combine_clear).pack(pady=2)
 
         self.combine_save_to_source_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -2442,7 +2496,7 @@ class LosslessVideoApp(_BaseTk):
         tk.Label(footer, text="Note: lossless joining requires all videos to share the "
                  "same codec/resolution/format (e.g. all H.264 MP4s). Mixed formats will "
                  "fail with an ffmpeg error rather than silently re-encoding.",
-                 bg="#f0f0f0", fg="#555555", wraplength=850, justify="left"
+                 bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left"
                  ).pack(fill="x")
 
         self.combine_btn = tk.Button(root, text="Combine Videos!", height=2,
@@ -2782,7 +2836,7 @@ class LosslessVideoApp(_BaseTk):
                  "\"clip [00.00.00-00.00.17] [01.10-01.25].mp4\". "
                  "MM.SS and HH.MM.SS are both accepted, and [-43.-51] / [-27] count from the end "
                  "(see below). Each bracket creates its own lossless clip.",
-            bg="#f0f0f0", anchor="w", wraplength=850, justify="left",
+            bg="#f0f0f0", anchor="w", wraplength=px(850), justify="left",
         ).pack(side="left", fill="x", expand=True)
 
         body = tk.Frame(root, bg="#f0f0f0")
@@ -2798,10 +2852,10 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_tree.heading("range", text="Cut Range")
         self.bulk_tree.heading("length", text="Final Length")
         self.bulk_tree.heading("status", text="Status")
-        self.bulk_tree.column("#0", width=340, anchor="w")
-        self.bulk_tree.column("range", width=170, anchor="center")
-        self.bulk_tree.column("length", width=110, anchor="center")
-        self.bulk_tree.column("status", width=140, anchor="center")
+        self.bulk_tree.column("#0", width=px(340), anchor="w")
+        self.bulk_tree.column("range", width=px(170), anchor="center")
+        self.bulk_tree.column("length", width=px(110), anchor="center")
+        self.bulk_tree.column("status", width=px(140), anchor="center")
         self.bulk_tree.grid(row=0, column=0, sticky="nsew")
 
         vsb = ttk.Scrollbar(body, command=self.bulk_tree.yview)
@@ -2810,9 +2864,9 @@ class LosslessVideoApp(_BaseTk):
 
         side = tk.Frame(body, bg="#f0f0f0")
         side.grid(row=0, column=2, sticky="ns", padx=(8, 0))
-        tk.Button(side, text="Add Files...", width=14, command=self.add_files_for_bulk).pack(pady=2)
-        tk.Button(side, text="Remove Selected", width=14, command=self._bulk_remove_selected).pack(pady=2)
-        tk.Button(side, text="Clear All", width=14, command=self._bulk_clear).pack(pady=2)
+        tk.Button(side, text="Add Files...", width=16, command=self.add_files_for_bulk).pack(pady=2)
+        tk.Button(side, text="Remove Selected", width=16, command=self._bulk_remove_selected).pack(pady=2)
+        tk.Button(side, text="Clear All", width=16, command=self._bulk_clear).pack(pady=2)
 
         self.bulk_save_to_source_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -2832,7 +2886,7 @@ class LosslessVideoApp(_BaseTk):
                  "19:43 - 19:51. In a 20:55 long video it cuts 20:43 - 20:51.\n"
                  "To the end: [-27] cuts from second 27 of the last minute that has it to the "
                  "end of the video. Example: in a 20:10 long video it cuts 19:27 - 20:10.",
-            bg="#f0f0f0", fg="#555555", wraplength=850, justify="left",
+            bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left",
         ).pack(fill="x")
 
         mode_frame = tk.Frame(root, bg="#f0f0f0")
@@ -3206,7 +3260,7 @@ class LosslessVideoApp(_BaseTk):
 
         self.resize_canvas = tk.Canvas(
             preview_wrap, bg="#161616", highlightthickness=0,
-            width=700, height=400
+            width=px(700), height=px(400)
         )
         self.resize_canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         self.resize_canvas.bind("<Configure>", lambda e: self._redraw_resize_canvas())
@@ -3584,7 +3638,7 @@ class LosslessVideoApp(_BaseTk):
             return None
 
         img = self.resize_frame_img
-        fit_scale = min((cw - 20) / img.width, (ch - 20) / img.height)
+        fit_scale = min((cw - px(20)) / img.width, (ch - px(20)) / img.height)
         fit_scale = max(0.01, fit_scale)
         scale = fit_scale * max(1.0, self.resize_zoom)
 
@@ -3696,10 +3750,10 @@ class LosslessVideoApp(_BaseTk):
                 outline="", tags=("overlay",)
             )
             c.create_rectangle(
-                px0, py0, px1, py1, fill="", outline="#00e5ff", width=2, tags=("overlay",)
+                px0, py0, px1, py1, fill="", outline="#00e5ff", width=px(2), tags=("overlay",)
             )
 
-            handle = 7
+            handle = px(7)
             for hx, hy in (
                 (px0, py0), (px1, py0), (px0, py1), (px1, py1)
             ):
@@ -3709,7 +3763,7 @@ class LosslessVideoApp(_BaseTk):
                 )
 
             c.create_text(
-                (px0 + px1) / 2, py0 - 14,
+                (px0 + px1) / 2, py0 - px(14),
                 text=f"{x1-x0}×{y1-y0}",
                 fill="#ffffff", font=("Segoe UI", 9, "bold"), tags=("overlay",)
             )
@@ -3727,7 +3781,7 @@ class LosslessVideoApp(_BaseTk):
         if not self.resize_display_rect:
             return None
         px0, py0, px1, py1 = self.resize_display_rect
-        r = 12
+        r = px(12)
 
         near_left = abs(event.x - px0) <= r
         near_right = abs(event.x - px1) <= r
@@ -4267,7 +4321,7 @@ class LosslessVideoApp(_BaseTk):
                  "Because the enabled tracks are mixed together and volume-adjusted, "
                  "the output audio must be re-encoded (AAC) — mixing separate compressed "
                  "audio streams into one isn't possible without decoding them.",
-            bg="#f0f0f0", fg="#555555", wraplength=850, justify="left",
+            bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left",
         ).pack(fill="x")
 
         self.audio_finalize_btn = tk.Button(
@@ -4456,11 +4510,11 @@ class LosslessVideoApp(_BaseTk):
             track["volume_slider"] = vol_slider
             track["volume_lbl"] = vol_lbl
 
-            wave_canvas = tk.Canvas(row, height=96, bg="#0a0a0a", highlightthickness=0)
+            wave_canvas = tk.Canvas(row, height=px(96), bg="#0a0a0a", highlightthickness=0)
             wave_canvas.pack(fill="x", padx=3, pady=(0, 6))
             wave_canvas.bind("<Configure>", lambda e, t=track: self._audio_redraw_waveform(t))
             wave_canvas.create_text(
-                10, 48, text="Generating waveform…", fill="#666666",
+                px(10), px(48), text="Generating waveform…", fill="#666666",
                 anchor="w", font=("Segoe UI", 9), tags=("placeholder",)
             )
             track["waveform_canvas"] = wave_canvas
@@ -4537,7 +4591,7 @@ class LosslessVideoApp(_BaseTk):
         if c is not None and c.winfo_exists():
             c.delete("placeholder")
             c.create_text(
-                10, (c.winfo_height() or 96) / 2, text="Waveform unavailable",
+                px(10), (c.winfo_height() or px(96)) / 2, text="Waveform unavailable",
                 fill="#666666", anchor="w", font=("Segoe UI", 9), tags=("placeholder",)
             )
 
@@ -4594,7 +4648,7 @@ class LosslessVideoApp(_BaseTk):
         x = min(cw, max(0, frac * cw))
         if track.get("playhead_id") is None:
             track["playhead_id"] = c.create_line(
-                x, 0, x, ch, fill="#ffffff", width=2, tags=("playhead",)
+                x, 0, x, ch, fill="#ffffff", width=px(2), tags=("playhead",)
             )
         else:
             c.coords(track["playhead_id"], x, 0, x, ch)
@@ -4980,7 +5034,7 @@ class LosslessVideoApp(_BaseTk):
         )
         self.status_lbl.pack(side="left", padx=4, pady=0)
         # Shown (packed on the right) only while a job is running.
-        self.progress_bar = ttk.Progressbar(bar, mode="determinate", maximum=1000, length=180)
+        self.progress_bar = ttk.Progressbar(bar, mode="determinate", maximum=1000, length=px(180))
         self.progress_eta_lbl = tk.Label(
             bar, text="", bg="#e6e6e6", fg="#555555", anchor="e", font=("Segoe UI", 8)
         )
