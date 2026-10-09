@@ -1728,6 +1728,56 @@ def edl_url(segments):
     return "edl://" + ";".join(entries)
 
 
+class CenteredRow(tk.Frame):
+    """A row of three frames: self.left at the left edge, self.right at the
+    right edge and self.center centered in the whole row (or on one of its
+    widgets, see center_on), moved aside only when the row is too narrow
+    for that. Fill each one with pack/grid."""
+
+    GAP = 8
+
+    def __init__(self, parent, **kw):
+        super().__init__(parent, **kw)
+        bg = kw.get("bg", "#f0f0f0")
+        self.left, self.center, self.right = (tk.Frame(self, bg=bg) for _ in range(3))
+        self.left.place(x=0, rely=0.5, anchor="w")
+        self.right.place(relx=1.0, rely=0.5, anchor="e")
+        self.center.place(x=0, rely=0.5, anchor="w")
+        self._asked = self._center_x = None
+        self.pivot = None
+        for w in (self, self.left, self.center, self.right):
+            w.bind("<Configure>", lambda e: self._arrange(), add="+")
+
+    def center_on(self, widget):
+        """Center the row on this widget of self.center, not on the whole
+        center part."""
+        self.pivot = widget
+        widget.bind("<Configure>", lambda e: self._arrange(), add="+")
+
+    def _arrange(self):
+        parts = (self, self.left, self.center, self.right) + ((self.pivot,) if self.pivot else ())
+        if not all(p.winfo_exists() for p in parts):
+            return   # being destroyed: the parts go one by one
+        gap = px(self.GAP)
+        lw, cw, rw = (p.winfo_reqwidth() for p in (self.left, self.center, self.right))
+        # place doesn't size the row; ask for room for all three side by side.
+        need_w = lw + cw + rw + 2 * gap
+        need_h = max(p.winfo_reqheight() for p in (self.left, self.center, self.right))
+        if (need_w, need_h) != self._asked:
+            self._asked = (need_w, need_h)
+            self.configure(width=need_w, height=need_h)
+        w = self.winfo_width()
+        pivot = self.pivot
+        if pivot is not None and pivot.winfo_ismapped():
+            x = w // 2 - (pivot.winfo_x() + pivot.winfo_width() // 2)
+        else:
+            x = (w - cw) // 2
+        x = max(lw + gap, min(x, w - rw - gap - cw))
+        if x != self._center_x:
+            self._center_x = x
+            self.center.place_configure(x=x)
+
+
 class Tooltip:
     """A hint shown under a widget once the mouse has rested on it for a
     moment, gone when the mouse leaves or clicks. It is a label placed in
@@ -2988,8 +3038,6 @@ class LosslessVideoApp(_BaseTk):
         self.end_entry.pack(side="left", padx=2)
         self.end_entry.bind("<Return>", lambda e: self._on_end_entry())
         self.end_entry.bind("<FocusOut>", lambda e: self._on_end_entry())
-        if self.cut_player is not None:
-            self._build_cut_audio_controls(time_row)
 
         step_row = tk.Frame(controls, bg="#f0f0f0")
         step_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
@@ -3129,12 +3177,13 @@ class LosslessVideoApp(_BaseTk):
 
     # ---- embedded player ---------------------------------------------
     def _build_cut_transport(self, parent):
-        """Play / step / jump buttons and the playhead time."""
-        row = tk.Frame(parent, bg="#f0f0f0")
-        row.pack(pady=(2, 1))
+        """One row: the playhead time at the left, the play / step / jump
+        buttons in the middle, the audio controls at the right."""
+        row = CenteredRow(parent, bg="#f0f0f0")
+        row.pack(fill="x", pady=(2, 1))
 
         def button(text, command, **kw):
-            b = tk.Button(row, text=text, command=command, **kw)
+            b = tk.Button(row.center, text=text, command=command, **kw)
             b.pack(side="left", padx=1)
             self.cut_transport_buttons.append(b)
             return b
@@ -3142,6 +3191,7 @@ class LosslessVideoApp(_BaseTk):
         button("|◀ Start", lambda: self._cut_go_to("start"))
         frame_back = button("◀ Frame", lambda: self._cut_frame_step(False))
         self.cut_play_btn = button("▶ Play", self._cut_toggle_play, width=8)
+        row.center_on(self.cut_play_btn)
         frame_fwd = button("Frame ▶", lambda: self._cut_frame_step(True))
         button("End ▶|", lambda: self._cut_go_to("end"))
         # Shown only with Options > Show frame by frame movement buttons;
@@ -3151,9 +3201,10 @@ class LosslessVideoApp(_BaseTk):
         Tooltip(frame_back, "Shortcut: ,")
         Tooltip(frame_fwd, "Shortcut: .")
         self._on_show_frame_buttons_toggled(save=False)
-        self.cut_time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27,
+        self.cut_time_lbl = tk.Label(row.left, text="", bg="#f0f0f0", anchor="w",
                                      font=("Segoe UI", 9))
-        self.cut_time_lbl.pack(side="left", padx=6)
+        self.cut_time_lbl.pack(side="left", padx=(px(4), 0))
+        self._build_cut_audio_controls(row.right)
         for b in self.cut_transport_buttons:
             b.config(state="disabled")
 
@@ -3216,7 +3267,7 @@ class LosslessVideoApp(_BaseTk):
         # A speaker icon, clicked to mute / unmute.
         self.cut_mute_btn = tk.Canvas(parent, width=px(26), height=px(22), bg="#f0f0f0",
                                       highlightthickness=0, cursor="hand2")
-        self.cut_mute_btn.pack(side="left", padx=(px(24), 2))
+        self.cut_mute_btn.pack(side="left", padx=(0, 2))
         self.cut_mute_btn.bind("<Button-1>", lambda e: self._cut_toggle_mute())
         self._cut_speaker_hover = False
         self._cut_speaker_icon = None    # what it shows: "muted", or "waves N"
