@@ -2350,6 +2350,10 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_table = None           # FileTable, once the tab is built
 
         self.warn_overwrite_var = tk.BooleanVar(value=True)
+        # How the Cut and Bulk Cut tabs cut (Cut menu): "classic" (Lossless),
+        # "reencode" (Re-encode edges) or "editlist" (Edit-list trim).
+        self.cut_mode_var = tk.StringVar(value="classic")
+        self.cut_search_window = self.DEFAULT_SEARCH_WINDOW
         self._progress_jobs = {}         # running job name -> time.monotonic() it started
 
         self.settings = load_settings()
@@ -2484,6 +2488,17 @@ class LosslessVideoApp(_BaseTk):
         view_menu.add_checkbutton(
             label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
         )
+
+        # For the Cut and Bulk Cut tabs.
+        self.cut_menu = self._add_menu_bar_menu("Cut")
+        for label, mode in (
+                ("Lossless (recommended — fastest, may be a few ms off)", "classic"),
+                ("Re-encode edges (slower, frame-accurate)", "reencode"),
+                ("Edit-list trim (experimental — may not work on some players)", "editlist")):
+            self.cut_menu.add_radiobutton(label=label, variable=self.cut_mode_var, value=mode)
+        self.cut_menu.add_separator()
+        self.cut_menu.add_command(command=self._ask_search_window)
+        self._update_search_window_label()
 
         options_menu = self._add_menu_bar_menu("Options")
         options_menu.add_checkbutton(
@@ -2757,14 +2772,16 @@ class LosslessVideoApp(_BaseTk):
         style.configure("Horizontal.TProgressbar", background=d["select"], troughcolor=d["field"],
                         bordercolor=d["border"], lightcolor=d["select"], darkcolor=d["select"])
 
-    def _set_title_bar_dark(self, dark):
-        """Windows 10 1809+ / 11: a dark caption to match. Anywhere else,
-        or if it fails, the title bar just stays as the system draws it."""
+    def _set_title_bar_dark(self, dark, window=None):
+        """Windows 10 1809+ / 11: a dark caption to match, on the main
+        window or another top-level `window`. Anywhere else, or if it
+        fails, the title bar just stays as the system draws it."""
         if os.name != "nt":
             return
+        window = window or self
         try:
-            self.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            window.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
             value = ctypes.c_int(1 if dark else 0)
             # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE; 19 on builds before 20H1.
             for attribute in (20, 19):
@@ -3007,13 +3024,6 @@ class LosslessVideoApp(_BaseTk):
             self.wave_canvas.bind("<ButtonRelease-1>", self._slider_release)
             self.wave_canvas.bind("<Button-3>", self._cut_ranges_menu)
 
-        # ---- cut mode: classic (original, may snap to nearest keyframe) vs
-        # smart-cut (re-encode just the edges for exact accuracy) vs
-        # edit-list trim (exact accuracy, zero re-encode, experimental)
-        self.cut_mode_var, self.cut_search_window_var, self.cut_search_window_entry = (
-            self._build_cut_mode_controls(controls, default_mode="classic")
-        )
-
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", pady=(2, 1))
         # Several ranges of one video: marked here, cut as a batch by Bulk Cut.
@@ -3030,53 +3040,82 @@ class LosslessVideoApp(_BaseTk):
         self.save_btn.pack(side="left", fill="x", expand=True)
         self._update_cut_range_buttons()
 
-    def _build_cut_mode_controls(self, parent, default_mode="classic"):
-        """Build the cut-mode radiobuttons + keyframe-search-window entry
-        shared by the Cut tab and Bulk Cut tab. 2x2 grid instead of one tall
-        column: Lossless / Re-encode edges stacked on the left, Edit-list
-        trim on the right with the search-window control nested right below
-        it (the only mode it applies to) -- two rows tall, no header label.
-        Returns (mode_var, search_window_var, search_window_entry)."""
-        block = tk.Frame(parent, bg="#f0f0f0")
-        block.pack(pady=(1, 1))
-        mode_var = tk.StringVar(value=default_mode)
-        tk.Radiobutton(
-            block, text="Lossless (recommended — fastest, may be a few ms off)",
-            variable=mode_var, value="classic", bg="#f0f0f0", anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=(0, 18))
-        tk.Radiobutton(
-            block, text="Re-encode edges (slower, frame-accurate)",
-            variable=mode_var, value="reencode", bg="#f0f0f0", anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=(0, 18))
-        tk.Radiobutton(
-            block, text="Edit-list trim (experimental — may not work on some players)",
-            variable=mode_var, value="editlist", bg="#f0f0f0", anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-
-        window_row = tk.Frame(block, bg="#f0f0f0")
-        window_row.grid(row=1, column=1, sticky="w", padx=(20, 0))
-        tk.Label(window_row, text="Keyframe search window:", bg="#f0f0f0").pack(side="left")
-        window_var = tk.StringVar(value="8.0")
-        window_entry = tk.Entry(
-            window_row, textvariable=window_var, width=5, justify="center"
-        )
-        window_entry.pack(side="left", padx=(4, 2))
-        tk.Label(window_row, text="sec", bg="#f0f0f0").pack(side="left")
-        window_entry.config(state="disabled")
-
-        def on_mode_changed(*_args):
-            window_entry.config(state="normal" if mode_var.get() == "editlist" else "disabled")
-
-        mode_var.trace_add("write", on_mode_changed)
-        return mode_var, window_var, window_entry
+    DEFAULT_SEARCH_WINDOW = 8.0   # seconds; see _lossless_cut
 
     @staticmethod
-    def _get_search_window_value(window_var):
-        try:
-            value = float(window_var.get())
-            return value if value > 0 else 8.0
-        except ValueError:
-            return 8.0
+    def _format_seconds(value):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+
+    def _update_search_window_label(self):
+        self.cut_menu.entryconfigure(
+            "end", label=f"Keyframe search window: {self._format_seconds(self.cut_search_window)} s...")
+
+    def _ask_search_window(self):
+        """Cut menu: a small dialog to set the keyframe search window,
+        stating what it does and its default. Waits until it is closed."""
+        default = self._format_seconds(self.DEFAULT_SEARCH_WINDOW)
+        dlg = tk.Toplevel(self, bg="#f0f0f0")
+        dlg.withdraw()
+        dlg.title("Keyframe search window")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        self._search_window_dialog = dlg     # for the tests
+        body = tk.Frame(dlg, bg="#f0f0f0", padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, bg="#f0f0f0", justify="left", anchor="w", wraplength=px(380),
+                 text="How far before and after each cut point to look for a keyframe, "
+                      "in seconds. Used by Re-encode edges and Edit-list trim; "
+                      "Lossless doesn't use it.").pack(fill="x")
+        tk.Label(body, bg="#f0f0f0", anchor="w", font=("Segoe UI", 9, "bold"),
+                 text=f"Default: {default} seconds").pack(fill="x", pady=(px(8), px(6)))
+        row = tk.Frame(body, bg="#f0f0f0")
+        row.pack(fill="x")
+        tk.Label(row, text="Search window:", bg="#f0f0f0").pack(side="left")
+        value_var = tk.StringVar(value=self._format_seconds(self.cut_search_window))
+        entry = tk.Entry(row, textvariable=value_var, width=8, justify="center")
+        entry.pack(side="left", padx=px(6))
+        tk.Label(row, text="seconds", bg="#f0f0f0").pack(side="left")
+        error_lbl = tk.Label(body, text="", bg="#f0f0f0", fg="#c42b1c", anchor="w")
+        error_lbl.pack(fill="x", pady=(px(4), 0))
+
+        def ok(event=None):
+            try:
+                value = float(value_var.get().strip().replace(",", "."))
+            except ValueError:
+                value = None
+            if value is None or not 0 < value <= 600:
+                error_lbl.config(text="Enter a number of seconds above 0 (at most 600).")
+                return
+            self.cut_search_window = value
+            self._update_search_window_label()
+            dlg.destroy()
+
+        def reset():
+            value_var.set(default)
+            error_lbl.config(text="")
+
+        buttons = tk.Frame(body, bg="#f0f0f0")
+        buttons.pack(fill="x", pady=(px(10), 0))
+        tk.Button(buttons, text="Cancel", width=9, command=dlg.destroy).pack(side="right")
+        tk.Button(buttons, text="OK", width=9, command=ok).pack(side="right", padx=(0, px(6)))
+        tk.Button(buttons, text=f"Reset to default ({default} s)",
+                  command=reset).pack(side="left")
+        dlg.bind("<Return>", ok)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        self._theme_tree(dlg)
+        dlg.update_idletasks()
+        self._set_title_bar_dark(self._is_dark(), dlg)
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - h) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.deiconify()
+        entry.focus_set()
+        entry.select_range(0, "end")
+        dlg.grab_set()
+        self.wait_window(dlg)
+        self._search_window_dialog = None
 
     def _set_cut_controls_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
@@ -4145,7 +4184,7 @@ class LosslessVideoApp(_BaseTk):
             return
 
         cut_mode = self.cut_mode_var.get()
-        search_window = self._get_search_window_value(self.cut_search_window_var)
+        search_window = self.cut_search_window
 
         self._set_cut_controls_enabled(False)
         self.status_lbl.config(text="Cutting... 0%")
@@ -5356,17 +5395,11 @@ class LosslessVideoApp(_BaseTk):
             bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left",
         ).pack(fill="x")
 
-        mode_frame = tk.Frame(root, bg="#f0f0f0")
-        mode_frame.grid(row=3, column=0, sticky="ew", padx=3, pady=(0, 2))
-        self.bulk_cut_mode_var, self.bulk_cut_search_window_var, self.bulk_cut_search_window_entry = (
-            self._build_cut_mode_controls(mode_frame, default_mode="classic")
-        )
-
         self.bulk_btn = tk.Button(
             root, text="Start Bulk Cut!", height=2,
             font=("Segoe UI", 10, "bold"), command=self._bulk_start_clicked,
         )
-        self.bulk_btn.grid(row=4, column=0, sticky="ew", padx=3, pady=(4, 6))
+        self.bulk_btn.grid(row=3, column=0, sticky="ew", padx=3, pady=(4, 6))
 
         for target in (self.bulk_tree, self.bulk_table.empty_lbl):
             target.drop_target_register(DND_FILES)
@@ -5609,8 +5642,8 @@ class LosslessVideoApp(_BaseTk):
                 if overwrite_policy is None:
                     return
 
-        cut_mode = self.bulk_cut_mode_var.get()
-        search_window = self._get_search_window_value(self.bulk_cut_search_window_var)
+        cut_mode = self.cut_mode_var.get()
+        search_window = self.cut_search_window
 
         with self._bulk_lock:
             for it in pending:
