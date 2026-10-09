@@ -1637,8 +1637,14 @@ class ClipPreview:
         self.play_btn = self.buttons[1]
         self.time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27, font=("Segoe UI", 9))
         self.time_lbl.pack(side="left", padx=6)
-        self.part_lbl = tk.Label(row, text="", bg="#f0f0f0", anchor="w", font=("Segoe UI", 9))
-        self.part_lbl.pack(side="left", fill="x", expand=True)
+        # width=1: it takes the room left over (and is cut short with … to
+        # fit it) instead of asking for as much as its text needs.
+        self.part_lbl = tk.Label(row, text="", bg="#f0f0f0", anchor="w", width=1,
+                                 font=("Segoe UI", 9))
+        self.part_lbl.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.part_lbl.bind("<Configure>", lambda e: self._fit_part_label())
+        self._part_font = tkfont.Font(font=self.part_lbl.cget("font"))
+        self._part_text = ""
         self.labels = []     # one per part, shown while that part plays
         self.key = None      # what the owner says is loaded (show's key)
         self._duration = None
@@ -1656,15 +1662,29 @@ class ClipPreview:
         self.labels = list(labels)
         self.key = key
         self._duration = None
-        self.part_lbl.config(text=self.labels[0] if self.labels else "")
+        self._set_part_text(self.labels[0] if self.labels else "")
 
     def unload(self):
         self.key = None
         self.player.unload()
         self.time_lbl.config(text="")
-        self.part_lbl.config(text="")
+        self._set_part_text("")
         for b in self.buttons:
             b.config(state="disabled")
+
+    def _set_part_text(self, text):
+        if text != self._part_text:
+            self._part_text = text
+            self._fit_part_label()
+
+    def _fit_part_label(self):
+        text, font = self._part_text, self._part_font
+        room = self.part_lbl.winfo_width() - px(4)
+        if room > 1 and font.measure(text) > room:
+            while text and font.measure(text + "…") > room:
+                text = text[:-1]
+            text += "…"
+        self.part_lbl.config(text=text)
 
     def part_lengths(self):
         """Each part's length in seconds as mpv plays it, or None until the
@@ -1691,7 +1711,7 @@ class ClipPreview:
             for b in self.buttons:
                 b.config(state="disabled")
             self.time_lbl.config(text="")
-            self.part_lbl.config(text="The player can't open this.")
+            self._set_part_text("The player can't open this.")
             return
         if not p.loaded:
             return
@@ -1711,7 +1731,7 @@ class ClipPreview:
         if not self.slider.dragging:
             self.slider.set(pos)
         i = self.part_index(pos)
-        self.part_lbl.config(text=self.labels[i] if i < len(self.labels) else "")
+        self._set_part_text(self.labels[i] if i < len(self.labels) else "")
 
     def _on_slide(self, value):
         if self.loaded:
@@ -1856,6 +1876,7 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_items = []             # list of dicts: path, ranges, status, iid
         self._bulk_lock = threading.Lock()
         self._bulk_running = False
+        self.bulk_preview = None         # ClipPreview of a row's ranges, made on first use
 
         self.warn_overwrite_var = tk.BooleanVar(value=True)
         self._progress_jobs = {}         # running job name -> time.monotonic() it started
@@ -1927,6 +1948,8 @@ class LosslessVideoApp(_BaseTk):
         found = []
         if self.combine_preview is not None:
             found.append((1, self.combine_preview.player))
+        if self.bulk_preview is not None:
+            found.append((2, self.bulk_preview.player))
         return found
 
     def _player_audio_settings(self):
@@ -2767,6 +2790,8 @@ class LosslessVideoApp(_BaseTk):
         target = None
         if tab == 1 and self._combine_preview_open():
             target = self.combine_preview
+        elif tab == 2 and self._bulk_preview_open():
+            target = self.bulk_preview
         if target is None or not target.loaded:
             return None
         return {
@@ -4811,9 +4836,19 @@ class LosslessVideoApp(_BaseTk):
         body.rowconfigure(0, weight=1)
         body.columnconfigure(0, weight=1)
 
+        # The list, and under it (once a row is double-clicked) a player
+        # for that row's ranges, with a sash between them.
+        self.bulk_paned = tk.PanedWindow(body, orient="vertical", bg="#f0f0f0", bd=0,
+                                         sashwidth=px(6), sashrelief="flat", opaqueresize=True)
+        self.bulk_paned.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        tree_wrap = tk.Frame(self.bulk_paned, bg="#f0f0f0")
+        self.bulk_paned.add(tree_wrap, stretch="always", minsize=px(60))
+        tree_wrap.rowconfigure(0, weight=1)
+        tree_wrap.columnconfigure(0, weight=1)
+
         columns = ("range", "length", "status")
         self.bulk_tree = ttk.Treeview(
-            body, columns=columns, show="tree headings", selectmode="extended"
+            tree_wrap, columns=columns, show="tree headings", selectmode="extended"
         )
         self.bulk_tree.heading("#0", text="File Name")
         self.bulk_tree.heading("range", text="Cut Range")
@@ -4825,7 +4860,7 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_tree.column("status", width=px(140), anchor="center")
         self.bulk_tree.grid(row=0, column=0, sticky="nsew")
 
-        vsb = ttk.Scrollbar(body, command=self.bulk_tree.yview)
+        vsb = ttk.Scrollbar(tree_wrap, command=self.bulk_tree.yview)
         vsb.grid(row=0, column=1, sticky="ns")
         self.bulk_tree.configure(yscrollcommand=vsb.set)
 
@@ -4834,6 +4869,13 @@ class LosslessVideoApp(_BaseTk):
         tk.Button(side, text="Add Files...", width=16, command=self.add_files_for_bulk).pack(pady=2)
         tk.Button(side, text="Remove Selected", width=16, command=self._bulk_remove_selected).pack(pady=2)
         tk.Button(side, text="Clear All", width=16, command=self._bulk_clear).pack(pady=2)
+        self.bulk_preview_btn = None
+        if mpv_available():
+            # Also: double-click a row.
+            self.bulk_preview_btn = tk.Button(side, text="Preview Selected", width=16,
+                                              command=self._bulk_preview_selected)
+            self.bulk_preview_btn.pack(pady=(10, 2))
+            self.bulk_tree.bind("<Double-Button-1>", self._bulk_tree_double_click)
 
         self.bulk_save_to_source_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -4966,12 +5008,78 @@ class LosslessVideoApp(_BaseTk):
             for iid in sel:
                 self.bulk_tree.delete(iid)
             self.bulk_items = [it for it in self.bulk_items if it["iid"] not in sel_set]
+        if self._bulk_preview_open() and self.bulk_preview.key in sel_set:
+            self._bulk_close_preview()
 
     def _bulk_clear(self):
         with self._bulk_lock:
             for iid in self.bulk_tree.get_children():
                 self.bulk_tree.delete(iid)
             self.bulk_items = []
+        self._bulk_close_preview()
+
+    # ---- preview of a row's ranges -----------------------------------------
+    def _bulk_preview_open(self):
+        return bool(getattr(self, "_bulk_preview_shown", False))
+
+    def _bulk_tree_double_click(self, event):
+        iid = self.bulk_tree.identify_row(event.y)
+        if not iid or self.bulk_tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            return None
+        item = next((it for it in self.bulk_items if it["iid"] == iid), None)
+        if item is not None:
+            self._bulk_preview_item(item)
+        return "break"
+
+    def _bulk_preview_selected(self):
+        sel = self.bulk_tree.selection()
+        item = next((it for it in self.bulk_items if sel and it["iid"] == sel[0]), None)
+        if item is None:
+            self.status_lbl.config(text="Select a row to preview its ranges")
+            return
+        self._bulk_preview_item(item)
+
+    def _bulk_preview_item(self, item):
+        """Plays the row's ranges back to back (each one is a clip Bulk Cut
+        will make) in a player under the list."""
+        name = os.path.basename(item["path"])
+        ranges = [(s, e) for s, e in item["ranges"] if e > s]
+        # A range running past the end gives a clip up to the end, so it
+        # plays only that far (mpv would show the last frame for the rest).
+        try:
+            length = probe_duration(find_exe("ffprobe"), item["path"])
+        except FileNotFoundError:
+            length = None
+        if length:
+            ranges = [(s, min(e, length)) for s, e in ranges if s < length]
+        if not ranges:
+            self.status_lbl.config(text=f"{name}: no range to play")
+            return
+        if self.bulk_preview is None:
+            self.bulk_preview = ClipPreview(self.bulk_paned, on_close=self._bulk_close_preview)
+        if not self._bulk_preview_open():
+            self._bulk_preview_shown = True
+            self.bulk_paned.add(self.bulk_preview.frame, stretch="always", minsize=px(140))
+            # The list keeps about a third of the height.
+            self.bulk_paned.update_idletasks()
+            self.bulk_paned.sash_place(
+                0, 0, max(px(60), int(self.bulk_paned.winfo_height() * 0.35)))
+        labels = [f"Range {i}/{len(ranges)}: {bulk_time_text(s)} – {bulk_time_text(e)}  ·  {name}"
+                  for i, (s, e) in enumerate(ranges, 1)]
+        volume, muted = self._player_audio_settings()
+        try:
+            self.bulk_preview.show([(item["path"], s, e - s) for s, e in ranges], labels,
+                                   key=item["iid"], volume=volume, muted=muted)
+        except RuntimeError as exc:
+            self._bulk_close_preview()
+            messagebox.showerror("Preview", str(exc))
+
+    def _bulk_close_preview(self):
+        if not self._bulk_preview_open():
+            return
+        self._bulk_preview_shown = False
+        self.bulk_preview.unload()
+        self.bulk_paned.forget(self.bulk_preview.frame)
 
     @staticmethod
     def _bulk_output_paths(item, output_dir):
