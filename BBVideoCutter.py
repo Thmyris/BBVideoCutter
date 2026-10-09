@@ -5757,9 +5757,10 @@ class LosslessVideoApp(_BaseTk):
             x0, x1, y0, y1 = h - y1, h - y0, x0, x1
         return f"{x1-x0}x{y1-y0}+{x0}+{y0}"
 
-    def _resize_draw_player_overlay(self):
+    def _resize_draw_player_overlay(self, label_x, label_y):
         """The crop box over the video, drawn by mpv: the same shading,
-        outline, corner handles and size label the canvas draws."""
+        outline, corner handles and size label (centered on label_x,
+        label_y of the canvas) the canvas draws."""
         x, y, w, h, sx0, sy0, sx1, sy1 = self._resize_view
         kx, ky = w / (sx1 - sx0), h / (sy1 - sy0)
         x0, y0, x1, y1 = self.resize_crop
@@ -5799,7 +5800,7 @@ class LosslessVideoApp(_BaseTk):
             events.append(rect(hx - handle + 1, hy - handle + 1, hx + handle - 1, hy + handle - 1,
                                "FFFFFF"))
         font_px = int(round(9 * UI_SCALE * 96 / 72))
-        events.append(f"{{\\an5\\pos({int(round((bx0 + bx1) / 2))},{int(round(by0 - px(14)))})"
+        events.append(f"{{\\an5\\pos({int(round(label_x - x))},{int(round(label_y - y))})"
                       f"\\fnSegoe UI\\b1\\fs{font_px}\\bord1\\shad0\\1c&HFFFFFF&\\3c&H000000&}}"
                       f"{x1-x0}×{y1-y0}")
         self.resize_player.show_overlay("\n".join(e for e in events if e), w, h)
@@ -6084,13 +6085,21 @@ class LosslessVideoApp(_BaseTk):
                     fill="#ffffff", outline="#111111", width=1, tags=("overlay",)
                 )
 
+            # The size goes just above the box, or just inside its top edge
+            # when there is no room above it: past the canvas's top, or (with
+            # the player) half on the video and half off it, where it would
+            # be drawn in two halves by two different renderers.
+            label_x, label_y = (px0 + px1) / 2, py0 - px(14)
+            top = max(0, self._resize_view[1]) if self._resize_player_on else 0
+            if label_y - px(9) < top:
+                label_y = py0 + px(14)
             c.create_text(
-                (px0 + px1) / 2, py0 - px(14),
+                label_x, label_y,
                 text=f"{x1-x0}×{y1-y0}",
                 fill="#ffffff", font=("Segoe UI", 9, "bold"), tags=("overlay",)
             )
             if self._resize_player_on:
-                self._resize_draw_player_overlay()
+                self._resize_draw_player_overlay(label_x, label_y)
 
     def _resize_source_point(self, event):
         geom = self._resize_canvas_geometry()
