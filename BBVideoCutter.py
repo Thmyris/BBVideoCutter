@@ -1509,10 +1509,31 @@ class VideoPlayer:
             self._poll_id = None
         if self.mpv is not None:
             player, self.mpv = self.mpv, None
-            try:
-                player.terminate()
-            except Exception:
-                pass
+
+            def stop():
+                try:
+                    player.terminate()
+                except Exception:
+                    pass
+
+            if os.name != "nt":
+                stop()
+                return
+            # While mpv shuts down, its video thread can send a window
+            # message to this thread's windows and wait for the answer (it
+            # does once a transient dialog has been open), so this thread
+            # must not just block in terminate(): it waits with mpv
+            # shutting down on another thread, letting Windows deliver such
+            # messages (PeekMessage does that; nothing is taken off the
+            # queue, so no Tk event runs here).
+            from ctypes import wintypes
+            stopper = threading.Thread(target=stop, daemon=True)
+            stopper.start()
+            msg = wintypes.MSG()
+            deadline = time.monotonic() + 5.0
+            while stopper.is_alive() and time.monotonic() < deadline:
+                ctypes.windll.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # PM_NOREMOVE
+                stopper.join(0.01)
 
     def _poll(self):
         self._poll_id = self.frame.after(33, self._poll)
