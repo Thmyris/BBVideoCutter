@@ -1135,15 +1135,22 @@ def render_waveform(path, a_index, width, height, color="white", span=None, on_s
 
 
 class TimeSlider(tk.Canvas):
+    # The marks (set_marks): where the parts of a joined video meet. Gray
+    # shows on the track in both themes.
+    MARK_COLOR = "#8c8c8c"
+
     def __init__(self, parent, command=None, height=28, track_color="#d5d5d5",
-                 fill_color="#3d8bfd", handle_color="#1a73e8", bg="#f0f0f0", **kwargs):
+                 fill_color="#3d8bfd", handle_color="#1a73e8", bg="#f0f0f0",
+                 on_release=None, **kwargs):
         if "width" in kwargs:
             kwargs["width"] = px(kwargs["width"])
         super().__init__(parent, height=px(height), bg=bg, highlightthickness=0, **kwargs)
         self._command = command
+        self._on_release_command = on_release   # gets the value a drag ended on
         self._minv = 0.0
         self._maxv = 1.0
         self._value = 0.0
+        self._marks = []
         self._dragging = False
         self._track_color = track_color
         self._fill_color = fill_color
@@ -1173,6 +1180,16 @@ class TimeSlider(tk.Canvas):
 
     def get(self):
         return self._value
+
+    @property
+    def dragging(self):
+        return self._dragging
+
+    def set_marks(self, values):
+        values = list(values)
+        if values != self._marks:
+            self._marks = values
+            self._redraw()
 
     def set_track_color(self, color):
         self._track_color = color
@@ -1205,6 +1222,10 @@ class TimeSlider(tk.Canvas):
         hx = self._x_for(self._value)
         if hx > x0:
             self.create_line(x0, y, hx, y, fill=self._fill_color, width=px(5), capstyle="round")
+        for v in self._marks:
+            mx = self._x_for(v)
+            self.create_line(mx, y - px(7), mx, y + px(7), fill=self.MARK_COLOR,
+                             width=max(1, px(2)), tags=("mark",))
         r = px(9) if self._dragging else px(7)
         self.create_oval(hx - r, y - r, hx + r, y + r,
                           fill=self._handle_color, outline="#ffffff", width=px(2))
@@ -1227,8 +1248,10 @@ class TimeSlider(tk.Canvas):
         self._emit()
 
     def _on_release(self, event):
-        self._dragging = False
+        was_dragging, self._dragging = self._dragging, False
         self._redraw()
+        if was_dragging and self._on_release_command:
+            self._on_release_command(self._value)
 
 
 # --------------------------------------------------------------------------
@@ -1319,11 +1342,12 @@ class VideoPlayer:
     # nothing is heard.
     extra_options = {}
     OBSERVED = ("time-pos", "pause", "duration", "eof-reached", "container-fps", "path",
-                "track-list", "aid")
+                "track-list", "aid", "chapter-list")
 
-    def __init__(self, parent, on_change=None):
+    def __init__(self, parent, on_change=None, options=None):
         self.frame = tk.Frame(parent, bg="black", takefocus=0)
         self.on_change = on_change
+        self.options = options or {}     # this player's own mpv options
         self.mpv = None
         self.state = {}
         self._poll_id = None
@@ -1354,6 +1378,7 @@ class VideoPlayer:
             sub_auto="no", audio_file_auto="no",
             volume=self.volume, mute="yes" if self.muted else "no",
         )
+        options.update(self.options)
         options.update(self.extra_options)
         self.mpv = mpv.MPV(**options)
         for name in self.OBSERVED:
@@ -1463,22 +1488,35 @@ class VideoPlayer:
         aid = self.state.get("aid")
         return aid if isinstance(aid, int) and not isinstance(aid, bool) else None
 
+    @property
+    def part_starts(self):
+        """Where each part of an edl_url() video starts (mpv makes a chapter
+        per part), in seconds; [0.0] for a plain file."""
+        starts = [c.get("time") for c in self.state.get("chapter-list") or []]
+        starts = sorted(t for t in starts if isinstance(t, (int, float)))
+        return starts if starts and starts[0] <= 0.001 else [0.0] + starts
+
     # ---- commands --------------------------------------------------------
     def _async(self, *args):
         # Asynchronous, so the UI never waits on mpv; errors (a seek past
         # the end, say) need no handling.
         self.mpv.command_async(*args, callback=lambda error, result: None)
 
-    def load(self, path):
+    def load(self, path, start=None):
+        """Opens path (a file or an edl_url()), paused, at time start."""
         self._ensure_mpv()
         self.clear_loop()
         self.state.pop("time-pos", None)
         self.state.pop("track-list", None)   # the old file's, until the new one's arrive
         self.state.pop("aid", None)
+        self.state.pop("chapter-list", None)
         self.state["ready"] = False
         self.state["failed"] = False
         self.mpv.pause = True
-        self.mpv.loadfile(path)
+        if start:
+            self.mpv.loadfile(path, start=f"{start:.6f}")
+        else:
+            self.mpv.loadfile(path)
 
     def unload(self):
         if self.mpv is not None:
@@ -1548,6 +1586,168 @@ class VideoPlayer:
         if self.mpv is not None:
             self.mpv.ab_loop_a = "no"
             self.mpv.ab_loop_b = "no"
+
+
+def edl_url(segments):
+    """An mpv edl:// URL that plays segments back to back as one video.
+    Each segment is (path, start, length): length seconds from start, on
+    the file's clock (the one ffmpeg -ss counts), or (path, None, None) for
+    the whole file. Each path goes in with its length in bytes (%n%path),
+    so commas and semicolons in it need no escaping."""
+    entries = []
+    for path, start, length in segments:
+        path = os.path.abspath(path).replace("\\", "/")
+        entry = f"%{len(path.encode('utf-8'))}%{path}"
+        if start is not None:
+            entry += f",start={start:.6f},length={length:.6f}"
+        entries.append(entry)
+    return "edl://" + ";".join(entries)
+
+
+class ClipPreview:
+    """A player with its own controls, for watching clips back to back as
+    one video (an edl_url): the Combine tab's videos in their joined
+    order, a Bulk Cut row's ranges. The owner places self.frame; mpv starts
+    on the first show(). The slider marks where the parts meet, and the
+    label names the part on screen."""
+
+    def __init__(self, parent, on_close):
+        self.frame = tk.Frame(parent, bg="#f0f0f0")
+        self.frame.rowconfigure(0, weight=1)
+        self.frame.columnconfigure(0, weight=1)
+        video = tk.Frame(self.frame, bg="black")
+        video.grid(row=0, column=0, sticky="nsew")
+        self.player = VideoPlayer(video, on_change=self._on_player_changed)
+        self.player.frame.place(x=0, y=0, relwidth=1, relheight=1)
+        self.player.frame.bind("<Button-1>", lambda e: self.toggle_play())
+
+        self.slider = TimeSlider(self.frame, command=self._on_slide,
+                                 on_release=self._on_slide_done)
+        self.slider.grid(row=1, column=0, sticky="ew")
+        row = tk.Frame(self.frame, bg="#f0f0f0")
+        row.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+        tk.Button(row, text="✕ Close", command=on_close).pack(side="left", padx=(4, 8))
+        self.buttons = []
+        for text, command, width in (("|◀ Part", lambda: self.go_to_part(-1), None),
+                                     ("▶ Play", self.toggle_play, 8),
+                                     ("Part ▶|", lambda: self.go_to_part(1), None)):
+            b = tk.Button(row, text=text, command=command, width=width, state="disabled")
+            b.pack(side="left", padx=1)
+            self.buttons.append(b)
+        self.play_btn = self.buttons[1]
+        self.time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27, font=("Segoe UI", 9))
+        self.time_lbl.pack(side="left", padx=6)
+        self.part_lbl = tk.Label(row, text="", bg="#f0f0f0", anchor="w", font=("Segoe UI", 9))
+        self.part_lbl.pack(side="left", fill="x", expand=True)
+        self.labels = []     # one per part, shown while that part plays
+        self.key = None      # what the owner says is loaded (show's key)
+        self._duration = None
+
+    @property
+    def loaded(self):
+        return self.key is not None and self.player.loaded
+
+    def show(self, segments, labels, key, start=0.0, volume=100.0, muted=False):
+        """Opens segments (see edl_url), paused at time start. Raises
+        RuntimeError if the player can't be started."""
+        self.player.set_volume(volume)
+        self.player.set_muted(muted)
+        self.player.load(edl_url(segments), start=start)
+        self.labels = list(labels)
+        self.key = key
+        self._duration = None
+        self.part_lbl.config(text=self.labels[0] if self.labels else "")
+
+    def unload(self):
+        self.key = None
+        self.player.unload()
+        self.time_lbl.config(text="")
+        self.part_lbl.config(text="")
+        for b in self.buttons:
+            b.config(state="disabled")
+
+    def part_lengths(self):
+        """Each part's length in seconds as mpv plays it, or None until the
+        video is open."""
+        dur = self.player.state.get("duration")
+        if not self.loaded or not dur:
+            return None
+        starts = self.player.part_starts
+        return [b - a for a, b in zip(starts, starts[1:] + [dur])]
+
+    def part_index(self, t):
+        """The part playing at time t (0-based)."""
+        starts = self.player.part_starts
+        i = 0
+        while i + 1 < len(starts) and starts[i + 1] <= t + 0.001:
+            i += 1
+        return i
+
+    def _on_player_changed(self):
+        p = self.player
+        if self.key is None:
+            return
+        if p.failed:
+            for b in self.buttons:
+                b.config(state="disabled")
+            self.time_lbl.config(text="")
+            self.part_lbl.config(text="The player can't open this.")
+            return
+        if not p.loaded:
+            return
+        for b in self.buttons:
+            b.config(state="normal")
+        self.play_btn.config(text="▶ Play" if p.paused else "❚❚ Pause")
+        dur = p.state.get("duration") or 0.0
+        if dur != self._duration:
+            self._duration = dur
+            self.slider.config_range(to=max(dur, 0.01))
+        self.slider.set_marks(p.part_starts[1:])
+        pos = p.position
+        if pos is None:
+            return
+        self.time_lbl.config(text=f"{seconds_to_ffmpeg_time(pos)} / "
+                                  f"{seconds_to_ffmpeg_time(dur)}")
+        if not self.slider.dragging:
+            self.slider.set(pos)
+        i = self.part_index(pos)
+        self.part_lbl.config(text=self.labels[i] if i < len(self.labels) else "")
+
+    def _on_slide(self, value):
+        if self.loaded:
+            self.player.seek(value, exact=False)   # keyframes while dragging: fast
+
+    def _on_slide_done(self, value):
+        if self.loaded:
+            self.player.seek(value)                # then the exact frame
+
+    def toggle_play(self):
+        if self.loaded:
+            self.player.toggle_pause()
+
+    def seek_by(self, seconds):
+        if self.loaded:
+            self.player.seek_relative(seconds)
+
+    def frame_step(self, forward):
+        if self.loaded:
+            self.player.frame_step(forward)
+
+    def go_to_part(self, direction):
+        """To the next part's first frame, or back to the start of this
+        part (the previous one's when already within a second of it)."""
+        if not self.loaded:
+            return
+        starts = self.player.part_starts
+        pos = self.player.position or 0.0
+        i = self.part_index(pos)
+        if direction > 0:
+            if i + 1 >= len(starts):
+                return
+            target = starts[i + 1]
+        else:
+            target = starts[i] if pos - starts[i] > 1.0 else starts[max(0, i - 1)]
+        self.player.show_first_frame_from(target)
 
 
 if os.name == "nt":
@@ -1650,6 +1850,8 @@ class LosslessVideoApp(_BaseTk):
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
 
         self.combine_files = []          # list of paths queued to join
+        self.combine_preview = None      # ClipPreview of the joined videos, made on first use
+        self._combine_preview_sync_id = None
 
         self.bulk_items = []             # list of dicts: path, ranges, status, iid
         self._bulk_lock = threading.Lock()
@@ -1711,9 +1913,28 @@ class LosslessVideoApp(_BaseTk):
 
     def _on_notebook_tab_changed(self, event=None):
         idx = self.notebook.index("current")
+        # No sound from a tab out of sight.
         if idx != 0 and self._cut_player_on:
-            self.cut_player.set_paused(True)   # no sound from a tab out of sight
+            self.cut_player.set_paused(True)
+        for tab, player in self._tab_players():
+            if tab != idx:
+                player.set_paused(True)
         self._ensure_tab_built(idx)
+
+    def _tab_players(self):
+        """(tab index, VideoPlayer) of the started players on tabs other
+        than Cut."""
+        found = []
+        if self.combine_preview is not None:
+            found.append((1, self.combine_preview.player))
+        return found
+
+    def _player_audio_settings(self):
+        """The volume and mute set on the Cut tab, which the other tabs'
+        players use too: (volume, muted)."""
+        if self.cut_player is not None:
+            return self.cut_player.volume, self.cut_player.muted
+        return float(self.settings.get("player_volume", 100.0)), bool(self.settings.get("player_muted", False))
 
     def _ensure_tab_built(self, idx):
         if self._tab_built[idx]:
@@ -1732,6 +1953,8 @@ class LosslessVideoApp(_BaseTk):
                 self.after_cancel(self._cut_audio_save_id)
                 self._save_cut_audio_settings()
             self.cut_player.terminate()
+        for _tab, player in self._tab_players():
+            player.terminate()
         self.destroy()
 
     # ====================================================================
@@ -2513,7 +2736,13 @@ class LosslessVideoApp(_BaseTk):
         save_settings(self.settings)
 
     def _on_cut_key(self, event, action, sequence):
-        if not self._cut_player_on or self.notebook.index("current") != 0:
+        tab = self.notebook.index("current")
+        if tab != 0:
+            # The other tabs' players take the play / seek / step keys.
+            action = self._tab_player_key_action(tab, sequence)
+            if action is None:
+                return None
+        elif not self._cut_player_on:
             return None
         if event.state & (0x4 | 0x20000):   # Ctrl or Alt: someone else's shortcut
             return None
@@ -2530,6 +2759,25 @@ class LosslessVideoApp(_BaseTk):
             return None
         action()
         return "break"
+
+    def _tab_player_key_action(self, tab, sequence):
+        """What a player key does on a tab other than Cut, or None when
+        that tab shows no video in a player (the key then does what it
+        normally does)."""
+        target = None
+        if tab == 1 and self._combine_preview_open():
+            target = self.combine_preview
+        if target is None or not target.loaded:
+            return None
+        return {
+            "<KeyPress-space>": target.toggle_play,
+            "<KeyPress-comma>": lambda: target.frame_step(False),
+            "<KeyPress-period>": lambda: target.frame_step(True),
+            "<KeyPress-Left>": lambda: target.seek_by(-5),
+            "<KeyPress-Right>": lambda: target.seek_by(5),
+            "<Shift-KeyPress-Left>": lambda: target.seek_by(-1),
+            "<Shift-KeyPress-Right>": lambda: target.seek_by(1),
+        }.get(sequence)
 
     def _cut_use_player(self, on):
         """Shows the player over the still-frame canvas, or takes it away."""
@@ -4061,8 +4309,14 @@ class LosslessVideoApp(_BaseTk):
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
 
-        list_frame = tk.Frame(body, bg="black")
-        list_frame.grid(row=0, column=0, sticky="nsew")
+        # The list, and under it (once opened) the preview of the joined
+        # video, with a sash between them.
+        self.combine_paned = tk.PanedWindow(body, orient="vertical", bg="#f0f0f0", bd=0,
+                                            sashwidth=px(6), sashrelief="flat",
+                                            opaqueresize=True)
+        self.combine_paned.grid(row=0, column=0, sticky="nsew")
+        list_frame = tk.Frame(self.combine_paned, bg="black")
+        self.combine_paned.add(list_frame, stretch="always", minsize=px(60))
         list_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
 
@@ -4110,6 +4364,11 @@ class LosslessVideoApp(_BaseTk):
         tk.Button(side, text="Move Up", width=16, command=lambda: self._combine_move(-1)).pack(pady=2)
         tk.Button(side, text="Move Down", width=16, command=lambda: self._combine_move(1)).pack(pady=2)
         tk.Button(side, text="Clear All", width=16, command=self._combine_clear).pack(pady=2)
+        self.combine_preview_btn = None
+        if mpv_available():
+            self.combine_preview_btn = tk.Button(side, text="Preview", width=16,
+                                                 command=self._combine_toggle_preview)
+            self.combine_preview_btn.pack(pady=(10, 2))
 
         self.combine_save_to_source_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -4137,6 +4396,7 @@ class LosslessVideoApp(_BaseTk):
 
     # ---- row rendering --------------------------------------------------
     def _rebuild_combine_rows(self):
+        self._schedule_combine_preview_sync()
         for child in self.combine_inner.winfo_children():
             child.destroy()
         self.combine_thumb_labels = {}
@@ -4287,6 +4547,87 @@ class LosslessVideoApp(_BaseTk):
         self.combine_files = []
         self.combine_selected_index = None
         self._rebuild_combine_rows()
+
+    # ---- preview of the joined video ---------------------------------------
+    def _combine_preview_open(self):
+        return bool(getattr(self, "_combine_preview_shown", False))
+
+    def _combine_toggle_preview(self):
+        if self._combine_preview_open():
+            self._combine_close_preview()
+        else:
+            self._combine_open_preview()
+
+    def _combine_open_preview(self):
+        """Plays the list's videos back to back, as Combine will join them,
+        in a player under the list."""
+        if not self.combine_files:
+            self.status_lbl.config(text="Add videos first, then preview them joined")
+            return
+        if self.combine_preview is None:
+            self.combine_preview = ClipPreview(self.combine_paned,
+                                               on_close=self._combine_close_preview)
+        self._combine_preview_shown = True
+        self.combine_paned.add(self.combine_preview.frame, stretch="always", minsize=px(140))
+        # The list keeps about a third of the height.
+        self.combine_paned.update_idletasks()
+        self.combine_paned.sash_place(
+            0, 0, max(px(60), int(self.combine_paned.winfo_height() * 0.35)))
+        self.combine_preview_btn.config(text="Close preview")
+        try:
+            self._combine_preview_load()
+        except RuntimeError as exc:
+            self._combine_close_preview()
+            messagebox.showerror("Preview", str(exc))
+
+    def _combine_close_preview(self):
+        if not self._combine_preview_open():
+            return
+        self._combine_preview_shown = False
+        self.combine_preview.unload()
+        self.combine_paned.forget(self.combine_preview.frame)
+        self.combine_preview_btn.config(text="Preview")
+
+    def _combine_preview_load(self, start=0.0):
+        files = list(self.combine_files)
+        labels = [f"Video {i}/{len(files)}: {os.path.basename(p)}"
+                  for i, p in enumerate(files, 1)]
+        volume, muted = self._player_audio_settings()
+        self.combine_preview.show([(p, None, None) for p in files], labels, key=tuple(files),
+                                  start=start, volume=volume, muted=muted)
+
+    def _schedule_combine_preview_sync(self):
+        # Once the list has settled: a drag reorders it at every row it passes.
+        if not self._combine_preview_open():
+            return
+        if self._combine_preview_sync_id is not None:
+            self.after_cancel(self._combine_preview_sync_id)
+        self._combine_preview_sync_id = self.after(300, self._combine_preview_sync)
+
+    def _combine_preview_sync(self):
+        """The list changed with the preview open: show the new order,
+        starting with the video that was on screen if it is still listed."""
+        self._combine_preview_sync_id = None
+        preview = self.combine_preview
+        files = tuple(self.combine_files)
+        if not self._combine_preview_open() or files == preview.key:
+            return
+        if not files:
+            self._combine_close_preview()
+            return
+        start = 0.0
+        old, lengths = preview.key, preview.part_lengths()
+        if old and lengths and len(lengths) == len(old):
+            length_of = dict(zip(old, lengths))
+            current = old[preview.part_index(preview.player.position or 0.0)]
+            if current in files:
+                before = files[:files.index(current)]
+                if all(f in length_of for f in before):
+                    start = sum(length_of[f] for f in before)
+        try:
+            self._combine_preview_load(start)
+        except RuntimeError:
+            self._combine_close_preview()
 
     def _combine_clicked(self):
         if len(self.combine_files) < 2:
