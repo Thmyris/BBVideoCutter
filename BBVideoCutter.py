@@ -1571,6 +1571,22 @@ class VideoPlayer:
         if self.mpv is not None:
             self.mpv.aid = track_id
 
+    def set_video_crop(self, spec):
+        """Shows only part of the video: spec "WxH+X+Y" in the video's own
+        pixels, or "" for all of it."""
+        if self.mpv is not None:
+            self.mpv.video_crop = spec
+
+    def show_overlay(self, ass_events, width, height):
+        """Draws ASS events (one per line) over the video, in a coordinate
+        space of width x height spanning the player's frame."""
+        if self.mpv is not None:
+            self._async("osd-overlay", 1, "ass-events", ass_events, width, height, 0, "no", "no")
+
+    def hide_overlay(self):
+        if self.mpv is not None:
+            self._async("osd-overlay", 1, "none", "", 0, 0, 0, "no", "no")
+
     # A-B loop: playback jumps back to a on reaching b.
     looping = False
 
@@ -1851,6 +1867,12 @@ class LosslessVideoApp(_BaseTk):
         self.resize_aspect_buttons = {}
         self._resize_bg_image_id = None   # cached canvas image item (perf)
         self._resize_bg_cache_key = None  # (frame id, dw, dh) the cached photo was built for
+        # With libmpv, the video plays under the crop box: a player placed
+        # over the picture's area of the canvas (_resize_place_player),
+        # which draws the box too (_resize_draw_player_overlay).
+        self.resize_player = None
+        self._resize_player_on = False    # the player (not a still frame) shows the video
+        self._resize_view = None          # where the player is placed, and its video-crop
 
         # Audio tab state
         self.audio_input_path = None
@@ -1950,6 +1972,8 @@ class LosslessVideoApp(_BaseTk):
             found.append((1, self.combine_preview.player))
         if self.bulk_preview is not None:
             found.append((2, self.bulk_preview.player))
+        if self.resize_player is not None:
+            found.append((3, self.resize_player))
         return found
 
     def _player_audio_settings(self):
@@ -2792,16 +2816,21 @@ class LosslessVideoApp(_BaseTk):
             target = self.combine_preview
         elif tab == 2 and self._bulk_preview_open():
             target = self.bulk_preview
-        if target is None or not target.loaded:
+        if target is not None and target.loaded:
+            play, step, seek_by = target.toggle_play, target.frame_step, target.seek_by
+        elif tab == 3 and self._resize_player_ready():
+            p = self.resize_player
+            play, step, seek_by = p.toggle_pause, p.frame_step, p.seek_relative
+        else:
             return None
         return {
-            "<KeyPress-space>": target.toggle_play,
-            "<KeyPress-comma>": lambda: target.frame_step(False),
-            "<KeyPress-period>": lambda: target.frame_step(True),
-            "<KeyPress-Left>": lambda: target.seek_by(-5),
-            "<KeyPress-Right>": lambda: target.seek_by(5),
-            "<Shift-KeyPress-Left>": lambda: target.seek_by(-1),
-            "<Shift-KeyPress-Right>": lambda: target.seek_by(1),
+            "<KeyPress-space>": play,
+            "<KeyPress-comma>": lambda: step(False),
+            "<KeyPress-period>": lambda: step(True),
+            "<KeyPress-Left>": lambda: seek_by(-5),
+            "<KeyPress-Right>": lambda: seek_by(5),
+            "<Shift-KeyPress-Left>": lambda: seek_by(-1),
+            "<Shift-KeyPress-Right>": lambda: seek_by(1),
         }.get(sequence)
 
     def _cut_use_player(self, on):
@@ -5360,9 +5389,14 @@ class LosslessVideoApp(_BaseTk):
         time_row = tk.Frame(controls, bg="#f0f0f0")
         time_row.pack(pady=(2, 2))
 
+        self.resize_play_btn = None
+        if mpv_available():
+            self.resize_play_btn = tk.Button(time_row, text="▶ Play", width=8, state="disabled",
+                                             command=self._resize_toggle_play)
+            self.resize_play_btn.pack(side="left", padx=(0, 12))
         tk.Label(time_row, text="Frame:", bg="#f0f0f0").pack(side="left")
         self.resize_time_lbl = tk.Label(
-            time_row, text="00:00:00", width=10, bg="#f0f0f0", font=("Consolas", 10)
+            time_row, text="00:00:00", width=12, bg="#f0f0f0", font=("Consolas", 10)
         )
         self.resize_time_lbl.pack(side="left", padx=(4, 12))
 
@@ -5371,7 +5405,8 @@ class LosslessVideoApp(_BaseTk):
         )
         self.resize_size_lbl.pack(side="left")
 
-        self.resize_slider = TimeSlider(controls, command=self._resize_slider_changed)
+        self.resize_slider = TimeSlider(controls, command=self._resize_slider_changed,
+                                        on_release=self._resize_slider_released)
         self.resize_slider.pack(fill="x", padx=8, pady=(0, 4))
 
         button_row = tk.Frame(controls, bg="#f0f0f0")
@@ -5568,8 +5603,165 @@ class LosslessVideoApp(_BaseTk):
 
         self.resize_save_btn.config(state="normal")
         self._resize_update_labels()
-        self._resize_update_preview(0)
+        self.resize_time_lbl.config(text=seconds_to_hms(0))
+        if not self._resize_start_player(path):
+            self._resize_update_preview(0)
         self.status_lbl.config(text="Ready")
+
+    # ---- the video player under the crop box ---------------------------
+    # With libmpv the frame on screen is the playing video itself, shown by
+    # a player placed over the canvas exactly where the still frame would
+    # be. Over the video mpv draws the crop box (an OSD overlay, since no Tk
+    # item can be drawn on top of the player); the canvas still draws the
+    # parts that stick out past the video's edges. Mouse events on the
+    # player go to the canvas's own handlers.
+    def _resize_start_player(self, path):
+        """Opens path in the Crop tab's player. False when there is no
+        player, and the tab shows still frames instead."""
+        if not mpv_available():
+            return False
+        try:
+            if self.resize_player is None:
+                player = VideoPlayer(self.resize_canvas, on_change=self._on_resize_player_changed,
+                                     options={"keepaspect": "no", "cursor_autohide": "no"})
+                for sequence, handler in (("<ButtonPress-1>", self._resize_mouse_down),
+                                          ("<B1-Motion>", self._resize_mouse_drag),
+                                          ("<ButtonRelease-1>", self._resize_mouse_up),
+                                          ("<Motion>", self._resize_mouse_move)):
+                    player.frame.bind(sequence, lambda e, h=handler: h(self._resize_player_event(e)))
+                player.frame.bind("<MouseWheel>", self._resize_mouse_wheel)
+                self.resize_player = player
+            volume, muted = self._player_audio_settings()
+            self.resize_player.set_volume(volume)
+            self.resize_player.set_muted(muted)
+            self.resize_player.load(path)
+        except RuntimeError as exc:
+            self.status_lbl.config(text=str(exc))
+            return False
+        self._resize_use_player(True)
+        return True
+
+    def _resize_player_event(self, event):
+        """event, moved from the player's frame to canvas coordinates."""
+        event.x += self.resize_player.frame.winfo_x()
+        event.y += self.resize_player.frame.winfo_y()
+        return event
+
+    def _resize_use_player(self, on):
+        """Shows the player in place of the still frame, or goes back to
+        still frames (when the player can't open the file)."""
+        self._resize_player_on = on
+        self._resize_view = None
+        self.resize_frame_img = None
+        self.resize_canvas.delete("all")
+        self._resize_bg_image_id = None
+        self._resize_bg_cache_key = None
+        if not on:
+            self.resize_player.frame.place_forget()
+            self.resize_player.hide_overlay()
+            self.resize_play_btn.config(state="disabled", text="▶ Play")
+            self._resize_update_preview(self.resize_time_sec)
+        self._redraw_resize_canvas()
+
+    def _on_resize_player_changed(self):
+        p = self.resize_player
+        if not self._resize_player_on:
+            return
+        if p.failed:
+            self.status_lbl.config(text="The player can't open this video; showing still frames.")
+            self._resize_use_player(False)
+            return
+        if not p.loaded:
+            return
+        self.resize_play_btn.config(state="normal", text="▶ Play" if p.paused else "❚❚ Pause")
+        pos = p.position
+        if pos is None:
+            return
+        self.resize_time_sec = pos
+        self.resize_time_lbl.config(text=seconds_to_ffmpeg_time(pos))
+        if not self.resize_slider.dragging:
+            self.resize_slider.set(pos)
+
+    def _resize_player_ready(self):
+        return self._resize_player_on and self.resize_player.loaded
+
+    def _resize_toggle_play(self):
+        if self._resize_player_ready():
+            self.resize_player.toggle_pause()
+
+    def _resize_slider_released(self, value):
+        if self._resize_player_ready():
+            self.resize_player.seek(value)          # the exact frame, after keyframes while dragging
+
+    def _resize_place_player(self, geom):
+        """Puts the player over the part of the canvas the video covers,
+        showing (with mpv's video-crop) just the part of the video that is
+        in view when zoomed in."""
+        _scale, dx0, dy0, dw, dh = geom
+        c = self.resize_canvas
+        cw, ch = c.winfo_width(), c.winfo_height()
+        sw, sh = self.resize_src_w, self.resize_src_h
+        kx, ky = dw / sw, dh / sh
+        sx0 = max(0, math.floor(-dx0 / kx))
+        sx1 = min(sw, math.ceil((cw - dx0) / kx))
+        sy0 = max(0, math.floor(-dy0 / ky))
+        sy1 = min(sh, math.ceil((ch - dy0) / ky))
+        x, y = int(round(dx0 + sx0 * kx)), int(round(dy0 + sy0 * ky))
+        w = max(1, int(round(dx0 + sx1 * kx)) - x)
+        h = max(1, int(round(dy0 + sy1 * ky)) - y)
+        crop = "" if (sx0, sy0, sx1, sy1) == (0, 0, sw, sh) else f"{sx1-sx0}x{sy1-sy0}+{sx0}+{sy0}"
+        view = (x, y, w, h, sx0, sy0, sx1, sy1)
+        if view != self._resize_view:
+            self._resize_view = view
+            self.resize_player.set_video_crop(crop)
+            self.resize_player.frame.place(x=x, y=y, width=w, height=h)
+
+    def _resize_draw_player_overlay(self):
+        """The crop box over the video, drawn by mpv: the same shading,
+        outline, corner handles and size label the canvas draws."""
+        x, y, w, h, sx0, sy0, sx1, sy1 = self._resize_view
+        kx, ky = w / (sx1 - sx0), h / (sy1 - sy0)
+        x0, y0, x1, y1 = self.resize_crop
+        # The crop box and the whole video, in the player's own pixels.
+        bx0, by0 = (x0 - sx0) * kx, (y0 - sy0) * ky
+        bx1, by1 = (x1 - sx0) * kx, (y1 - sy0) * ky
+        vx0, vy0 = -sx0 * kx, -sy0 * ky
+        vx1, vy1 = (self.resize_src_w - sx0) * kx, (self.resize_src_h - sy0) * ky
+
+        def rect(rx0, ry0, rx1, ry1, color, alpha="00"):
+            rx0, ry0 = max(rx0, -2), max(ry0, -2)     # off-screen parts aren't drawn anyway
+            rx1, ry1 = min(rx1, w + 2), min(ry1, h + 2)
+            if rx1 <= rx0 or ry1 <= ry0:
+                return None
+            rx0, ry0, rx1, ry1 = (int(round(v)) for v in (rx0, ry0, rx1, ry1))
+            return (f"{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H{color}&\\1a&H{alpha}&\\p1}}"
+                    f"m {rx0} {ry0} l {rx1} {ry0} {rx1} {ry1} {rx0} {ry1}{{\\p0}}")
+
+        events = [
+            # Shade outside the box (four strips tiling the video minus it).
+            rect(vx0, vy0, vx1, by0, "000000", "80"),
+            rect(vx0, by1, vx1, vy1, "000000", "80"),
+            rect(vx0, by0, bx0, by1, "000000", "80"),
+            rect(bx1, by0, vx1, by1, "000000", "80"),
+        ]
+        t = px(2) / 2
+        cyan = "FFE500"   # #00e5ff, as BGR
+        events += [
+            rect(bx0 - t, by0 - t, bx1 + t, by0 + t, cyan),
+            rect(bx0 - t, by1 - t, bx1 + t, by1 + t, cyan),
+            rect(bx0 - t, by0 - t, bx0 + t, by1 + t, cyan),
+            rect(bx1 - t, by0 - t, bx1 + t, by1 + t, cyan),
+        ]
+        handle = px(7)
+        for hx, hy in ((bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)):
+            events.append(rect(hx - handle, hy - handle, hx + handle, hy + handle, "111111"))
+            events.append(rect(hx - handle + 1, hy - handle + 1, hx + handle - 1, hy + handle - 1,
+                               "FFFFFF"))
+        font_px = int(round(9 * UI_SCALE * 96 / 72))
+        events.append(f"{{\\an5\\pos({int(round((bx0 + bx1) / 2))},{int(round(by0 - px(14)))})"
+                      f"\\fnSegoe UI\\b1\\fs{font_px}\\bord1\\shad0\\1c&HFFFFFF&\\3c&H000000&}}"
+                      f"{x1-x0}×{y1-y0}")
+        self.resize_player.show_overlay("\n".join(e for e in events if e), w, h)
 
     def _resize_update_labels(self):
         if not self.resize_crop:
@@ -5653,6 +5845,10 @@ class LosslessVideoApp(_BaseTk):
     def _resize_slider_changed(self, value):
         if not self.resize_input_path:
             return
+        if self._resize_player_on:
+            if self.resize_player.loaded:
+                self.resize_player.seek(float(value), exact=False)   # keyframes while dragging: fast
+            return
         self.resize_time_sec = float(value)
         self.resize_time_lbl.config(text=seconds_to_hms(self.resize_time_sec))
         self._resize_update_preview(self.resize_time_sec)
@@ -5712,16 +5908,21 @@ class LosslessVideoApp(_BaseTk):
         c = self.resize_canvas
         cw = c.winfo_width()
         ch = c.winfo_height()
-        if not self.resize_frame_img or cw < 2 or ch < 2:
+        if self._resize_player_on:
+            img_w, img_h = self.resize_src_w, self.resize_src_h
+        elif self.resize_frame_img:
+            img_w, img_h = self.resize_frame_img.width, self.resize_frame_img.height
+        else:
+            return None
+        if cw < 2 or ch < 2:
             return None
 
-        img = self.resize_frame_img
-        fit_scale = min((cw - px(20)) / img.width, (ch - px(20)) / img.height)
+        fit_scale = min((cw - px(20)) / img_w, (ch - px(20)) / img_h)
         fit_scale = max(0.01, fit_scale)
         scale = fit_scale * max(1.0, self.resize_zoom)
 
-        dw = max(1, int(img.width * scale))
-        dh = max(1, int(img.height * scale))
+        dw = max(1, int(img_w * scale))
+        dh = max(1, int(img_h * scale))
 
         # When zoomed in, center the view on the crop rectangle so you can
         # fine-tune whichever edges you're currently working on, instead of
@@ -5730,7 +5931,7 @@ class LosslessVideoApp(_BaseTk):
             x0, y0, x1, y1 = self.resize_crop
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         else:
-            cx, cy = img.width / 2, img.height / 2
+            cx, cy = img_w / 2, img_h / 2
 
         dx0 = cw / 2 - cx * scale
         dy0 = ch / 2 - cy * scale
@@ -5760,7 +5961,7 @@ class LosslessVideoApp(_BaseTk):
         # cheap overlay (a few rectangles/lines), never the image.
         c = self.resize_canvas
 
-        if not self.resize_frame_img:
+        if not self.resize_frame_img and not self._resize_player_on:
             c.delete("all")
             self._resize_bg_image_id = None
             self._resize_bg_cache_key = None
@@ -5777,7 +5978,9 @@ class LosslessVideoApp(_BaseTk):
         scale, dx0, dy0, dw, dh = geom
         cache_key = (id(self.resize_frame_img), dw, dh)
 
-        if cache_key != getattr(self, "_resize_bg_cache_key", None):
+        if self._resize_player_on:
+            self._resize_place_player(geom)
+        elif cache_key != getattr(self, "_resize_bg_cache_key", None):
             img = self.resize_frame_img.resize((dw, dh), Image.BILINEAR)
             self.resize_frame_photo = ImageTk.PhotoImage(img)
             self._resize_bg_cache_key = cache_key
@@ -5845,6 +6048,8 @@ class LosslessVideoApp(_BaseTk):
                 text=f"{x1-x0}×{y1-y0}",
                 fill="#ffffff", font=("Segoe UI", 9, "bold"), tags=("overlay",)
             )
+            if self._resize_player_on:
+                self._resize_draw_player_overlay()
 
     def _resize_source_point(self, event):
         geom = self._resize_canvas_geometry()
@@ -6089,6 +6294,8 @@ class LosslessVideoApp(_BaseTk):
             "move": "fleur",
         }
         self.resize_canvas.config(cursor=cursors.get(hit, ""))
+        if self.resize_player is not None:
+            self.resize_player.frame.config(cursor=cursors.get(hit, ""))
 
     def _resize_highlight_aspect_button(self):
         for key, btn in self.resize_aspect_buttons.items():
