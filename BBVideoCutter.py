@@ -1599,7 +1599,6 @@ class VideoPlayer:
     def load(self, path, start=None):
         """Opens path (a file or an edl_url()), paused, at time start."""
         self._ensure_mpv()
-        self.clear_loop()
         self.state.pop("time-pos", None)
         self.state.pop("track-list", None)   # the old file's, until the new one's arrive
         self.state.pop("aid", None)
@@ -1620,7 +1619,7 @@ class VideoPlayer:
     def set_paused(self, paused):
         if self.mpv is None:
             return
-        if not paused and self.at_end and not self.looping:
+        if not paused and self.at_end:
             self._async("seek", 0, "absolute+exact")   # play again from the top
         self.mpv.pause = paused
 
@@ -1686,22 +1685,6 @@ class VideoPlayer:
     def hide_overlay(self):
         if self.mpv is not None:
             self._async("osd-overlay", 1, "none", "", 0, 0, 0, "no", "no")
-
-    # A-B loop: playback jumps back to a on reaching b.
-    looping = False
-
-    def set_loop(self, a, b):
-        if self.mpv is None:
-            return
-        self.looping = True
-        self.mpv.ab_loop_a = a
-        self.mpv.ab_loop_b = b
-
-    def clear_loop(self):
-        self.looping = False
-        if self.mpv is not None:
-            self.mpv.ab_loop_a = "no"
-            self.mpv.ab_loop_b = "no"
 
 
 def edl_url(segments):
@@ -2883,7 +2866,6 @@ class LosslessVideoApp(_BaseTk):
         controls.grid(row=2, column=0, sticky="ew", padx=3, pady=2)
 
         self.cut_transport_buttons = []  # need a loaded video
-        self.cut_mark_buttons = []       # also change the range: off while cutting
         if self.cut_player is not None:
             self._build_cut_transport(controls)
 
@@ -3016,21 +2998,20 @@ class LosslessVideoApp(_BaseTk):
         self.start_entry.config(state=state)
         self.end_entry.config(state=state)
         self.save_btn.config(state=state)
-        for b in self.step_buttons + self.cut_mark_buttons:
+        for b in self.step_buttons:
             b.config(state=state)
         self._update_cut_range_buttons()
 
     # ---- embedded player ---------------------------------------------
     def _build_cut_transport(self, parent):
-        """Play / step / jump buttons, the playhead time, and the buttons
-        that set the start or end at the frame on screen."""
+        """Play / step / jump buttons and the playhead time."""
         row = tk.Frame(parent, bg="#f0f0f0")
         row.pack(pady=(2, 1))
 
-        def button(text, command, marks=False, **kw):
+        def button(text, command, **kw):
             b = tk.Button(row, text=text, command=command, **kw)
             b.pack(side="left", padx=1)
-            (self.cut_mark_buttons if marks else self.cut_transport_buttons).append(b)
+            self.cut_transport_buttons.append(b)
             return b
 
         button("|◀ Start", lambda: self._cut_go_to("start"))
@@ -3045,10 +3026,7 @@ class LosslessVideoApp(_BaseTk):
         self.cut_time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27,
                                      font=("Segoe UI", 9))
         self.cut_time_lbl.pack(side="left", padx=6)
-        button("Set start (I)", lambda: self._cut_mark("start"), marks=True)
-        button("Set end (O)", lambda: self._cut_mark("end"), marks=True)
-        self.cut_loop_btn = button("Play selection", self._cut_toggle_loop, width=13)
-        for b in self.cut_transport_buttons + self.cut_mark_buttons:
+        for b in self.cut_transport_buttons:
             b.config(state="disabled")
 
         # Keyboard: Space play/pause, I / O set start / end, , / . one
@@ -3260,7 +3238,6 @@ class LosslessVideoApp(_BaseTk):
             self.cut_player.frame.place_forget()
         for b in self.cut_transport_buttons:
             b.config(state="normal" if on else "disabled")
-        self._update_cut_loop_button()
 
     def _on_cut_video_click(self, event):
         # Clicking the video plays / pauses it, and takes the keyboard focus
@@ -3324,31 +3301,8 @@ class LosslessVideoApp(_BaseTk):
         self.active_handle = which
         self._sync_entries()
         self._redraw_slider()
-        self._cut_range_changed()
         self.status_lbl.config(
             text=f"{which.capitalize()} set at the frame at {seconds_to_ffmpeg_time(t)}")
-
-    def _cut_range_changed(self):
-        """Keeps a running "Play selection" loop on the current range."""
-        if self._cut_player_on and self.cut_player.looping:
-            self.cut_player.set_loop(self.start_sec, self.end_sec)
-
-    def _cut_toggle_loop(self):
-        if not self._cut_player_on:
-            return
-        player = self.cut_player
-        if player.looping:
-            player.clear_loop()
-            player.set_paused(True)
-        else:
-            player.set_loop(self.start_sec, self.end_sec)
-            player.show_first_frame_from(self.start_sec)
-            player.set_paused(False)
-        self._update_cut_loop_button()
-
-    def _update_cut_loop_button(self):
-        looping = self._cut_player_on and self.cut_player.looping
-        self.cut_loop_btn.config(text="Stop loop" if looping else "Play selection")
 
     def _on_cut_player_changed(self):
         """Called (on the Tk thread) when the player's position, play state
@@ -3483,7 +3437,6 @@ class LosslessVideoApp(_BaseTk):
         # Leaving an unchanged field (a click on the video, say) must not
         # move the player away from where it is.
         if changed or not self._cut_player_on:
-            self._cut_range_changed()
             self._cut_show_time(self.start_sec, "start")
 
     def _on_end_entry(self):
@@ -3498,7 +3451,6 @@ class LosslessVideoApp(_BaseTk):
         self._sync_entries()
         self._redraw_slider()
         if changed or not self._cut_player_on:
-            self._cut_range_changed()
             self._cut_show_time(self.end_sec, "end")
 
     def _set_active_handle(self, which):
@@ -3517,7 +3469,6 @@ class LosslessVideoApp(_BaseTk):
             self._cut_show_time(self.end_sec, "end")
         self._sync_entries()
         self._redraw_slider()
-        self._cut_range_changed()
 
     # ---- ranges for Bulk Cut -------------------------------------------
     # Several scenes of one video: each Start-End is added to a list (A),
@@ -3588,7 +3539,6 @@ class LosslessVideoApp(_BaseTk):
         self.start_sec, self.end_sec = rng
         self._sync_entries()
         self._redraw_slider()
-        self._cut_range_changed()
         self._cut_show_time(self.start_sec, "start")
 
     def _cut_remove_ranges(self, ranges):
@@ -3962,7 +3912,6 @@ class LosslessVideoApp(_BaseTk):
             self._cut_scrubbing = False
             self.cut_player.seek(self._cut_scrub_time)
         else:
-            self._cut_range_changed()
             if target == "start":
                 self._cut_show_time(self.start_sec, "start")
             else:
