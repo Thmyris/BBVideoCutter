@@ -5543,12 +5543,22 @@ class LosslessVideoApp(_BaseTk):
             bg="#f0f0f0", fg="#777777"
         ).pack(side="left", padx=(8, 2))
 
+        save_row = tk.Frame(controls, bg="#f0f0f0")
+        save_row.pack(fill="x", padx=2, pady=(4, 2))
+        # Only the turn, written into the file's rotation info: the video
+        # and audio are copied as they are, so it is instant and lossless.
+        # The crop box is left out. Enabled while a turn is picked.
+        self.resize_rotate_save_btn = tk.Button(
+            save_row, text="Save Rotation Only\n(lossless, no crop)", height=2,
+            command=self._resize_save_rotation_clicked, state="disabled"
+        )
+        self.resize_rotate_save_btn.pack(side="right", padx=(4, 0))
         self.resize_save_btn = tk.Button(
-            controls, text="Crop & Save Video!", height=2,
+            save_row, text="Crop & Save Video!", height=2,
             font=("Segoe UI", 10, "bold"),
             command=self._resize_save_clicked
         )
-        self.resize_save_btn.pack(fill="x", padx=2, pady=(4, 2))
+        self.resize_save_btn.pack(side="left", fill="x", expand=True)
         self.resize_save_btn.config(state="disabled")
 
     def _show_crop_info(self):
@@ -5582,6 +5592,12 @@ class LosslessVideoApp(_BaseTk):
             "Rotate turns the frames in that same re-encode (ffmpeg's transpose "
             "filter, applied before the crop), so a turn adds no second pass "
             "and no extra quality loss.\n\n"
+            "To only turn a video, without cropping it, use Save Rotation "
+            "Only instead: it copies the video and audio exactly as they are "
+            "(-c copy) and just changes the file's rotation info (the display "
+            "matrix that players read), so it is instant and fully lossless. "
+            "The crop box is ignored there. The result is an MP4 (or a MOV, "
+            "for a MOV source), since those containers carry that info.\n\n"
             "The pixel format is forced to yuv420p for the widest player/"
             "device compatibility.\n\n"
             "The audio track is NOT re-encoded — cropping is purely a video/"
@@ -5639,6 +5655,7 @@ class LosslessVideoApp(_BaseTk):
         self.resize_rotation = rotation
         self.resize_user_rotation = 0
         self._resize_highlight_rotate_button()
+        self._resize_update_rotate_save_btn()
         self.resize_frame_raw = None
         self.resize_time_sec = 0.0
         self.resize_crop = (0, 0, src_w, src_h)
@@ -6485,6 +6502,7 @@ class LosslessVideoApp(_BaseTk):
             self._resize_highlight_aspect_button()
         self.resize_user_rotation = turn
         self._resize_highlight_rotate_button()
+        self._resize_update_rotate_save_btn()
         self.resize_info_lbl.config(
             text=f"{self.resize_src_w}×{self.resize_src_h}   [{seconds_to_hms(self.resize_duration)}]")
         if self._resize_player_on:
@@ -6530,6 +6548,7 @@ class LosslessVideoApp(_BaseTk):
             return
 
         self.resize_save_btn.config(state="disabled")
+        self.resize_rotate_save_btn.config(state="disabled")
         self.status_lbl.config(text="Cropping (re-encoding video)... 0%")
         crop = self.resize_crop
         threading.Thread(
@@ -6585,15 +6604,89 @@ class LosslessVideoApp(_BaseTk):
         except Exception as exc:
             self.after(0, lambda e=str(exc): self._resize_done(e, False))
 
-    def _resize_done(self, info, success):
+    def _resize_update_rotate_save_btn(self):
+        self.resize_rotate_save_btn.config(
+            state="normal" if self.resize_input_path and self.resize_user_rotation else "disabled")
+
+    def _resize_save_rotation_clicked(self):
+        """Saves the video turned by the Rotate buttons' turn, without
+        re-encoding: only the file's rotation info changes."""
+        turn = self.resize_user_rotation
+        if not self.resize_input_path or not turn:
+            return
+        source_dir = os.path.dirname(os.path.abspath(self.resize_input_path))
+        base_name, ext = os.path.splitext(os.path.basename(self.resize_input_path))
+        # The rotation info is a display matrix, which MP4 and MOV keep.
+        ext = ext.lower() if ext.lower() in (".mp4", ".m4v", ".mov") else ".mp4"
+        default_name = f"{base_name}.ROT{turn}{ext}"
+
+        from_dialog = not self.resize_save_to_source_var.get()
+        if not from_dialog:
+            out_path = os.path.join(source_dir, default_name)
+        else:
+            out_path = filedialog.asksaveasfilename(
+                title="Save rotated video as", initialdir=source_dir,
+                initialfile=default_name, defaultextension=ext,
+                filetypes=[(f"{ext[1:].upper()} video", "*" + ext), ("All files", "*.*")],
+            )
+            if not out_path:
+                return
+        out_path = self._check_output_path(
+            out_path, [self.resize_input_path], prompt_overwrite=not from_dialog
+        )
+        if not out_path:
+            return
+
+        self.resize_save_btn.config(state="disabled")
+        self.resize_rotate_save_btn.config(state="disabled")
+        self.status_lbl.config(text="Rotating (copying, no re-encode)... 0%")
+        total = (self.resize_rotation + turn) % 360
+        threading.Thread(
+            target=self._resize_run_rotation,
+            args=(out_path, total),
+            daemon=True
+        ).start()
+
+    def _resize_run_rotation(self, out_path, total_turn):
+        """Copies the video and audio into out_path as they are, with the
+        rotation info set so players show it turned clockwise by total_turn
+        from the stored frames (the file's own turn plus the Rotate
+        buttons' one)."""
+        try:
+            ffmpeg = find_exe("ffmpeg")
+            # -display_rotation replaces the input's display matrix; it is
+            # counterclockwise, and 0 leaves none.
+            cmd = [
+                ffmpeg, "-y", "-display_rotation", str((360 - total_turn) % 360),
+                "-i", self.resize_input_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                out_path
+            ]
+            report = self._progress_reporter("Rotating (copying, no re-encode)...", "crop")
+            proc = run_ffmpeg(cmd, self.resize_duration, report)
+            if proc.returncode != 0:
+                hint = ""
+                if "display_rotation" in proc.stderr:
+                    hint = ("This ffmpeg has no -display_rotation option; "
+                            "lossless rotation needs ffmpeg 6.0 or newer.\n\n")
+                raise RuntimeError(hint + proc.stderr[-3000:])
+            self.after(0, lambda p=out_path: self._resize_done(p, True, "Rotated"))
+        except Exception as exc:
+            self.after(0, lambda e=str(exc): self._resize_done(e, False, "Rotated"))
+
+    def _resize_done(self, info, success, what="Cropped"):
         self._end_progress("crop")
         self.resize_save_btn.config(state="normal")
+        self._resize_update_rotate_save_btn()
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
-            messagebox.showinfo("Done", f"Cropped video saved to:\n{info}")
+            messagebox.showinfo("Done", f"{what} video saved to:\n{info}")
         else:
-            self.status_lbl.config(text="Crop failed")
-            messagebox.showerror("ffmpeg error", "The crop failed.\n\n" + info)
+            verb = "rotation" if what == "Rotated" else "crop"
+            self.status_lbl.config(text=f"{verb.capitalize()} failed")
+            messagebox.showerror("ffmpeg error", f"The {verb} failed.\n\n" + info)
 
     def _on_drop_resize(self, event):
         self._ensure_tab_built(3)

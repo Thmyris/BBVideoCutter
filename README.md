@@ -21,7 +21,8 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
   minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
   second 27 of the last minute that has it to the end: 19:27–20:10.
 - **Crop** — visual crop editor with widescreen/vertical aspect presets, and
-  a 90°/180°/270° rotate done in the same re-encode.
+  a 90°/180°/270° rotate done in the same re-encode, or saved on its own
+  losslessly (stream copy; only the file's rotation info changes).
 - **Audio** — mute/mix individual audio tracks.
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
