@@ -1320,6 +1320,37 @@ def load_mpv():
     return mpv
 
 
+def probe_shown_video_size(ffprobe, path):
+    """(width, height, turn) of path's first video stream as players show
+    it: turn is the clockwise quarter turn (0, 90, 180 or 270) the file
+    asks for, and width and height are swapped when it is 90 or 270.
+    ffmpeg turns the frames the same way before any filter (-vf) runs."""
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+         "-of", "json", path],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        **SUBPROCESS_KWARGS
+    )
+    streams = json.loads(result.stdout or "{}").get("streams") or []
+    if not streams or not streams[0].get("width") or not streams[0].get("height"):
+        raise RuntimeError("Could not determine video dimensions.")
+    stream = streams[0]
+    width, height = int(stream["width"]), int(stream["height"])
+    # The display matrix's rotation is counterclockwise; the old "rotate"
+    # tag (which ffprobe only shows when there is no matrix) is clockwise.
+    turn = 0.0
+    matrix = [d for d in stream.get("side_data_list") or [] if "rotation" in d]
+    if matrix:
+        turn = -float(matrix[0]["rotation"])
+    elif (stream.get("tags") or {}).get("rotate"):
+        turn = float(stream["tags"]["rotate"])
+    turn = int(round(turn / 90.0)) % 4 * 90
+    if turn in (90, 270):
+        width, height = height, width
+    return width, height, turn
+
+
 def describe_audio_track(track):
     """Menu label for one of mpv's track-list entries, e.g.
     '2: Commentary [eng] (aac, 2 ch)'."""
@@ -1848,11 +1879,15 @@ class LosslessVideoApp(_BaseTk):
         # Resize/Crop tab state
         self.resize_input_path = None
         self.resize_duration = 0.0
+        # The video's size as it is shown, i.e. after its rotation: the
+        # still frames, the player and ffmpeg's crop filter all work on
+        # the turned frame, so the crop box does too.
         self.resize_src_w = 0
         self.resize_src_h = 0
+        self.resize_rotation = 0         # clockwise turn applied to the stored frames
         self.resize_frame_img = None
         self.resize_frame_photo = None
-        self.resize_crop = None          # x0, y0, x1, y1 in source pixels
+        self.resize_crop = None          # x0, y0, x1, y1 in (shown) video pixels
         self.resize_drag_mode = None     # "move", "nw", "ne", "sw", "se", "new"
         self.resize_drag_start = None
         self.resize_crop_start = None
@@ -5567,18 +5602,8 @@ class LosslessVideoApp(_BaseTk):
                  "-of", "default=noprint_wrappers=1:nokey=1", path],
                 capture_output=True, text=True, check=True, **SUBPROCESS_KWARGS
             )
-            stream_result = subprocess.run(
-                [ffprobe, "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height",
-                 "-of", "csv=p=0:s=x", path],
-                capture_output=True, text=True, check=True, **SUBPROCESS_KWARGS
-            )
-
             duration = float(duration_result.stdout.strip())
-            dims = stream_result.stdout.strip().split("x")
-            if len(dims) != 2:
-                raise RuntimeError("Could not determine video dimensions.")
-            src_w, src_h = int(dims[0]), int(dims[1])
+            src_w, src_h, rotation = probe_shown_video_size(ffprobe, path)
         except Exception as exc:
             messagebox.showerror("Error loading video", str(exc))
             self.status_lbl.config(text="Ready")
@@ -5588,6 +5613,7 @@ class LosslessVideoApp(_BaseTk):
         self.resize_duration = duration
         self.resize_src_w = src_w
         self.resize_src_h = src_h
+        self.resize_rotation = rotation
         self.resize_time_sec = 0.0
         self.resize_crop = (0, 0, src_w, src_h)
         self.resize_aspect_lock = (src_w, src_h)
@@ -5709,12 +5735,27 @@ class LosslessVideoApp(_BaseTk):
         x, y = int(round(dx0 + sx0 * kx)), int(round(dy0 + sy0 * ky))
         w = max(1, int(round(dx0 + sx1 * kx)) - x)
         h = max(1, int(round(dy0 + sy1 * ky)) - y)
-        crop = "" if (sx0, sy0, sx1, sy1) == (0, 0, sw, sh) else f"{sx1-sx0}x{sy1-sy0}+{sx0}+{sy0}"
         view = (x, y, w, h, sx0, sy0, sx1, sy1)
         if view != self._resize_view:
             self._resize_view = view
-            self.resize_player.set_video_crop(crop)
+            self.resize_player.set_video_crop(
+                "" if (sx0, sy0, sx1, sy1) == (0, 0, sw, sh)
+                else self._resize_stored_rect_spec(sx0, sy0, sx1, sy1))
             self.resize_player.frame.place(x=x, y=y, width=w, height=h)
+
+    def _resize_stored_rect_spec(self, x0, y0, x1, y1):
+        """mpv's video-crop "WxH+X+Y" for a rect of the shown (turned)
+        frame: video-crop is in the stored frame's pixels, before mpv turns
+        it the way the file asks."""
+        w, h = self.resize_src_w, self.resize_src_h   # shown size
+        turn = self.resize_rotation
+        if turn == 90:      # shown x = stored height - stored y, shown y = stored x
+            x0, x1, y0, y1 = y0, y1, w - x1, w - x0
+        elif turn == 180:
+            x0, x1, y0, y1 = w - x1, w - x0, h - y1, h - y0
+        elif turn == 270:   # shown x = stored y, shown y = stored width - stored x
+            x0, x1, y0, y1 = h - y1, h - y0, x0, x1
+        return f"{x1-x0}x{y1-y0}+{x0}+{y0}"
 
     def _resize_draw_player_overlay(self):
         """The crop box over the video, drawn by mpv: the same shading,
