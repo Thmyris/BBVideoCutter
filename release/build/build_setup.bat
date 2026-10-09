@@ -13,7 +13,7 @@ REM     root (where BBVideoCutter.py and assets\ live). ffmpeg.exe/
 REM     ffprobe.exe (if used) live in this same release\build\ folder.
 REM
 REM What it does:
-REM   1) Installs/updates pyinstaller, pillow, tkinterdnd2
+REM   1) Installs/updates pyinstaller, pillow, tkinterdnd2, python-mpv
 REM   2) Builds a PyInstaller --onedir app to dist\BBVideoCutter\ (no
 REM      self-extraction step, so the installed app starts instantly --
 REM      see build_exe.bat's comments for why onedir over onefile).
@@ -30,6 +30,12 @@ REM      byproduct this script created (build\, dist\, the .spec file,
 REM      installer_output\) -- none of that is the deliverable, just
 REM      scratch work along the way, and it's all regenerable by
 REM      re-running this script.
+REM
+REM libmpv-2.dll: likewise, if it is in this folder it goes into the
+REM build, and the app gets its video player (Cut tab, and the previews
+REM on Combine, Bulk Cut and Crop). Without it the build still works
+REM and shows still frames instead. It comes from an mpv "dev" build
+REM for Windows x86_64 (for example shinchiro's mpv-dev-x86_64-*.7z).
 REM ===================================================================
 
 setlocal
@@ -44,37 +50,38 @@ if not exist %ISCC% (
 
 echo.
 echo [1/4] Installing/updating build dependencies...
-python -m pip install --upgrade pyinstaller pillow tkinterdnd2
+python -m pip install --upgrade pyinstaller pillow tkinterdnd2 python-mpv
 if errorlevel 1 goto :error
 
 echo.
-if exist "ffmpeg.exe" if exist "ffprobe.exe" (
-    echo [2/4] Found ffmpeg.exe/ffprobe.exe here -- including them in the build...
-    python -m PyInstaller ^
-        --onedir ^
-        --windowed ^
-        --name "BBVideoCutter" ^
-        --icon "..\..\assets\barkbark2.ico" ^
-        --collect-data=tkinterdnd2 ^
-        --add-binary "ffmpeg.exe;." ^
-        --add-binary "ffprobe.exe;." ^
-        --exclude-module numpy ^
-        --exclude-module yaml ^
-        --noconfirm ^
-        "..\..\BBVideoCutter.py"
+set HAVE_FFMPEG=0
+if exist "ffmpeg.exe" if exist "ffprobe.exe" set HAVE_FFMPEG=1
+set BUNDLE=
+if "%HAVE_FFMPEG%"=="1" set BUNDLE=--add-binary "ffmpeg.exe;." --add-binary "ffprobe.exe;."
+if exist "libmpv-2.dll" set BUNDLE=%BUNDLE% --add-binary "libmpv-2.dll;."
+echo [2/4] Building the app with PyInstaller...
+if "%HAVE_FFMPEG%"=="1" (
+    echo       including ffmpeg.exe/ffprobe.exe from here
 ) else (
-    echo [2/4] ffmpeg.exe/ffprobe.exe not found here -- building without them...
-    python -m PyInstaller ^
-        --onedir ^
-        --windowed ^
-        --name "BBVideoCutter" ^
-        --icon "..\..\assets\barkbark2.ico" ^
-        --collect-data=tkinterdnd2 ^
-        --exclude-module numpy ^
-        --exclude-module yaml ^
-        --noconfirm ^
-        "..\..\BBVideoCutter.py"
+    echo       ffmpeg.exe/ffprobe.exe not found here -- the app will need them on PATH
 )
+if exist "libmpv-2.dll" (
+    echo       including libmpv-2.dll from here -- the video player
+) else (
+    echo       libmpv-2.dll not found here -- the app will show still frames instead of a player
+)
+python -m PyInstaller ^
+    --onedir ^
+    --windowed ^
+    --name "BBVideoCutter" ^
+    --icon "..\..\assets\barkbark2.ico" ^
+    --collect-data=tkinterdnd2 ^
+    --hidden-import mpv ^
+    --exclude-module numpy ^
+    --exclude-module yaml ^
+    %BUNDLE% ^
+    --noconfirm ^
+    "..\..\BBVideoCutter.py"
 if errorlevel 1 goto :error
 
 echo.
