@@ -871,6 +871,7 @@ THEME_COLORS = {
     "light": {
         "slider_track": "#c0c0c0",
         "slider_start": "#1a1a1a",
+        "slider_keyframe": "#8c8c8c",
         "timeslider_track": "#d5d5d5",
         "aspect_active": "#cfe2ff",
         # The menu bar matches the title bar above it, so the two read as
@@ -882,6 +883,7 @@ THEME_COLORS = {
     "dark": {
         "slider_track": "#505056",
         "slider_start": "#d0d0d4",
+        "slider_keyframe": "#86868c",
         "timeslider_track": "#505056",
         "aspect_active": "#28456f",
         # ...and the panel color, next to the dark caption, in dark mode.
@@ -1522,6 +1524,11 @@ class LosslessVideoApp(_BaseTk):
         self.preview_photo = None        # keep ref so Tk doesn't GC it
         self._preview_after_id = None    # pending debounce timer for scrubbing
         self._preview_request_id = 0     # monotonic id to discard stale/late frames
+        self.cut_keyframes = []          # keyframe times of the Cut video (_start_keyframe_scan)
+        self._keyframe_cache = {}        # (path, size, mtime) -> keyframe times, this session
+        self._keyframe_proc = None       # the running scan's ffprobe
+        self._keyframe_gen = 0           # bumped per scan, so a stale scan's results are dropped
+        self._keyframe_xs = (None, [])   # (what they were computed for, tick x positions)
 
         # Resize/Crop tab state
         self.resize_input_path = None
@@ -1639,6 +1646,7 @@ class LosslessVideoApp(_BaseTk):
         # Otherwise a still-playing ffplay child (spawned by the Audio tab)
         # is left running after the window closes.
         self._audio_stop_ffplay()
+        self._stop_keyframe_scan()
         if self.cut_player is not None:
             if self._cut_audio_save_id is not None:   # a volume change not saved yet
                 self.after_cancel(self._cut_audio_save_id)
@@ -2605,6 +2613,7 @@ class LosslessVideoApp(_BaseTk):
 
         self._set_cut_controls_enabled(True)
         self._sync_entries()
+        self._start_keyframe_scan(path)
         status = "Ready"
         if self.cut_player is not None:
             try:
@@ -2678,6 +2687,92 @@ class LosslessVideoApp(_BaseTk):
         self._redraw_slider()
         self._cut_range_changed()
 
+    # ---- keyframe ticks -----------------------------------------------
+    def _start_keyframe_scan(self, path):
+        """Ticks under the Cut slider mark the video's keyframes: where a
+        classic cut snaps to, and where the exact modes copy instead of
+        re-encoding. ffprobe lists the video packets without decoding them
+        (about half a second per 2 GB of MP4 or MKV, a few seconds for
+        MPEG-TS, which has no index) in the background, and the ticks fill
+        in from left to right as it reads. Results are kept for the session."""
+        self._stop_keyframe_scan()
+        self.cut_keyframes = []
+        try:
+            st = os.stat(path)
+            key = (os.path.normcase(os.path.abspath(path)), st.st_size, st.st_mtime_ns)
+            ffprobe = find_exe("ffprobe")
+        except (OSError, RuntimeError):
+            return
+        if key in self._keyframe_cache:
+            self.cut_keyframes = self._keyframe_cache[key]
+            return
+        try:
+            proc = subprocess.Popen(
+                [ffprobe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0", path],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, **SUBPROCESS_KWARGS)
+        except OSError:
+            return
+        self._keyframe_proc = proc
+        threading.Thread(target=self._keyframe_scan_worker,
+                         args=(self._keyframe_gen, proc, ffprobe, path, key), daemon=True).start()
+
+    def _stop_keyframe_scan(self):
+        self._keyframe_gen += 1   # whatever the old scan still sends is dropped
+        proc, self._keyframe_proc = self._keyframe_proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _keyframe_scan_worker(self, gen, proc, ffprobe, path, key):
+        # Packet times are the file's own; the slider counts from its start
+        # time, like ffmpeg -ss (see _probe_keyframes_near).
+        origin = self._probe_start_time(ffprobe, path)
+        batch, sent = [], time.monotonic()
+        for line in proc.stdout:
+            fields = line.strip().split(",")
+            if len(fields) < 3 or "K" not in fields[2]:
+                continue
+            try:
+                t = float(fields[0] if fields[0] not in ("", "N/A") else fields[1])
+            except ValueError:
+                continue
+            batch.append(t - origin)
+            if time.monotonic() - sent >= 0.25:
+                self._keyframe_send(gen, batch, False, key)
+                batch, sent = [], time.monotonic()
+        proc.wait()
+        self._keyframe_send(gen, batch, proc.returncode == 0, key)
+
+    def _keyframe_send(self, gen, batch, done, key):
+        try:
+            self.after(0, self._on_keyframes_found, gen, batch, done, key)
+        except (RuntimeError, tk.TclError):
+            pass   # the window is gone
+
+    def _on_keyframes_found(self, gen, batch, done, key):
+        if gen != self._keyframe_gen:
+            return
+        self.cut_keyframes.extend(batch)
+        if done:
+            self.cut_keyframes.sort()
+            self._keyframe_cache[key] = self.cut_keyframes
+            self._keyframe_proc = None
+        if batch:
+            self._redraw_slider()
+
+    def _keyframe_tick_xs(self, x_for):
+        """Where the ticks go: one per pixel column, however many keyframes
+        share it. Kept between redraws, which come with every drag step."""
+        made_for = (self._keyframe_gen, len(self.cut_keyframes), self.duration,
+                    self._track_x0, self._track_x1)
+        if self._keyframe_xs[0] != made_for:
+            xs = sorted({round(x_for(t)) for t in self.cut_keyframes if 0 <= t <= self.duration})
+            self._keyframe_xs = (made_for, xs)
+        return self._keyframe_xs[1]
+
     # ---- slider -------------------------------------------------------
     def _redraw_slider(self):
         c = self.slider_canvas
@@ -2698,6 +2793,11 @@ class LosslessVideoApp(_BaseTk):
             frac = t / self.duration
             return track_x0 + frac * (track_x1 - track_x0)
 
+        if self.cut_keyframes:
+            tick = self._theme_color("slider_keyframe")
+            for x in self._keyframe_tick_xs(x_for):
+                c.create_line(x, y + px(4), x, y + px(9), fill=tick, width=max(1, px(1)),
+                              tags=("keyframe",))
         sx, ex = x_for(self.start_sec), x_for(self.end_sec)
         c.create_line(sx, y, ex, y, fill="#3d8bfd", width=px(4), capstyle="round")
         if self._cut_player_on:
