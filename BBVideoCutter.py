@@ -26,10 +26,17 @@ available on the Bulk Cut tab):
     as reliable as the player's own edit-list support (some, like VLC,
     honor it less consistently than others) -- experimental.
 Start/end times can be typed with millisecond precision (HH:MM:SS.mmm);
-dragging the slider or clicking a step button always rounds to a whole
+dragging a slider handle or clicking a step button always rounds to a whole
 second instead, so repeated attempts at "the same second" are
 reproducible rather than landing on an invisible, slightly different
 sub-second position each time.
+The video plays right in the window (libmpv, GPU-decoded): Space or a
+click on the video plays / pauses, , and . step one frame, Left / Right
+jump 5 s (with Shift 1 s), and I / O set the start / end at the frame on
+screen, so that frame is the first / last one in the cut. Clicking or
+dragging the slider away from the handles moves the playhead (red);
+"Play selection" loops the chosen range. Without libmpv the preview shows
+still frames from ffmpeg instead.
 
 Combine tab
 -----------
@@ -91,10 +98,14 @@ Requirements
       Windows: https://www.gyan.dev/ffmpeg/builds/  (unzip, add /bin to PATH)
       macOS:   brew install ffmpeg
       Linux:   sudo apt install ffmpeg
-  - pip install pillow tkinterdnd2
+  - pip install pillow tkinterdnd2 python-mpv
 
     pillow        -> shows a preview frame of the video
     tkinterdnd2   -> required for drag & drop of video files onto the window
+    python-mpv    -> optional: the video player in the Cut tab, together
+                     with libmpv-2.dll next to the app or in release\\build
+                     (the "mpv-dev-x86_64" download from
+                     https://github.com/shinchiro/mpv-winbuild-cmake/releases)
 
 Run:
     python BBVideoCutter.py
@@ -819,6 +830,8 @@ DARK = {
 }
 
 # Colors that code draws or sets itself (canvas items, highlights), per theme.
+PLAYHEAD_COLOR = "#e8453c"   # the player's position on the Cut slider, both themes
+
 THEME_COLORS = {
     "light": {
         "slider_track": "#c0c0c0",
@@ -1115,6 +1128,286 @@ class TimeSlider(tk.Canvas):
 
 
 # --------------------------------------------------------------------------
+# Embedded video player (libmpv)
+# --------------------------------------------------------------------------
+# The video plays inside the window through libmpv, the library behind the
+# mpv player: GPU decoding and drawing, so even 4K60 HEVC plays smoothly
+# with next to no CPU. It needs the python-mpv package and libmpv-2.dll
+# (https://github.com/shinchiro/mpv-winbuild-cmake/releases, the
+# "mpv-dev-x86_64" download). Without them the app still works and shows
+# still frames from ffmpeg instead, as it always did.
+LIBMPV_DLL = "libmpv-2.dll"
+_mpv_module = None
+_mpv_error = None
+_mpv_dll_dir_handle = None   # keeps os.add_dll_directory's entry alive
+
+
+def find_libmpv_dir():
+    """The folder holding libmpv-2.dll, or None: next to the app (or in an
+    "mpv" folder beside it), inside a PyInstaller bundle, in release\\build
+    (where the build scripts take it from, so a source checkout finds it
+    too), or on PATH."""
+    if os.name != "nt":
+        return None
+    app = _app_dir()
+    dirs = [app, os.path.join(app, "mpv")]
+    if getattr(sys, "_MEIPASS", None):
+        dirs.append(sys._MEIPASS)
+    dirs.append(os.path.join(app, "release", "build"))
+    dirs += os.environ.get("PATH", "").split(os.pathsep)
+    for d in dirs:
+        if d and os.path.isfile(os.path.join(d, LIBMPV_DLL)):
+            return d
+    return None
+
+
+def mpv_available():
+    """Cheap check (no import) that the player can be used at all."""
+    if _mpv_module is not None:
+        return True
+    if _mpv_error is not None:
+        return False
+    import importlib.util
+    return find_libmpv_dir() is not None and importlib.util.find_spec("mpv") is not None
+
+
+def load_mpv():
+    """Imports python-mpv on first use, pointing it at libmpv-2.dll. Returns
+    the module, or None if it can't be loaded (the reason is in _mpv_error)."""
+    global _mpv_module, _mpv_error, _mpv_dll_dir_handle
+    if _mpv_module is not None or _mpv_error is not None:
+        return _mpv_module
+    d = find_libmpv_dir()
+    if d is None:
+        _mpv_error = f"{LIBMPV_DLL} was not found"
+        return None
+    # python-mpv looks the DLL up on PATH.
+    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+    try:
+        _mpv_dll_dir_handle = os.add_dll_directory(d)
+        import mpv
+    except Exception as exc:
+        _mpv_error = str(exc)
+        return None
+    _mpv_module = mpv
+    return mpv
+
+
+class VideoPlayer:
+    """libmpv playing into a Tk frame (self.frame), created on the first
+    load. mpv reports property changes on its own thread; those only land
+    in self.state, and a Tk timer (about 30 times a second) passes them on
+    to on_change, so Tk is only ever touched from the Tk thread."""
+
+    # Extra mpv options for every player; the tests use {"ao": "null"} so
+    # nothing is heard.
+    extra_options = {}
+    OBSERVED = ("time-pos", "pause", "duration", "eof-reached", "container-fps", "path")
+
+    def __init__(self, parent, on_change=None):
+        self.frame = tk.Frame(parent, bg="black", takefocus=0)
+        self.on_change = on_change
+        self.mpv = None
+        self.state = {}
+        self._poll_id = None
+        self._last_seen = None
+        self._disabled_windows = set()
+
+    # ---- life cycle ----------------------------------------------------
+    def _ensure_mpv(self):
+        if self.mpv is not None:
+            return
+        mpv = load_mpv()
+        if mpv is None:
+            raise RuntimeError(f"The video player could not be started: {_mpv_error}")
+        options = dict(
+            wid=str(self.frame.winfo_id()),
+            vo="gpu-next,gpu", hwdec="auto-safe",
+            keep_open="yes", idle="yes", force_window="yes", pause=True,
+            # Exact seeks; the offset makes them land right in MPEG-TS
+            # files too, where they otherwise overshoot by up to a second.
+            hr_seek="yes", hr_seek_demuxer_offset=1.0,
+            # mpv must not react to the keyboard or mouse itself, or show
+            # its own controls and messages; the app does all of that.
+            input_default_bindings=False, input_vo_keyboard=False,
+            osc=False, osd_level=0, load_scripts=False, ytdl=False,
+            sub_auto="no", audio_file_auto="no",
+        )
+        options.update(self.extra_options)
+        self.mpv = mpv.MPV(**options)
+        for name in self.OBSERVED:
+            self.mpv.observe_property(name, self._observe)
+        self.mpv.register_event_callback(self._on_event)
+        self._poll()
+
+    def _observe(self, name, value):
+        # mpv's event thread: only store the value.
+        self.state[name] = value
+
+    def _on_event(self, event):
+        # mpv's event thread too. "ready": the file asked for last is open
+        # (a property such as path would not change when the same file is
+        # opened again); "failed": mpv could not open it.
+        eid = event.event_id.value
+        if eid == _mpv_module.MpvEventID.FILE_LOADED:
+            self.state["ready"] = True
+        elif eid == _mpv_module.MpvEventID.END_FILE:
+            if event.data.reason == _mpv_module.MpvEventEndFile.ERROR:
+                self.state["ready"] = False
+                self.state["failed"] = True
+
+    def terminate(self):
+        if self._poll_id is not None:
+            try:
+                self.frame.after_cancel(self._poll_id)
+            except tk.TclError:
+                pass
+            self._poll_id = None
+        if self.mpv is not None:
+            player, self.mpv = self.mpv, None
+            try:
+                player.terminate()
+            except Exception:
+                pass
+
+    def _poll(self):
+        self._poll_id = self.frame.after(33, self._poll)
+        self._disable_mpv_windows()
+        seen = tuple(self.state.get(name) for name in self.OBSERVED + ("ready", "failed"))
+        if seen != self._last_seen:
+            self._last_seen = seen
+            if self.on_change:
+                self.on_change()
+
+    def _disable_mpv_windows(self):
+        """mpv draws into a child window of self.frame, which would take
+        every click, wheel turn and file drop over the video. Disabled, it
+        keeps drawing but Windows skips it when finding the window under
+        the mouse, so all of those reach the Tk frame instead. (mpv's own
+        input-cursor-passthrough option does not do this on Windows.)"""
+        if os.name != "nt":
+            return
+        kids = []
+        _user32.EnumChildWindows(self.frame.winfo_id(),
+                                 _ENUM_CHILD_PROC(lambda h, _: kids.append(h) or True), 0)
+        for hwnd in kids:
+            if hwnd not in self._disabled_windows:
+                _user32.EnableWindow(hwnd, False)
+                self._disabled_windows.add(hwnd)
+
+    # ---- state -----------------------------------------------------------
+    @property
+    def loaded(self):
+        return self.mpv is not None and bool(self.state.get("ready"))
+
+    @property
+    def failed(self):
+        return bool(self.state.get("failed"))
+
+    @property
+    def position(self):
+        """Time of the frame on screen, in seconds from the file's start
+        (the same clock ffmpeg -ss uses, also for files whose timestamps
+        don't start at 0), or None while nothing is loaded."""
+        return self.state.get("time-pos")
+
+    @property
+    def paused(self):
+        return self.state.get("pause") is not False
+
+    @property
+    def at_end(self):
+        # eof-reached only turns on once playback runs into the end, not
+        # when a seek lands on the last frame.
+        pos, dur = self.position, self.state.get("duration")
+        return bool(self.state.get("eof-reached")) or (
+            pos is not None and bool(dur) and pos >= dur - 1.5 * self.frame_duration)
+
+    @property
+    def frame_duration(self):
+        fps = self.state.get("container-fps")
+        return 1.0 / fps if fps and fps > 0 else 1.0 / 30
+
+    # ---- commands --------------------------------------------------------
+    def _async(self, *args):
+        # Asynchronous, so the UI never waits on mpv; errors (a seek past
+        # the end, say) need no handling.
+        self.mpv.command_async(*args, callback=lambda error, result: None)
+
+    def load(self, path):
+        self._ensure_mpv()
+        self.clear_loop()
+        self.state.pop("time-pos", None)
+        self.state["ready"] = False
+        self.state["failed"] = False
+        self.mpv.pause = True
+        self.mpv.loadfile(path)
+
+    def unload(self):
+        if self.mpv is not None:
+            self.mpv.pause = True
+            self._async("stop")
+
+    def set_paused(self, paused):
+        if self.mpv is None:
+            return
+        if not paused and self.at_end and not self.looping:
+            self._async("seek", 0, "absolute+exact")   # play again from the top
+        self.mpv.pause = paused
+
+    def toggle_pause(self):
+        self.set_paused(not self.paused)
+
+    def seek(self, t, exact=True):
+        if self.mpv is not None:
+            self._async("seek", max(0.0, t), "absolute+exact" if exact else "absolute+keyframes")
+
+    def seek_relative(self, delta):
+        if self.mpv is not None:
+            self._async("seek", delta, "relative+exact")
+
+    def show_first_frame_from(self, t):
+        """Shows the first frame at or after time t. (mpv's exact seek also
+        takes a frame up to 5 ms before the target; 5 ms more rules that
+        out, and no two frames are that close together.)"""
+        self.seek(t + 0.005)
+
+    def show_last_frame_before(self, t):
+        """Shows the last frame that starts before time t: the last frame a
+        cut ending at t keeps."""
+        self.show_first_frame_from(t - self.frame_duration)
+
+    def frame_step(self, forward=True):
+        if self.mpv is not None:
+            self._async("frame-step" if forward else "frame-back-step")
+
+    # A-B loop: playback jumps back to a on reaching b.
+    looping = False
+
+    def set_loop(self, a, b):
+        if self.mpv is None:
+            return
+        self.looping = True
+        self.mpv.ab_loop_a = a
+        self.mpv.ab_loop_b = b
+
+    def clear_loop(self):
+        self.looping = False
+        if self.mpv is not None:
+            self.mpv.ab_loop_a = "no"
+            self.mpv.ab_loop_b = "no"
+
+
+if os.name == "nt":
+    from ctypes import wintypes as _wintypes
+    # A private user32 handle, so these argtypes don't affect other code.
+    _user32 = ctypes.WinDLL("user32")
+    _ENUM_CHILD_PROC = ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.HWND, _wintypes.LPARAM)
+    _user32.EnumChildWindows.argtypes = [_wintypes.HWND, _ENUM_CHILD_PROC, _wintypes.LPARAM]
+    _user32.EnableWindow.argtypes = [_wintypes.HWND, _wintypes.BOOL]
+
+
+# --------------------------------------------------------------------------
 # Main application
 # --------------------------------------------------------------------------
 
@@ -1250,7 +1543,10 @@ class LosslessVideoApp(_BaseTk):
             self._apply_theme()
 
     def _on_notebook_tab_changed(self, event=None):
-        self._ensure_tab_built(self.notebook.index("current"))
+        idx = self.notebook.index("current")
+        if idx != 0 and self._cut_player_on:
+            self.cut_player.set_paused(True)   # no sound from a tab out of sight
+        self._ensure_tab_built(idx)
 
     def _ensure_tab_built(self, idx):
         if self._tab_built[idx]:
@@ -1262,6 +1558,8 @@ class LosslessVideoApp(_BaseTk):
         # Otherwise a still-playing ffplay child (spawned by the Audio tab)
         # is left running after the window closes.
         self._audio_stop_ffplay()
+        if self.cut_player is not None:
+            self.cut_player.terminate()
         self.destroy()
 
     # ====================================================================
@@ -1729,9 +2027,25 @@ class LosslessVideoApp(_BaseTk):
         self._bind_window_drag(self.preview_canvas, lambda e: not self.input_path)
         self._draw_preview_placeholder("Open or drop a video to begin")
 
+        # The embedded player covers the still-frame canvas while a video is
+        # loaded (see _cut_use_player); without libmpv there is no player
+        # and the canvas shows ffmpeg-extracted still frames as before.
+        self.cut_player = None
+        self._cut_player_on = False      # the player (not the canvas) shows the video
+        self._cut_scrubbing = False      # the slider's playhead is being dragged
+        self._cut_scrub_time = 0.0
+        if mpv_available():
+            self.cut_player = VideoPlayer(preview_frame, on_change=self._on_cut_player_changed)
+            self.cut_player.frame.bind("<Button-1>", self._on_cut_video_click)
+
         # ---- bottom controls (fixed height, full width)
         controls = tk.Frame(root, bg="#f0f0f0")
         controls.grid(row=2, column=0, sticky="ew", padx=3, pady=2)
+
+        self.cut_transport_buttons = []  # need a loaded video
+        self.cut_mark_buttons = []       # also change the range: off while cutting
+        if self.cut_player is not None:
+            self._build_cut_transport(controls)
 
         time_row = tk.Frame(controls, bg="#f0f0f0")
         time_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
@@ -1769,6 +2083,7 @@ class LosslessVideoApp(_BaseTk):
         self.slider_canvas.bind("<Configure>", lambda e: self._redraw_slider())
         self.slider_canvas.bind("<Button-1>", self._slider_click)
         self.slider_canvas.bind("<B1-Motion>", self._slider_drag)
+        self.slider_canvas.bind("<ButtonRelease-1>", self._slider_release)
         self._drag_target = None
 
         # ---- cut mode: classic (original, may snap to nearest keyframe) vs
@@ -1836,8 +2151,200 @@ class LosslessVideoApp(_BaseTk):
         self.start_entry.config(state=state)
         self.end_entry.config(state=state)
         self.save_btn.config(state=state)
-        for b in self.step_buttons:
+        for b in self.step_buttons + self.cut_mark_buttons:
             b.config(state=state)
+
+    # ---- embedded player ---------------------------------------------
+    def _build_cut_transport(self, parent):
+        """Play / step / jump buttons, the playhead time, and the buttons
+        that set the start or end at the frame on screen."""
+        row = tk.Frame(parent, bg="#f0f0f0")
+        row.pack(pady=(2, 1))
+
+        def button(text, command, marks=False, **kw):
+            b = tk.Button(row, text=text, command=command, **kw)
+            b.pack(side="left", padx=1)
+            (self.cut_mark_buttons if marks else self.cut_transport_buttons).append(b)
+            return b
+
+        button("|◀ Start", lambda: self._cut_go_to("start"))
+        button("◀ Frame", lambda: self._cut_frame_step(False))
+        self.cut_play_btn = button("▶ Play", self._cut_toggle_play, width=8)
+        button("Frame ▶", lambda: self._cut_frame_step(True))
+        button("End ▶|", lambda: self._cut_go_to("end"))
+        self.cut_time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27,
+                                     font=("Segoe UI", 9))
+        self.cut_time_lbl.pack(side="left", padx=6)
+        button("Set start (I)", lambda: self._cut_mark("start"), marks=True)
+        button("Set end (O)", lambda: self._cut_mark("end"), marks=True)
+        self.cut_loop_btn = button("Play selection", self._cut_toggle_loop, width=13)
+        for b in self.cut_transport_buttons + self.cut_mark_buttons:
+            b.config(state="disabled")
+
+        # Keyboard: Space play/pause, I / O set start / end, , / . one
+        # frame back / forward, Left / Right 5 s (with Shift 1 s).
+        keys = {
+            "<KeyPress-space>": lambda: self._cut_toggle_play(),
+            "<KeyPress-i>": lambda: self._cut_mark("start"),
+            "<KeyPress-I>": lambda: self._cut_mark("start"),
+            "<KeyPress-o>": lambda: self._cut_mark("end"),
+            "<KeyPress-O>": lambda: self._cut_mark("end"),
+            "<KeyPress-comma>": lambda: self._cut_frame_step(False),
+            "<KeyPress-period>": lambda: self._cut_frame_step(True),
+            "<KeyPress-Left>": lambda: self._cut_seek_by(-5),
+            "<KeyPress-Right>": lambda: self._cut_seek_by(5),
+            "<Shift-KeyPress-Left>": lambda: self._cut_seek_by(-1),
+            "<Shift-KeyPress-Right>": lambda: self._cut_seek_by(1),
+        }
+        for sequence, action in keys.items():
+            self.bind(sequence, lambda e, a=action, s=sequence: self._on_cut_key(e, a, s))
+            # Clicking a tab gives the notebook the focus, and its own Left /
+            # Right bindings would switch tabs; on the Cut tab with a video,
+            # the arrows seek instead.
+            if "Left" in sequence or "Right" in sequence:
+                self.notebook.bind(sequence, lambda e, a=action, s=sequence: self._on_cut_key(e, a, s))
+
+    def _on_cut_key(self, event, action, sequence):
+        if not self._cut_player_on or self.notebook.index("current") != 0:
+            return None
+        if event.state & (0x4 | 0x20000):   # Ctrl or Alt: someone else's shortcut
+            return None
+        try:
+            focus = self.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        # Typing in a field types; Space on a focused button presses it.
+        if isinstance(focus, (tk.Entry, tk.Text, tk.Spinbox, ttk.Entry)):
+            return None
+        if "space" in sequence and isinstance(
+                focus, (tk.Button, tk.Checkbutton, tk.Radiobutton, ttk.Button,
+                        ttk.Checkbutton, ttk.Radiobutton)):
+            return None
+        action()
+        return "break"
+
+    def _cut_use_player(self, on):
+        """Shows the player over the still-frame canvas, or takes it away."""
+        self._cut_player_on = on
+        if on:
+            self.cut_player.frame.place(x=0, y=0, relwidth=1, relheight=1)
+        else:
+            self.cut_player.frame.place_forget()
+        for b in self.cut_transport_buttons:
+            b.config(state="normal" if on else "disabled")
+        self._update_cut_loop_button()
+
+    def _on_cut_video_click(self, event):
+        # Clicking the video plays / pauses it, and takes the keyboard focus
+        # off a time field so the keys work right away.
+        self.cut_tab.focus_set()
+        self._cut_toggle_play()
+
+    def _cut_toggle_play(self):
+        if self._cut_player_on:
+            self.cut_player.toggle_pause()
+
+    def _cut_frame_step(self, forward):
+        if self._cut_player_on:
+            self.cut_player.frame_step(forward)
+
+    def _cut_seek_by(self, seconds):
+        if self._cut_player_on:
+            self.cut_player.seek_relative(seconds)
+
+    def _cut_show_time(self, t, edge="start"):
+        """Shows the video at time t: the frame a cut starting at t begins
+        with (edge="start") or the last frame a cut ending at t keeps
+        (edge="end"). Without the player, a still frame from ffmpeg."""
+        if self._cut_player_on:
+            if edge == "end":
+                self.cut_player.show_last_frame_before(t)
+            else:
+                self.cut_player.show_first_frame_from(t)
+        else:
+            self._update_preview(t)
+
+    def _cut_go_to(self, which):
+        if self._cut_player_on:
+            self.cut_player.set_paused(True)
+            self._cut_show_time(self.start_sec if which == "start" else self.end_sec, which)
+
+    def _cut_mark(self, which):
+        """Sets the start or end at the frame on screen, so that frame is the
+        first / last one in the cut. The time stored is half a frame before
+        (start) or after (end) the frame's own time: a frame is in a cut
+        when its time is at or after the start and before the end, and the
+        half frame keeps that true for the marked frames even after the
+        time is rounded to whole milliseconds for the time field and
+        ffmpeg (frame times like 1.4666... s aren't whole milliseconds)."""
+        if not self._cut_player_on or str(self.save_btn.cget("state")) == "disabled":
+            return
+        t = self.cut_player.position
+        if t is None:
+            return
+        half = self.cut_player.frame_duration / 2
+        if which == "start":
+            self.start_sec = max(0.0, t - half)
+            if self.start_sec >= self.end_sec:
+                self.end_sec = self.duration
+            self.handle_var.set("start")
+        else:
+            self.end_sec = min(self.duration, t + half)
+            if self.end_sec <= self.start_sec:
+                self.start_sec = 0.0
+            self.handle_var.set("end")
+        self.active_handle = which
+        self._sync_entries()
+        self._redraw_slider()
+        self._cut_range_changed()
+        self.status_lbl.config(
+            text=f"{which.capitalize()} set at the frame at {seconds_to_ffmpeg_time(t)}")
+
+    def _cut_range_changed(self):
+        """Keeps a running "Play selection" loop on the current range."""
+        if self._cut_player_on and self.cut_player.looping:
+            self.cut_player.set_loop(self.start_sec, self.end_sec)
+
+    def _cut_toggle_loop(self):
+        if not self._cut_player_on:
+            return
+        player = self.cut_player
+        if player.looping:
+            player.clear_loop()
+            player.set_paused(True)
+        else:
+            player.set_loop(self.start_sec, self.end_sec)
+            player.show_first_frame_from(self.start_sec)
+            player.set_paused(False)
+        self._update_cut_loop_button()
+
+    def _update_cut_loop_button(self):
+        looping = self._cut_player_on and self.cut_player.looping
+        self.cut_loop_btn.config(text="Stop loop" if looping else "Play selection")
+
+    def _on_cut_player_changed(self):
+        """Called (on the Tk thread) when the player's position, play state
+        or file changed."""
+        if not self._cut_player_on:
+            return
+        player = self.cut_player
+        if player.failed:
+            # mpv can't play this file (ffprobe could read it): still frames.
+            self._cut_use_player(False)
+            self._redraw_slider()
+            self._update_preview(self.end_sec)
+            self.status_lbl.config(text="The player can't open this file; showing still frames")
+            return
+        playing = not player.paused
+        self.cut_play_btn.config(text="❚❚ Pause" if playing else "▶ Play")
+        pos = player.position
+        if pos is None:
+            self.cut_time_lbl.config(text="")
+        else:
+            self.cut_time_lbl.config(text=f"{seconds_to_ffmpeg_time(pos)} / "
+                                          f"{seconds_to_ffmpeg_time(self.duration)}")
+        if not self._cut_scrubbing:
+            self._move_playhead(pos)
 
     # ---- preview canvas drawing --------------------------------------
     def _draw_preview_placeholder(self, text):
@@ -1906,9 +2413,21 @@ class LosslessVideoApp(_BaseTk):
 
         self._set_cut_controls_enabled(True)
         self._sync_entries()
+        status = "Ready"
+        if self.cut_player is not None:
+            try:
+                self.cut_player.load(path)
+                self._cut_use_player(True)
+            except Exception as exc:
+                # No player after all: back to still frames.
+                self.cut_player.frame.place_forget()
+                self.cut_player = None
+                self._cut_player_on = False
+                status = str(exc)
         self._redraw_slider()
-        self._update_preview(self.end_sec)
-        self.status_lbl.config(text="Ready")
+        if not self._cut_player_on:
+            self._update_preview(self.end_sec)
+        self.status_lbl.config(text=status)
 
     # ---- time controls ----------------------------------------------
     def _sync_entries(self):
@@ -1924,10 +2443,15 @@ class LosslessVideoApp(_BaseTk):
             messagebox.showerror("Invalid time", str(e))
             self._sync_entries()
             return
+        changed = val != hms_ms_to_seconds(seconds_to_ffmpeg_time(self.start_sec))
         self.start_sec = max(0.0, min(val, self.end_sec))
         self._sync_entries()
         self._redraw_slider()
-        self._update_preview(self.start_sec)
+        # Leaving an unchanged field (a click on the video, say) must not
+        # move the player away from where it is.
+        if changed or not self._cut_player_on:
+            self._cut_range_changed()
+            self._cut_show_time(self.start_sec, "start")
 
     def _on_end_entry(self):
         try:
@@ -1936,10 +2460,13 @@ class LosslessVideoApp(_BaseTk):
             messagebox.showerror("Invalid time", str(e))
             self._sync_entries()
             return
+        changed = val != hms_ms_to_seconds(seconds_to_ffmpeg_time(self.end_sec))
         self.end_sec = min(self.duration, max(val, self.start_sec))
         self._sync_entries()
         self._redraw_slider()
-        self._update_preview(self.end_sec)
+        if changed or not self._cut_player_on:
+            self._cut_range_changed()
+            self._cut_show_time(self.end_sec, "end")
 
     def _set_active_handle(self, which):
         self.active_handle = which
@@ -1951,12 +2478,13 @@ class LosslessVideoApp(_BaseTk):
         # _x_to_time's docstring for why that matters for reproducibility.
         if self.active_handle == "start":
             self.start_sec = float(round(max(0.0, min(self.start_sec + delta_seconds, self.end_sec))))
-            self._update_preview(self.start_sec)
+            self._cut_show_time(self.start_sec, "start")
         else:
             self.end_sec = float(round(min(self.duration, max(self.end_sec + delta_seconds, self.start_sec))))
-            self._update_preview(self.end_sec)
+            self._cut_show_time(self.end_sec, "end")
         self._sync_entries()
         self._redraw_slider()
+        self._cut_range_changed()
 
     # ---- slider -------------------------------------------------------
     def _redraw_slider(self):
@@ -1980,10 +2508,31 @@ class LosslessVideoApp(_BaseTk):
 
         sx, ex = x_for(self.start_sec), x_for(self.end_sec)
         c.create_line(sx, y, ex, y, fill="#3d8bfd", width=px(4), capstyle="round")
+        if self._cut_player_on:
+            # The playhead: where the player is. Under the handles, so they
+            # stay visible and grabbable when it sits on one.
+            c.create_line(0, 0, 0, 0, fill=PLAYHEAD_COLOR, width=px(2), tags=("playhead",))
+            c.create_polygon(0, 0, 0, 0, 0, 0, fill=PLAYHEAD_COLOR, outline="",
+                             tags=("playhead_top",))
+            self._move_playhead(self.cut_player.position)
         r = px(7)
         c.create_oval(sx - r, y - r, sx + r, y + r, fill=self._theme_color("slider_start"),
                       outline="")
         c.create_oval(ex - r, y - r, ex + r, y + r, fill="#1a73e8", outline="")
+
+    def _move_playhead(self, t):
+        c = self.slider_canvas
+        if t is None or not self.duration:
+            c.itemconfigure("playhead", state="hidden")
+            c.itemconfigure("playhead_top", state="hidden")
+            return
+        x = self._time_to_x(min(max(t, 0.0), self.duration))
+        h = c.winfo_height() or px(24)
+        a = px(5)
+        c.coords("playhead", x, a, x, h)
+        c.coords("playhead_top", x - a, 0, x + a, 0, x, a + px(1))
+        c.itemconfigure("playhead", state="normal")
+        c.itemconfigure("playhead_top", state="normal")
 
     def _x_to_time(self, x):
         # Rounds to a whole second (.000) -- a drag is only pixel-precise,
@@ -2006,15 +2555,30 @@ class LosslessVideoApp(_BaseTk):
         return self._track_x0 + frac * (self._track_x1 - self._track_x0)
 
     def _slider_click(self, event):
+        """Without the player, a click moves the nearer handle there. With
+        it, only a press on a handle drags the handle; anywhere else moves
+        the playhead (scrubbing), and I / O then set the range."""
         if not self.input_path:
             return
         sx = self._time_to_x(self.start_sec)
         ex = self._time_to_x(self.end_sec)
         self._drag_target = "start" if abs(event.x - sx) <= abs(event.x - ex) else "end"
+        if self._cut_player_on:
+            self.cut_tab.focus_set()   # off a time field, so the keys work
+            if min(abs(event.x - sx), abs(event.x - ex)) > px(9):
+                self._drag_target = "playhead"
+                self._cut_scrubbing = True
         self._slider_drag(event)
 
     def _slider_drag(self, event):
         if not self.input_path or not self._drag_target:
+            return
+        if self._drag_target == "playhead":
+            # Keyframe seeks while dragging (fast); the exact frame on release.
+            t = self._x_to_exact_time(event.x)
+            self._cut_scrub_time = t
+            self._move_playhead(t)
+            self.cut_player.seek(t, exact=False)
             return
         t = self._x_to_time(event.x)
         if self._drag_target == "start":
@@ -2027,7 +2591,28 @@ class LosslessVideoApp(_BaseTk):
             self.active_handle = "end"
         self._sync_entries()
         self._redraw_slider()
-        self._update_preview(t)
+        if self._cut_player_on:
+            self.cut_player.seek(t, exact=False)
+        else:
+            self._update_preview(t)
+
+    def _slider_release(self, event):
+        target, self._drag_target = self._drag_target, None
+        if not self._cut_player_on or target is None:
+            return
+        if target == "playhead":
+            self._cut_scrubbing = False
+            self.cut_player.seek(self._cut_scrub_time)
+        else:
+            self._cut_range_changed()
+            if target == "start":
+                self._cut_show_time(self.start_sec, "start")
+            else:
+                self._cut_show_time(self.end_sec, "end")
+
+    def _x_to_exact_time(self, x):
+        frac = (x - self._track_x0) / max(1, (self._track_x1 - self._track_x0))
+        return min(1.0, max(0.0, frac)) * self.duration
 
     # ---- preview frame extraction -------------------------------------
     def _update_preview(self, at_seconds):
@@ -5229,6 +5814,9 @@ class LosslessVideoApp(_BaseTk):
         self.cut_tab.dnd_bind("<<Drop>>", self._on_drop_cut)
         self.preview_canvas.drop_target_register(DND_FILES)
         self.preview_canvas.dnd_bind("<<Drop>>", self._on_drop_cut)
+        if self.cut_player is not None:
+            self.cut_player.frame.drop_target_register(DND_FILES)
+            self.cut_player.frame.dnd_bind("<<Drop>>", self._on_drop_cut)
 
         # The other tabs are built lazily, only on first visit -- but their
         # empty shell Frame already exists, so it can still accept a drop
