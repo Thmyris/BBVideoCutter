@@ -872,6 +872,7 @@ THEME_COLORS = {
         "slider_track": "#c0c0c0",
         "slider_start": "#1a1a1a",
         "slider_keyframe": "#8c8c8c",
+        "wave": "#a6a6a6",            # the Cut waveform outside the selection (inside: blue)
         "timeslider_track": "#d5d5d5",
         "aspect_active": "#cfe2ff",
         # The menu bar matches the title bar above it, so the two read as
@@ -884,6 +885,7 @@ THEME_COLORS = {
         "slider_track": "#505056",
         "slider_start": "#d0d0d4",
         "slider_keyframe": "#86868c",
+        "wave": "#5e5e64",
         "timeslider_track": "#505056",
         "aspect_active": "#28456f",
         # ...and the panel color, next to the dark caption, in dark mode.
@@ -1067,6 +1069,51 @@ def post_with_menu_margin(post, color):
 # tab's frame position, the Audio tab's playback position, and each audio
 # track's volume control.
 # --------------------------------------------------------------------------
+def file_identity(path):
+    """What a per-file cache is keyed on: the path, size and modification
+    time, so a file changed on disk is read again. Raises OSError."""
+    st = os.stat(path)
+    return os.path.normcase(os.path.abspath(path)), st.st_size, st.st_mtime_ns
+
+
+def render_waveform(path, a_index, width, height, color="white", span=None, on_start=None):
+    """A picture of audio track a_index (counted among the audio tracks) of
+    the file, drawn by ffmpeg's showwavespic: a PIL image, width x height,
+    in `color` on black. Raises if it can't be drawn (no such track, say).
+
+    span=None spreads the track's own sound across the width. span=seconds
+    spreads the file's clock instead, 0 to span seconds from the file's
+    start time (what ffmpeg -ss and the Cut slider count), with silence
+    where the track has no sound (it starts late, has gaps or ends early),
+    so the picture lines up with a time slider.
+
+    on_start(process) gets the ffmpeg process, so it can be killed; a
+    killed render raises."""
+    align = ""
+    if span is not None:
+        align = (f"aresample=async=1:first_pts=0,"
+                 f"apad=whole_dur={span:.6f},atrim=end={span:.6f},")
+    # draw=full ignores amplitude when deciding pixel brightness (only the
+    # height reflects amplitude) -- with draw=scale (the default) quiet
+    # passages fade to near-invisible, which is what made the waveform so
+    # hard to see. scale=cbrt compresses the dynamic range so quiet parts
+    # still show visible height, not just the loudest peaks.
+    filt = (f"[0:a:{a_index}]{align}showwavespic=s={width}x{height}:colors={color}:"
+            f"scale=cbrt:draw=full[wv]")
+    cmd = [find_exe("ffmpeg"), "-v", "error", "-i", path, "-filter_complex", filt,
+           "-map", "[wv]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            **SUBPROCESS_KWARGS)
+    if on_start is not None:
+        on_start(proc)
+    out, err = proc.communicate()
+    if proc.returncode != 0 or not out:
+        raise RuntimeError(err.decode("utf-8", "replace").strip() or "ffmpeg failed")
+    img = Image.open(io.BytesIO(out))
+    img.load()
+    return img
+
+
 class TimeSlider(tk.Canvas):
     def __init__(self, parent, command=None, height=28, track_color="#d5d5d5",
                  fill_color="#3d8bfd", handle_color="#1a73e8", bg="#f0f0f0", **kwargs):
@@ -1406,6 +1453,8 @@ class VideoPlayer:
         self._ensure_mpv()
         self.clear_loop()
         self.state.pop("time-pos", None)
+        self.state.pop("track-list", None)   # the old file's, until the new one's arrive
+        self.state.pop("aid", None)
         self.state["ready"] = False
         self.state["failed"] = False
         self.mpv.pause = True
@@ -1529,6 +1578,14 @@ class LosslessVideoApp(_BaseTk):
         self._keyframe_proc = None       # the running scan's ffprobe
         self._keyframe_gen = 0           # bumped per scan, so a stale scan's results are dropped
         self._keyframe_xs = (None, [])   # (what they were computed for, tick x positions)
+        self._wave_cache = {}            # (path, size, mtime, track) -> waveform mask, this session
+        self._wave_proc = None           # the running render's ffmpeg
+        self._wave_gen = 0               # bumped per render, so a stale render is dropped
+        self._wave_track = None          # the audio track (0-based) shown or being drawn
+        self._wave_mask = None           # its picture: PIL "L", white where there is sound
+        self._wave_note = ""             # shown instead while drawing, or when it can't be drawn
+        self._wave_sized = (None, None)  # (size, the mask resized to it)
+        self._wave_photo = (None, None)  # (what the strip's image was made for, PhotoImage)
 
         # Resize/Crop tab state
         self.resize_input_path = None
@@ -1647,6 +1704,7 @@ class LosslessVideoApp(_BaseTk):
         # is left running after the window closes.
         self._audio_stop_ffplay()
         self._stop_keyframe_scan()
+        self._stop_waveform()
         if self.cut_player is not None:
             if self._cut_audio_save_id is not None:   # a volume change not saved yet
                 self.after_cancel(self._cut_audio_save_id)
@@ -2180,6 +2238,17 @@ class LosslessVideoApp(_BaseTk):
         self.slider_canvas.bind("<ButtonRelease-1>", self._slider_release)
         self._drag_target = None
 
+        # ---- waveform of the audio heard, on the slider's time axis
+        self.wave_canvas = None
+        if PIL_AVAILABLE:
+            self.wave_canvas = tk.Canvas(controls, height=px(30), bg="#f0f0f0",
+                                         highlightthickness=0)
+            self.wave_canvas.pack(fill="x", pady=(0, 1))
+            self.wave_canvas.bind("<Configure>", lambda e: self._redraw_waveform())
+            self.wave_canvas.bind("<Button-1>", self._wave_click)
+            self.wave_canvas.bind("<B1-Motion>", self._slider_drag)
+            self.wave_canvas.bind("<ButtonRelease-1>", self._slider_release)
+
         # ---- cut mode: classic (original, may snap to nearest keyframe) vs
         # smart-cut (re-encode just the edges for exact accuracy) vs
         # edit-list trim (exact accuracy, zero re-encode, experimental)
@@ -2351,10 +2420,12 @@ class LosslessVideoApp(_BaseTk):
                     command=lambda tid=t["id"]: self.cut_player.set_audio_track(tid))
         current = player.audio_track
         self.cut_track_var.set(current if current is not None else 0)
+        ids = [t["id"] for t in tracks]
+        if current in ids and ids.index(current) != self._wave_track:
+            self._start_waveform(ids.index(current))   # the waveform shows the track heard
         if not tracks:
             self.cut_track_btn.config(text="No audio", state="disabled")
         else:
-            ids = [t["id"] for t in tracks]
             n = ids.index(current) + 1 if current in ids else 0
             text = f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾"
             self.cut_track_btn.config(text=text,
@@ -2614,6 +2685,7 @@ class LosslessVideoApp(_BaseTk):
         self._set_cut_controls_enabled(True)
         self._sync_entries()
         self._start_keyframe_scan(path)
+        self._start_waveform(0)   # the player may pick another track: _update_cut_audio_controls
         status = "Ready"
         if self.cut_player is not None:
             try:
@@ -2698,8 +2770,7 @@ class LosslessVideoApp(_BaseTk):
         self._stop_keyframe_scan()
         self.cut_keyframes = []
         try:
-            st = os.stat(path)
-            key = (os.path.normcase(os.path.abspath(path)), st.st_size, st.st_mtime_ns)
+            key = file_identity(path)
             ffprobe = find_exe("ffprobe")
         except (OSError, RuntimeError):
             return
@@ -2773,6 +2844,122 @@ class LosslessVideoApp(_BaseTk):
             self._keyframe_xs = (made_for, xs)
         return self._keyframe_xs[1]
 
+    # ---- waveform strip -----------------------------------------------
+    def _start_waveform(self, track):
+        """Draws audio track `track` (0-based) under the slider, on the
+        slider's time axis: the track the player plays, so it follows the
+        audio-track picker. ffmpeg draws it in the background
+        (render_waveform: about 0.2 s for 2 GB of MP4, 0.7 s of MPEG-TS)
+        and it is kept for the session."""
+        if self.wave_canvas is None or not self.input_path:
+            return
+        self._stop_waveform()
+        self._wave_track = track
+        self._wave_mask = None
+        try:
+            key = file_identity(self.input_path) + (track,)
+        except OSError:
+            key = None
+        if key in self._wave_cache:
+            self._wave_mask, self._wave_note = self._wave_cache[key], ""
+            self._redraw_waveform()
+            return
+        self._wave_note = "Drawing the waveform…"
+        self._redraw_waveform()
+        gen, path, span = self._wave_gen, self.input_path, self.duration
+
+        def started(proc):
+            self._wave_proc = proc
+            if gen != self._wave_gen:   # stopped before ffmpeg was even running
+                proc.kill()
+
+        def worker():
+            mask, note = None, ""
+            try:
+                mask = render_waveform(path, track, 2400, 64, span=span,
+                                       on_start=started).convert("L")
+            except Exception as exc:
+                note = "No audio" if "matches no streams" in str(exc) else "Waveform unavailable"
+            try:
+                self.after(0, self._on_waveform_ready, gen, key, mask, note)
+            except (RuntimeError, tk.TclError):
+                pass   # the window is gone
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_waveform(self):
+        self._wave_gen += 1   # whatever the old render still sends is dropped
+        proc, self._wave_proc = self._wave_proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _on_waveform_ready(self, gen, key, mask, note):
+        if gen != self._wave_gen:
+            return
+        self._wave_proc = None
+        self._wave_mask, self._wave_note = mask, note
+        if mask is not None and key is not None:
+            self._wave_cache[key] = mask
+        self._redraw_waveform()
+
+    def _redraw_waveform(self):
+        """The strip: the waveform across the same span as the slider's
+        track, blue inside the selection and gray outside it, and the
+        player's playhead."""
+        c = self.wave_canvas
+        if c is None:
+            return
+        c.delete("all")
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 2 or h < 2 or not self.input_path or self.duration <= 0:
+            return
+        x0, x1 = px(10), max(px(20), w - px(10))   # as the slider's track
+        if self._wave_mask is not None:
+            c.create_image(x0, 0, image=self._waveform_photo(x0, x1, h), anchor="nw")
+        elif self._wave_note:
+            c.create_text(x0, h / 2, text=self._wave_note, anchor="w", font=("Segoe UI", 8),
+                          fill=self._theme_color("wave"))
+        if self._cut_player_on:
+            c.create_line(0, 0, 0, 0, fill=PLAYHEAD_COLOR, width=px(2), tags=("playhead",))
+            self._move_playhead(self.cut_player.position)
+
+    def _waveform_photo(self, x0, x1, h):
+        width = x1 - x0
+        sel0 = round((x1 - x0) * self.start_sec / self.duration)
+        sel1 = round((x1 - x0) * self.end_sec / self.duration)
+        bg = self.wave_canvas.cget("bg")
+        made_for = (id(self._wave_mask), width, h, sel0, sel1, bg, self._theme_color("wave"))
+        if self._wave_photo[0] == made_for:
+            return self._wave_photo[1]
+        if self._wave_sized[0] != (id(self._wave_mask), width, h):
+            self._wave_sized = ((id(self._wave_mask), width, h),
+                                self._wave_mask.resize((width, h), Image.BILINEAR))
+        mask = self._wave_sized[1]
+        rgb = tuple(v // 257 for v in self.wave_canvas.winfo_rgb(bg))
+        img = Image.new("RGB", (width, h), rgb)
+        img.paste(self._theme_color("wave"), (0, 0, width, h), mask)
+        if sel1 > sel0:
+            img.paste("#3d8bfd", (sel0, 0, sel1, h), mask.crop((sel0, 0, sel1, h)))
+        photo = ImageTk.PhotoImage(img)
+        self._wave_photo = (made_for, photo)
+        return photo
+
+    def _wave_click(self, event):
+        """With the player, the strip moves the playhead (never a handle);
+        without it, it works like the slider."""
+        if not self.input_path:
+            return
+        if not self._cut_player_on:
+            self._slider_click(event)
+            return
+        self.cut_tab.focus_set()   # off a time field, so the keys work
+        self._drag_target = "playhead"
+        self._cut_scrubbing = True
+        self._slider_drag(event)
+
     # ---- slider -------------------------------------------------------
     def _redraw_slider(self):
         c = self.slider_canvas
@@ -2786,6 +2973,7 @@ class LosslessVideoApp(_BaseTk):
         c.create_line(track_x0, y, track_x1, y, fill=self._theme_color("slider_track"),
                       width=px(4), capstyle="round")
         self._track_x0, self._track_x1 = track_x0, track_x1
+        self._redraw_waveform()   # the selection is shown there too
         if not self.input_path or self.duration <= 0:
             return
 
@@ -2813,10 +3001,12 @@ class LosslessVideoApp(_BaseTk):
         c.create_oval(ex - r, y - r, ex + r, y + r, fill="#1a73e8", outline="")
 
     def _move_playhead(self, t):
-        c = self.slider_canvas
+        c, wc = self.slider_canvas, self.wave_canvas
         if t is None or not self.duration:
             c.itemconfigure("playhead", state="hidden")
             c.itemconfigure("playhead_top", state="hidden")
+            if wc is not None:
+                wc.itemconfigure("playhead", state="hidden")
             return
         x = self._time_to_x(min(max(t, 0.0), self.duration))
         h = c.winfo_height() or px(24)
@@ -2825,6 +3015,9 @@ class LosslessVideoApp(_BaseTk):
         c.coords("playhead_top", x - a, 0, x + a, 0, x, a + px(1))
         c.itemconfigure("playhead", state="normal")
         c.itemconfigure("playhead_top", state="normal")
+        if wc is not None:
+            wc.coords("playhead", x, 0, x, wc.winfo_height())
+            wc.itemconfigure("playhead", state="normal")
 
     def _x_to_time(self, x):
         # Rounds to a whole second (.000) -- a drag is only pixel-precise,
@@ -5822,35 +6015,11 @@ class LosslessVideoApp(_BaseTk):
         a_index = track["a_index"]
 
         def worker():
-            tmp = os.path.join(
-                tempfile.gettempdir(), f"_audio_waveform_{a_index}_{abs(hash(path))}.png"
-            )
             try:
-                ffmpeg = find_exe("ffmpeg")
-                # draw=full ignores amplitude when deciding pixel brightness (only the
-                # height reflects amplitude) -- with draw=scale (the default) quiet
-                # passages fade to near-invisible, which is what made the waveform so
-                # hard to see. scale=cbrt compresses the dynamic range so quiet parts
-                # still show visible height, not just the loudest peaks.
-                filt = (
-                    f"[0:a:{a_index}]showwavespic=s=1200x260:colors=0x00e5ff:"
-                    f"scale=cbrt:draw=full[wv]"
-                )
-                cmd = [
-                    ffmpeg, "-y", "-i", path, "-filter_complex", filt,
-                    "-map", "[wv]", "-frames:v", "1", tmp
-                ]
-                subprocess.run(cmd, capture_output=True, check=True, **SUBPROCESS_KWARGS)
-                img = Image.open(tmp).convert("RGB")
-                img.load()
+                img = render_waveform(path, a_index, 1200, 260, color="0x00e5ff").convert("RGB")
                 self.after(0, lambda: self._audio_set_waveform(path, track, img))
             except Exception:
                 self.after(0, lambda: self._audio_waveform_failed(path, track))
-            finally:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
 
         threading.Thread(target=worker, daemon=True).start()
 
