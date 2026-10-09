@@ -30,6 +30,11 @@ tab, with keyframe ticks and the audio waveform under the slider; preview
 the joined video on Combine, a row's ranges on Bulk Cut, and the video
 playing under the crop box on Crop.
 
+The Combine and Bulk Cut lists work the same way: a thumbnail per file,
+Ctrl/Shift-click to select several rows, Delete to remove them, and Move
+Up/Down or drag to reorder (the dragged rows follow the cursor, and a line
+shows where they will land). Bulk Cut cuts the files in the list's order.
+
 Drag & drop supported throughout. Dark mode under **View**.
 
 ## Running from source

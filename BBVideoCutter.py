@@ -933,6 +933,7 @@ _CHROME_BG = {
     "systembuttonface": "panel", "#f0f0f0": "panel", "#d9d9d9": "panel",
     "systemwindow": "field",
     "#e6e6e6": "status",
+    "#828790": "border",   # a list's edge, like the Treeview's
     "#cfe2ff": None,  # the Crop tab's active ratio button, see _dark_bg
 }
 _BG_OPTIONS = ("background", "activebackground", "highlightbackground",
@@ -1349,6 +1350,63 @@ def probe_shown_video_size(ffprobe, path):
     if turn in (90, 270):
         width, height = height, width
     return width, height, turn
+
+
+def probe_file_summary(ffprobe, path):
+    """(length, video, audio) texts for the Combine list, e.g.
+    ("00:01:05", "h264 · 1920×1080 · 29.97 fps", "aac · 48 kHz · 2 ch").
+    The video is its first stream as stored; the audio is the first track,
+    with how many there are when there are several. "—" for what can't be
+    read."""
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries",
+             "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,"
+             "sample_rate,channels",
+             "-of", "json", path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            **SUBPROCESS_KWARGS)
+        info = json.loads(result.stdout or "{}")
+    except Exception:
+        return "—", "—", "—"
+    try:
+        length = seconds_to_hms(float(info.get("format", {}).get("duration")))
+    except (TypeError, ValueError):
+        length = "—"
+    streams = info.get("streams") or []
+    videos = [s for s in streams if s.get("codec_type") == "video"]
+    audios = [s for s in streams if s.get("codec_type") == "audio"]
+
+    def number(value):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+
+    video = "none"
+    if videos:
+        v = videos[0]
+        parts = [v.get("codec_name") or "?"]
+        if v.get("width") and v.get("height"):
+            parts.append(f"{v['width']}×{v['height']}")
+        try:
+            num, den = (int(x) for x in str(v.get("avg_frame_rate", "0/0")).split("/"))
+            if num and den:
+                parts.append(f"{number(num / den)} fps")
+        except ValueError:
+            pass
+        video = " · ".join(parts)
+    audio = "none"
+    if audios:
+        a = audios[0]
+        parts = [a.get("codec_name") or "?"]
+        try:
+            parts.append(f"{number(int(a['sample_rate']) / 1000)} kHz")
+        except (KeyError, TypeError, ValueError):
+            pass
+        if a.get("channels"):
+            parts.append(f"{a['channels']} ch")
+        audio = " · ".join(parts)
+        if len(audios) > 1:
+            audio = f"{len(audios)} tracks: {audio}"
+    return length, video, audio
 
 
 def describe_audio_track(track):
@@ -1823,6 +1881,277 @@ class ClipPreview:
         self.player.show_first_frame_from(target)
 
 
+class FileTable:
+    """The Combine and Bulk Cut lists: a table of video files where each
+    row is a thumbnail, the row's number and the file name, then the
+    owner's columns. Ctrl/Shift-click selects several rows, and Delete
+    calls the owner's on_delete. Rows are reordered with move(±1), or by
+    dragging: a ghost of the dragged rows follows the cursor, a line shows
+    where they will land, and they move there on release (Esc cancels).
+    After every move on_reorder() is called; order() is then the list's
+    new order. The owner keeps its own list of what the rows stand for."""
+
+    STYLE = "Files.Treeview"
+
+    def __init__(self, parent, root, columns, thumb_size, get_thumbnail,
+                 on_reorder, on_delete, empty_text, name_width=340):
+        """columns: (id, heading, width, anchor) for each column after the
+        file name. get_thumbnail(path) is a PhotoImage, or None while there
+        is none (thumbnail_ready brings it later). root is the window the
+        drag ghost is drawn in."""
+        self.root = root
+        self.get_thumbnail = get_thumbnail
+        self.on_reorder = on_reorder
+        self.on_delete = on_delete
+        self.paths = {}            # iid -> path
+        self.frame = tk.Frame(parent, bg="#f0f0f0")
+        self.frame.rowconfigure(0, weight=1)
+        self.frame.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(self.frame, columns=[c[0] for c in columns],
+                                 show="tree headings", selectmode="extended", style=self.STYLE)
+        self.tree.heading("#0", text="File Name", anchor="w")
+        self.tree.column("#0", width=px(name_width), anchor="w")
+        for cid, heading, width, anchor in columns:
+            self.tree.heading(cid, text=heading)
+            self.tree.column(cid, width=width, anchor=anchor)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb = ttk.Scrollbar(self.frame, command=self.tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=vsb.set)
+        # Rows without their thumbnail yet keep its room, so the names
+        # don't shift when it comes.
+        self.blank = tk.PhotoImage(width=thumb_size[0], height=thumb_size[1])
+        # In the field's color: SystemWindow is themed to the dark field.
+        self.empty_lbl = tk.Label(self.frame, text=empty_text, bg="SystemWindow", fg="#777777",
+                                  anchor="w", font=("Segoe UI", 10))
+        self.tree.bind("<ButtonPress-1>", self._press)
+        self.tree.bind("<B1-Motion>", self._motion)
+        self.tree.bind("<ButtonRelease-1>", self._release)
+        self.tree.bind("<Delete>", self._delete_key)
+        self.tree.bind("<Escape>", lambda e: self._end_drag(drop=False))
+        self._press_at = None      # (row, x, y) of the button press on a row
+        self._keep_selection = False
+        self._drag = None          # while dragging: {"rows", "ghost", "line", "gap"...}
+        self._update_empty()
+
+    # ---- rows ------------------------------------------------------------
+    def insert(self, path, values):
+        iid = self._insert(path, values)
+        self.renumber()
+        self._update_empty()
+        return iid
+
+    def replace(self, rows):
+        """All the rows anew: rows is (path, values) for each one. Returns
+        their ids."""
+        self.tree.delete(*self.tree.get_children())
+        self.paths = {}
+        iids = [self._insert(path, values) for path, values in rows]
+        self.renumber()
+        self._update_empty()
+        return iids
+
+    def _insert(self, path, values):
+        iid = self.tree.insert("", "end", image=self.get_thumbnail(path) or self.blank,
+                               values=values)
+        self.paths[iid] = path
+        return iid
+
+    def delete(self, iids):
+        iids = [i for i in iids if self.tree.exists(i)]
+        if iids:
+            self.tree.delete(*iids)
+        for iid in iids:
+            self.paths.pop(iid, None)
+        self.renumber()
+        self._update_empty()
+
+    def order(self):
+        return list(self.tree.get_children())
+
+    def selected(self):
+        """The selected rows, top to bottom."""
+        sel = set(self.tree.selection())
+        return [i for i in self.order() if i in sel]
+
+    def select(self, iids):
+        self.tree.selection_set(iids)
+        if iids:
+            self.tree.focus(iids[0])
+            self.tree.see(iids[0])
+
+    def renumber(self):
+        for n, iid in enumerate(self.tree.get_children(), 1):
+            self.tree.item(iid, text=f"  {n}.  {os.path.basename(self.paths[iid])}")
+
+    def thumbnail_ready(self, path, photo):
+        for iid, p in self.paths.items():
+            if p == path and self.tree.exists(iid):
+                self.tree.item(iid, image=photo)
+
+    def _update_empty(self):
+        if self.tree.get_children():
+            self.empty_lbl.place_forget()
+        else:
+            self.empty_lbl.place(in_=self.tree, x=px(10), y=px(34), relwidth=1, width=-px(20))
+
+    # ---- moving rows -------------------------------------------------------
+    def move(self, step):
+        """Moves the selected rows one place up (step -1) or down (+1)."""
+        rows = self.selected()
+        order = self.order()
+        if not rows or (step < 0 and order.index(rows[0]) == 0) \
+                or (step > 0 and order.index(rows[-1]) == len(order) - 1):
+            return
+        for iid in (rows if step < 0 else reversed(rows)):
+            self.tree.move(iid, "", self.tree.index(iid) + step)
+        self.renumber()
+        self.tree.see(rows[0] if step < 0 else rows[-1])
+        self.on_reorder()
+
+    def move_rows_to(self, rows, gap):
+        """Moves rows (kept in their order) to gap: the place before row
+        number gap of the current order (len(order) = the end)."""
+        order = self.order()
+        moving = set(rows)
+        rows = [i for i in order if i in moving]
+        rest = [i for i in order if i not in moving]
+        before = sum(1 for i in order[:gap] if i not in moving)
+        new = rest[:before] + rows + rest[before:]
+        if new == order:
+            return
+        for pos, iid in enumerate(new):
+            self.tree.move(iid, "", pos)
+        self.renumber()
+        self.on_reorder()
+
+    def _delete_key(self, event):
+        if self.tree.selection():
+            self.on_delete()
+        return "break"
+
+    # ---- dragging ----------------------------------------------------------
+    def _press(self, event):
+        self._end_drag(drop=False)
+        self._press_at = None
+        iid = self.tree.identify_row(event.y)
+        if not iid or self.tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            return None
+        self._press_at = (iid, event.x, event.y)
+        self._keep_selection = False
+        if iid in self.tree.selection() and not event.state & (0x1 | 0x4):
+            # A press on a selected row keeps the whole selection, so it can
+            # all be dragged; a click without a drag selects just this row
+            # on release, as usual.
+            self._keep_selection = True
+            self.tree.focus(iid)
+            self.tree.focus_set()
+            return "break"
+        return None    # Tk selects the row, with Ctrl/Shift as usual
+
+    def _motion(self, event):
+        if self._press_at is None:
+            return None
+        if self._drag is None:
+            _iid, x0, y0 = self._press_at
+            if abs(event.x - x0) + abs(event.y - y0) < px(6):
+                return "break"
+            self._start_drag()
+        self._drag["xy"] = (event.x, event.y)
+        self._drag["root_xy"] = (event.x_root, event.y_root)
+        self._show_drag()
+        return "break"
+
+    def _release(self, event):
+        pressed = self._press_at
+        self._press_at = None
+        if self._drag is not None:
+            self._end_drag(drop=True)
+            return "break"
+        if pressed and self._keep_selection:
+            self.select([pressed[0]])
+        return None
+
+    def _start_drag(self):
+        rows = self.selected() or [self._press_at[0]]
+        ghost = tk.Frame(self.root, bg="#f0f0f0", highlightthickness=px(1),
+                         highlightbackground="#3d8bfd", highlightcolor="#3d8bfd")
+        name = (os.path.basename(self.paths[rows[0]]) if len(rows) == 1
+                else f"{len(rows)} files")
+        tk.Label(ghost, image=self.get_thumbnail(self.paths[rows[0]]) or self.blank,
+                 text=f"  {name}", compound="left", bg="#f0f0f0", fg="#000000",
+                 font=("Segoe UI", 9), padx=px(4), pady=px(3)).pack()
+        line = tk.Frame(self.frame, bg="#3d8bfd", height=px(2))
+        self._drag = {"rows": rows, "ghost": ghost, "line": line, "gap": None,
+                      "xy": None, "root_xy": None, "scroll_id": None}
+        self.tree.configure(cursor="fleur")
+
+    def _gap_at(self, y):
+        """Where rows dropped at y (tree coordinates) would go, and the y of
+        the line that shows it (None when that place is scrolled out of view)."""
+        order = self.order()
+        iid = self.tree.identify_row(y)
+        if iid:
+            x0, y0, w, h = self.tree.bbox(iid)
+            gap = order.index(iid) + (1 if y >= y0 + h / 2 else 0)
+        elif self.tree.identify_region(px(4), y) == "heading":
+            first = next((i for i in order if self.tree.bbox(i)), None)
+            gap = order.index(first) if first else 0
+        else:
+            gap = len(order)
+        if gap < len(order):
+            box = self.tree.bbox(order[gap])
+            line_y = box[1] if box else None
+        else:
+            box = self.tree.bbox(order[-1]) if order else None
+            line_y = box[1] + box[3] if box else None
+        return gap, line_y
+
+    def _show_drag(self):
+        d = self._drag
+        x, y = d["xy"]
+        gap, line_y = self._gap_at(y)
+        d["gap"] = gap
+        if line_y is None:
+            d["line"].place_forget()
+        else:
+            d["line"].place(in_=self.tree, x=0, y=max(0, line_y - px(1)), relwidth=1)
+        rx, ry = d["root_xy"]
+        d["ghost"].place(x=rx - self.root.winfo_rootx() + px(14),
+                         y=ry - self.root.winfo_rooty() + px(10))
+        # Held near the top or bottom edge, the list scrolls.
+        h = self.tree.winfo_height()
+        near = -1 if self.tree.identify_region(px(4), y) == "heading" or y < px(8) else \
+            1 if y > h - px(12) else 0
+        if near and d["scroll_id"] is None:
+            d["scroll_id"] = self.tree.after(80, self._autoscroll)
+        d["near"] = near
+
+    def _autoscroll(self):
+        d = self._drag
+        if d is None:
+            return
+        d["scroll_id"] = None
+        if d.get("near"):
+            self.tree.yview_scroll(d["near"], "units")
+            self._show_drag()
+
+    def _end_drag(self, drop):
+        d = self._drag
+        if d is None:
+            return
+        self._drag = None
+        self._press_at = None
+        if d["scroll_id"] is not None:
+            self.tree.after_cancel(d["scroll_id"])
+        d["ghost"].destroy()
+        d["line"].destroy()
+        self.tree.configure(cursor="")
+        if drop and d["gap"] is not None:
+            self.move_rows_to(d["rows"], d["gap"])
+            self.select(d["rows"])
+
+
 if os.name == "nt":
     from ctypes import wintypes as _wintypes
     # A private user32 handle, so these argtypes don't affect other code.
@@ -1842,8 +2171,7 @@ class LosslessVideoApp(_BaseTk):
         super().__init__()
         global UI_SCALE
         UI_SCALE = max(1.0, round(self.winfo_fpixels("1i") / 96.0, 2))
-        # Pixel sizes of the Combine rows, scaled like everything else.
-        self.ROW_HEIGHT = px(self.ROW_HEIGHT)
+        # The list thumbnails' size, scaled like everything else.
         self.THUMB_SIZE = (px(self.THUMB_SIZE[0]), px(self.THUMB_SIZE[1]))
         self.title("BarkBark Lossless Video Cutter")
         # 900x700 at 100% scaling, never bigger than the screen at high scaling.
@@ -1935,7 +2263,17 @@ class LosslessVideoApp(_BaseTk):
         self._audio_restart_after_id = None  # debounce for restarting playback after a volume/track change
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
 
+        # Thumbnails for the Combine and Bulk Cut lists, which share them.
+        self.thumb_cache = {}            # path -> PhotoImage, or "" when it couldn't be made
+        self.thumb_pending = set()       # paths with an extraction already queued
+        # Few workers on purpose: decoding a frame from several large videos
+        # at once just makes them all fight over disk/CPU and finish later.
+        self.thumb_pool = ThreadPoolExecutor(max_workers=2)
+
         self.combine_files = []          # list of paths queued to join
+        self.combine_table = None        # FileTable, once the tab is built
+        self.combine_info = {}           # path -> (length, video, audio) texts, once probed
+        self.combine_info_pending = set()
         self.combine_preview = None      # ClipPreview of the joined videos, made on first use
         self._combine_preview_sync_id = None
 
@@ -1943,6 +2281,7 @@ class LosslessVideoApp(_BaseTk):
         self._bulk_lock = threading.Lock()
         self._bulk_running = False
         self.bulk_preview = None         # ClipPreview of a row's ranges, made on first use
+        self.bulk_table = None           # FileTable, once the tab is built
 
         self.warn_overwrite_var = tk.BooleanVar(value=True)
         self._progress_jobs = {}         # running job name -> time.monotonic() it started
@@ -2295,6 +2634,8 @@ class LosslessVideoApp(_BaseTk):
         Style settings belong to a theme, so this runs again after a switch."""
         linespace = tkfont.nametofont("TkDefaultFont").metrics("linespace")
         style.configure("Treeview", rowheight=max(px(20), linespace + px(4)))
+        # The Combine and Bulk Cut lists: room for a thumbnail on each row.
+        style.configure(FileTable.STYLE, rowheight=max(self.THUMB_SIZE[1] + px(8), linespace + px(4)))
 
     def _apply_ttk_theme(self):
         style = ttk.Style(self)
@@ -4386,8 +4727,8 @@ class LosslessVideoApp(_BaseTk):
     # ====================================================================
     # COMBINE TAB
     # ====================================================================
-    ROW_HEIGHT = 56
-    THUMB_SIZE = (72, 40)
+    THUMB_SIZE = (72, 40)    # the Combine and Bulk Cut lists' thumbnails
+    LIST_EMPTY_TEXT = "(drag & drop videos here, or click 'Add Files...')"
 
     def _build_combine_tab(self):
         root = self.combine_tab
@@ -4397,11 +4738,11 @@ class LosslessVideoApp(_BaseTk):
         header = tk.Frame(root, bg="#f0f0f0")
         header.grid(row=0, column=0, sticky="ew", padx=3, pady=(6, 2))
         tk.Label(header, text="Videos will be joined in the order listed below "
-                 "(top to bottom). Drag a row to reorder it.",
+                 "(top to bottom). Drag rows to reorder them.",
                  bg="#f0f0f0", anchor="w", wraplength=px(600), justify="left"
                  ).pack(side="left", fill="x", expand=True)
 
-        # list (custom scrollable rows with thumbnails) + side buttons
+        # list + side buttons
         body = tk.Frame(root, bg="#f0f0f0")
         body.grid(row=1, column=0, sticky="nsew", padx=3, pady=4)
         body.columnconfigure(0, weight=1)
@@ -4413,46 +4754,20 @@ class LosslessVideoApp(_BaseTk):
                                             sashwidth=px(6), sashrelief="flat",
                                             opaqueresize=True)
         self.combine_paned.grid(row=0, column=0, sticky="nsew")
-        list_frame = tk.Frame(self.combine_paned, bg="black")
-        self.combine_paned.add(list_frame, stretch="always", minsize=px(60))
-        list_frame.rowconfigure(0, weight=1)
-        list_frame.columnconfigure(0, weight=1)
-
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.combine_canvas = tk.Canvas(list_frame, bg="#1e1e1e", highlightthickness=0,
-                                         yscrollcommand=scrollbar.set)
-        self.combine_canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.config(command=self.combine_canvas.yview)
-
-        self.combine_inner = tk.Frame(self.combine_canvas, bg="#1e1e1e")
-        self._combine_inner_window = self.combine_canvas.create_window(
-            (0, 0), window=self.combine_inner, anchor="nw"
-        )
-        self.combine_inner.bind(
-            "<Configure>",
-            lambda e: self.combine_canvas.configure(scrollregion=self.combine_canvas.bbox("all")),
-        )
-        self.combine_canvas.bind(
-            "<Configure>",
-            lambda e: self.combine_canvas.itemconfig(self._combine_inner_window, width=e.width),
-        )
-        # Rows and the placeholder cover the canvas where they are, so a
-        # press that reaches the canvas itself is on the blank area below.
-        self._bind_window_drag(self.combine_canvas, lambda e: True)
-
-        self.combine_thumb_cache = {}    # path -> PhotoImage
-        self.combine_thumb_pending = set()  # paths with an extraction already queued
-        self.combine_thumb_labels = {}   # path -> thumbnail Labels in the current rows
-        # Few workers on purpose: decoding a frame from several large videos
-        # at once just makes them all fight over disk/CPU and finish later.
-        self.combine_thumb_pool = ThreadPoolExecutor(max_workers=2)
-        # Blank stand-in so a row's thumbnail slot is sized in pixels (a
-        # Label with no image measures width/height in text characters).
-        self.combine_thumb_blank = tk.PhotoImage(width=self.THUMB_SIZE[0], height=self.THUMB_SIZE[1])
-        self.combine_selected_index = None
-        self._drag_active = False
-        self._drag_index = None
+        self.combine_table = FileTable(
+            self.combine_paned, self,
+            columns=[("length", "Length", px(70), "center"),
+                     ("video", "Video", px(190), "center"),
+                     ("audio", "Audio", px(200), "center")],
+            name_width=260,
+            thumb_size=self.THUMB_SIZE, get_thumbnail=self._list_thumbnail,
+            on_reorder=self._combine_table_changed, on_delete=self._combine_remove_selected,
+            empty_text=self.LIST_EMPTY_TEXT)
+        self.combine_paned.add(self.combine_table.frame, stretch="always", minsize=px(60))
+        # Only the blank area below the rows; headings keep column resizing.
+        tree = self.combine_table.tree
+        self._bind_window_drag(tree, lambda e: tree.identify_region(e.x, e.y) == "nothing")
+        self._bind_window_drag(self.combine_table.empty_lbl, lambda e: True)
         self._rebuild_combine_rows()
 
         side = tk.Frame(body, bg="#f0f0f0")
@@ -4487,63 +4802,72 @@ class LosslessVideoApp(_BaseTk):
                                       command=self._combine_clicked)
         self.combine_btn.grid(row=3, column=0, sticky="ew", padx=3, pady=(4, 6))
 
-        self.combine_canvas.drop_target_register(DND_FILES)
-        self.combine_canvas.dnd_bind("<<Drop>>", self._on_drop_combine)
-        self.combine_inner.drop_target_register(DND_FILES)
-        self.combine_inner.dnd_bind("<<Drop>>", self._on_drop_combine)
+        for target in (tree, self.combine_table.empty_lbl):
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<Drop>>", self._on_drop_combine)
 
-    # ---- row rendering --------------------------------------------------
+    # ---- rows ---------------------------------------------------------------
+    def _combine_row_values(self, path):
+        info = self.combine_info.get(path)
+        if info is None:
+            self._request_combine_info(path)
+            return ("…", "…", "…")
+        return info
+
     def _rebuild_combine_rows(self):
+        """Shows combine_files in the list, keeping the selected places."""
         self._schedule_combine_preview_sync()
-        for child in self.combine_inner.winfo_children():
-            child.destroy()
-        self.combine_thumb_labels = {}
-
-        if not self.combine_files:
-            placeholder = tk.Label(
-                self.combine_inner,
-                text="  (drag & drop videos here, or click 'Add Files...')",
-                bg="#1e1e1e", fg="#888888", anchor="w", font=("Consolas", 10),
-            )
-            placeholder.pack(fill="x", ipady=16)
-            self._bind_window_drag(placeholder, lambda e: not self.combine_files)
+        table = self.combine_table
+        if table is None:
             return
+        order = table.order()
+        selected = [order.index(i) for i in table.selected()]
+        iids = table.replace([(p, self._combine_row_values(p)) for p in self.combine_files])
+        table.select([iids[i] for i in selected if i < len(iids)])
 
-        for i, path in enumerate(self.combine_files):
-            selected = (i == self.combine_selected_index)
-            row_bg = "#3d8bfd" if selected else "#1e1e1e"
-            row = tk.Frame(self.combine_inner, bg=row_bg, height=self.ROW_HEIGHT)
-            row.pack(fill="x")
-            row.pack_propagate(False)
+    def _combine_table_changed(self):
+        """The rows were reordered or removed in the list itself."""
+        table = self.combine_table
+        self.combine_files = [table.paths[i] for i in table.order()]
+        self._schedule_combine_preview_sync()
 
-            thumb_lbl = tk.Label(row, bg="#000000", image=self.combine_thumb_blank,
-                                  width=self.THUMB_SIZE[0], height=self.THUMB_SIZE[1])
-            cached = self.combine_thumb_cache.get(path)
-            if cached:
-                thumb_lbl.config(image=cached)
-                thumb_lbl.image = cached
-            elif cached is None:
-                self.combine_thumb_labels.setdefault(path, []).append(thumb_lbl)
-                self._request_thumbnail(path)
-            thumb_lbl.pack(side="left", padx=8, pady=6)
+    def _request_combine_info(self, path):
+        if path in self.combine_info_pending:
+            return
+        self.combine_info_pending.add(path)
 
-            name_lbl = tk.Label(row, text=f"{i + 1}. {os.path.basename(path)}",
-                                 bg=row_bg, fg="white", anchor="w", font=("Consolas", 10))
-            name_lbl.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        def probe():
+            try:
+                info = probe_file_summary(find_exe("ffprobe"), path)
+            except FileNotFoundError:
+                info = ("—", "—", "—")
+            self.after(0, lambda: self._on_combine_info_ready(path, info))
+        self.thumb_pool.submit(probe)
 
-            # any click/drag on the row or its children behaves the same
-            for widget in (row, thumb_lbl, name_lbl):
-                widget.bind("<ButtonPress-1>", lambda e, idx=i: self._combine_drag_start(e, idx))
+    def _on_combine_info_ready(self, path, info):
+        self.combine_info_pending.discard(path)
+        self.combine_info[path] = info
+        table = self.combine_table
+        for iid, p in table.paths.items():
+            if p == path and table.tree.exists(iid):
+                table.tree.item(iid, values=info)
+
+    # ---- thumbnails (Combine and Bulk Cut) ----------------------------------
+    def _list_thumbnail(self, path):
+        """The list thumbnail of path, or None for now (one is requested and
+        put in the rows when it is ready) or for good when there can't be one."""
+        cached = self.thumb_cache.get(path)
+        if cached is None:
+            self._request_thumbnail(path)
+        return cached or None
 
     def _request_thumbnail(self, path):
-        # Every row rebuild (select, drag, add, each finished thumbnail...)
-        # used to start a brand new extraction for every row that didn't
-        # have its thumbnail yet, so the same files were decoded over and
-        # over in parallel -- the main reason thumbnails took so long.
-        if not PIL_AVAILABLE or path in self.combine_thumb_pending:
+        # One extraction per file, however often its rows are redrawn: the
+        # same files decoded over and over in parallel made thumbnails slow.
+        if not PIL_AVAILABLE or path in self.thumb_pending:
             return
-        self.combine_thumb_pending.add(path)
-        self.combine_thumb_pool.submit(self._extract_thumbnail, path)
+        self.thumb_pending.add(path)
+        self.thumb_pool.submit(self._extract_thumbnail, path)
 
     def _extract_thumbnail(self, path):
         img = None
@@ -4565,53 +4889,23 @@ class LosslessVideoApp(_BaseTk):
         self.after(0, lambda: self._on_thumbnail_ready(path, img))
 
     def _on_thumbnail_ready(self, path, pil_img):
-        self.combine_thumb_pending.discard(path)
+        self.thumb_pending.discard(path)
         if pil_img is None:
-            # Remember the failure so rebuilds don't keep retrying it.
-            self.combine_thumb_cache[path] = ""
+            # Remember the failure so redraws don't keep retrying it.
+            self.thumb_cache[path] = ""
             return
         photo = ImageTk.PhotoImage(pil_img)
-        self.combine_thumb_cache[path] = photo
-        # Patch just the rows showing this file instead of rebuilding the
-        # whole list.
-        for lbl in self.combine_thumb_labels.pop(path, []):
-            if lbl.winfo_exists():
-                lbl.config(image=photo)
-                lbl.image = photo
-
-    # ---- selection & drag-to-reorder ------------------------------------
-    def _combine_select(self, idx):
-        self.combine_selected_index = idx
-        self._rebuild_combine_rows()
-
-    def _combine_drag_start(self, event, idx):
-        self._combine_select(idx)
-        self._drag_active = True
-        self._drag_index = idx
-        self.bind_all("<B1-Motion>", self._combine_drag_motion)
-        self.bind_all("<ButtonRelease-1>", self._combine_drag_end)
-
-    def _combine_drag_motion(self, event):
-        if not self._drag_active or not self.combine_files:
-            return
-        rel_y = event.y_root - self.combine_inner.winfo_rooty()
-        hover_index = int(rel_y // self.ROW_HEIGHT)
-        hover_index = max(0, min(hover_index, len(self.combine_files) - 1))
-        if hover_index != self._drag_index:
-            self.combine_files[self._drag_index], self.combine_files[hover_index] = (
-                self.combine_files[hover_index], self.combine_files[self._drag_index]
-            )
-            self._drag_index = hover_index
-            self.combine_selected_index = hover_index
-            self._rebuild_combine_rows()
-
-    def _combine_drag_end(self, event):
-        self._drag_active = False
-        self._drag_index = None
-        self.unbind_all("<B1-Motion>")
-        self.unbind_all("<ButtonRelease-1>")
+        self.thumb_cache[path] = photo
+        for table in (self.combine_table, self.bulk_table):
+            if table is not None:
+                table.thumbnail_ready(path, photo)
 
     # ---- file list management --------------------------------------------
+    def _combine_select(self, idx):
+        """Selects the row at idx (just that one)."""
+        order = self.combine_table.order()
+        self.combine_table.select([order[idx]] if 0 <= idx < len(order) else [])
+
     def add_files_for_combine(self):
         self._ensure_tab_built(1)
         self.notebook.select(self.combine_tab)
@@ -4624,26 +4918,25 @@ class LosslessVideoApp(_BaseTk):
             self._rebuild_combine_rows()
 
     def _combine_remove_selected(self):
-        i = self.combine_selected_index
-        if i is None or not (0 <= i < len(self.combine_files)):
+        table = self.combine_table
+        rows = table.selected()
+        if not rows:
             return
-        del self.combine_files[i]
-        self.combine_selected_index = None
-        self._rebuild_combine_rows()
+        after = table.order()[table.order().index(rows[-1]) + 1:]
+        next_row = next((i for i in after if i not in rows), None)
+        table.delete(rows)
+        self._combine_table_changed()
+        # The next row takes the selection, so Delete can be pressed again.
+        rest = table.order()
+        if next_row is None and rest:
+            next_row = rest[-1]
+        table.select([next_row] if next_row else [])
 
     def _combine_move(self, direction):
-        i = self.combine_selected_index
-        if i is None:
-            return
-        j = i + direction
-        if 0 <= j < len(self.combine_files):
-            self.combine_files[i], self.combine_files[j] = self.combine_files[j], self.combine_files[i]
-            self.combine_selected_index = j
-            self._rebuild_combine_rows()
+        self.combine_table.move(direction)
 
     def _combine_clear(self):
         self.combine_files = []
-        self.combine_selected_index = None
         self._rebuild_combine_rows()
 
     # ---- preview of the joined video ---------------------------------------
@@ -4914,33 +5207,23 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_paned = tk.PanedWindow(body, orient="vertical", bg="#f0f0f0", bd=0,
                                          sashwidth=px(6), sashrelief="flat", opaqueresize=True)
         self.bulk_paned.grid(row=0, column=0, columnspan=2, sticky="nsew")
-        tree_wrap = tk.Frame(self.bulk_paned, bg="#f0f0f0")
-        self.bulk_paned.add(tree_wrap, stretch="always", minsize=px(60))
-        tree_wrap.rowconfigure(0, weight=1)
-        tree_wrap.columnconfigure(0, weight=1)
-
-        columns = ("range", "length", "status")
-        self.bulk_tree = ttk.Treeview(
-            tree_wrap, columns=columns, show="tree headings", selectmode="extended"
-        )
-        self.bulk_tree.heading("#0", text="File Name")
-        self.bulk_tree.heading("range", text="Cut Range")
-        self.bulk_tree.heading("length", text="Final Length")
-        self.bulk_tree.heading("status", text="Status")
-        self.bulk_tree.column("#0", width=px(340), anchor="w")
-        self.bulk_tree.column("range", width=px(170), anchor="center")
-        self.bulk_tree.column("length", width=px(110), anchor="center")
-        self.bulk_tree.column("status", width=px(140), anchor="center")
-        self.bulk_tree.grid(row=0, column=0, sticky="nsew")
-
-        vsb = ttk.Scrollbar(tree_wrap, command=self.bulk_tree.yview)
-        vsb.grid(row=0, column=1, sticky="ns")
-        self.bulk_tree.configure(yscrollcommand=vsb.set)
+        self.bulk_table = FileTable(
+            self.bulk_paned, self,
+            columns=[("range", "Cut Range", px(170), "center"),
+                     ("length", "Final Length", px(110), "center"),
+                     ("status", "Status", px(140), "center")],
+            thumb_size=self.THUMB_SIZE, get_thumbnail=self._list_thumbnail,
+            on_reorder=self._bulk_table_reordered, on_delete=self._bulk_remove_selected,
+            empty_text=self.LIST_EMPTY_TEXT)
+        self.bulk_paned.add(self.bulk_table.frame, stretch="always", minsize=px(60))
+        self.bulk_tree = self.bulk_table.tree
 
         side = tk.Frame(body, bg="#f0f0f0")
         side.grid(row=0, column=2, sticky="ns", padx=(8, 0))
         tk.Button(side, text="Add Files...", width=16, command=self.add_files_for_bulk).pack(pady=2)
         tk.Button(side, text="Remove Selected", width=16, command=self._bulk_remove_selected).pack(pady=2)
+        tk.Button(side, text="Move Up", width=16, command=lambda: self.bulk_table.move(-1)).pack(pady=2)
+        tk.Button(side, text="Move Down", width=16, command=lambda: self.bulk_table.move(1)).pack(pady=2)
         tk.Button(side, text="Clear All", width=16, command=self._bulk_clear).pack(pady=2)
         self.bulk_preview_btn = None
         if mpv_available():
@@ -4983,13 +5266,15 @@ class LosslessVideoApp(_BaseTk):
         )
         self.bulk_btn.grid(row=4, column=0, sticky="ew", padx=3, pady=(4, 6))
 
-        self.bulk_tree.drop_target_register(DND_FILES)
-        self.bulk_tree.dnd_bind("<<Drop>>", self._on_drop_bulk)
+        for target in (self.bulk_tree, self.bulk_table.empty_lbl):
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<Drop>>", self._on_drop_bulk)
         # Only the blank area below the rows; headings keep column resizing.
         self._bind_window_drag(
             self.bulk_tree,
             lambda e: self.bulk_tree.identify_region(e.x, e.y) == "nothing",
         )
+        self._bind_window_drag(self.bulk_table.empty_lbl, lambda e: True)
 
     # ---- adding / removing rows ------------------------------------------
     def add_files_for_bulk(self):
@@ -5059,35 +5344,45 @@ class LosslessVideoApp(_BaseTk):
             # Added while a run is going: join its queue straight away.
             if status == "Pending" and self._bulk_running:
                 status = "Queued"
-            iid = self.bulk_tree.insert(
-                "", "end", text=os.path.basename(path),
-                values=(range_txt, length_txt, status),
-            )
+            iid = self.bulk_table.insert(path, (range_txt, length_txt, status))
             self.bulk_items.append({
                 "path": path, "ranges": ranges,
                 "status": status, "iid": iid,
             })
         return iid
 
+    def _bulk_table_reordered(self):
+        # bulk_items is the queue a run takes its next row from, top first,
+        # so a run cuts the rows in their new order.
+        with self._bulk_lock:
+            by_iid = {it["iid"]: it for it in self.bulk_items}
+            self.bulk_items = [by_iid[i] for i in self.bulk_table.order() if i in by_iid]
+
     # Removing a queued row takes it out of bulk_items, which is the list the
     # running worker picks its next item from -- so it is never processed.
     # A row that's already processing finishes its current ffmpeg run.
     def _bulk_remove_selected(self):
-        sel = self.bulk_tree.selection()
-        if not sel:
+        table = self.bulk_table
+        rows = table.selected()
+        if not rows:
             return
-        sel_set = set(sel)
+        sel_set = set(rows)
+        after = table.order()[table.order().index(rows[-1]) + 1:]
+        next_row = next((i for i in after if i not in sel_set), None)
         with self._bulk_lock:
-            for iid in sel:
-                self.bulk_tree.delete(iid)
+            table.delete(rows)
             self.bulk_items = [it for it in self.bulk_items if it["iid"] not in sel_set]
         if self._bulk_preview_open() and self.bulk_preview.key in sel_set:
             self._bulk_close_preview()
+        # The next row takes the selection, so Delete can be pressed again.
+        rest = table.order()
+        if next_row is None and rest:
+            next_row = rest[-1]
+        table.select([next_row] if next_row else [])
 
     def _bulk_clear(self):
         with self._bulk_lock:
-            for iid in self.bulk_tree.get_children():
-                self.bulk_tree.delete(iid)
+            self.bulk_table.replace([])
             self.bulk_items = []
         self._bulk_close_preview()
 
@@ -6792,27 +7087,44 @@ class LosslessVideoApp(_BaseTk):
                  "and set each one's volume:",
             bg="#f0f0f0", anchor="w"
         ).pack(side="left")
-        self.audio_balance_btn = tk.Button(
-            tracks_header, text="Auto Balance Audio", command=self._audio_auto_balance_clicked
-        )
-        self.audio_balance_btn.pack(side="right")
-        self.audio_balance_btn.config(state="disabled")
 
-        tracks_body = tk.Frame(root, bg="#1e1e1e")
+        # The track list + side buttons, laid out like the Combine and Bulk
+        # Cut lists.
+        tracks_body = tk.Frame(root, bg="#f0f0f0")
         tracks_body.grid(row=4, column=0, sticky="nsew", padx=3, pady=2)
         tracks_body.rowconfigure(0, weight=1)
         tracks_body.columnconfigure(0, weight=1)
 
-        tracks_scrollbar = ttk.Scrollbar(tracks_body)
+        tracks_list = tk.Frame(tracks_body, bg="#f0f0f0", highlightthickness=1,
+                               highlightbackground="#828790", highlightcolor="#828790")
+        tracks_list.grid(row=0, column=0, sticky="nsew")
+        tracks_list.rowconfigure(0, weight=1)
+        tracks_list.columnconfigure(0, weight=1)
+        tracks_scrollbar = ttk.Scrollbar(tracks_list)
         tracks_scrollbar.grid(row=0, column=1, sticky="ns")
         self.audio_tracks_canvas = tk.Canvas(
-            tracks_body, bg="#1e1e1e", highlightthickness=0,
+            tracks_list, bg="SystemWindow", highlightthickness=0,
             yscrollcommand=tracks_scrollbar.set
         )
         self.audio_tracks_canvas.grid(row=0, column=0, sticky="nsew")
         tracks_scrollbar.config(command=self.audio_tracks_canvas.yview)
 
-        self.audio_tracks_inner = tk.Frame(self.audio_tracks_canvas, bg="#1e1e1e")
+        side = tk.Frame(tracks_body, bg="#f0f0f0")
+        side.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        self.audio_enable_all_btn = tk.Button(
+            side, text="Enable All", width=16, state="disabled",
+            command=lambda: self._audio_set_all_enabled(True))
+        self.audio_enable_all_btn.pack(pady=2)
+        self.audio_disable_all_btn = tk.Button(
+            side, text="Disable All", width=16, state="disabled",
+            command=lambda: self._audio_set_all_enabled(False))
+        self.audio_disable_all_btn.pack(pady=2)
+        self.audio_balance_btn = tk.Button(
+            side, text="Auto Balance Audio", width=16, state="disabled",
+            command=self._audio_auto_balance_clicked)
+        self.audio_balance_btn.pack(pady=(10, 2))
+
+        self.audio_tracks_inner = tk.Frame(self.audio_tracks_canvas, bg="SystemWindow")
         self._audio_tracks_inner_window = self.audio_tracks_canvas.create_window(
             (0, 0), window=self.audio_tracks_inner, anchor="nw"
         )
@@ -6850,8 +7162,9 @@ class LosslessVideoApp(_BaseTk):
         self.audio_finalize_btn.grid(row=6, column=0, sticky="ew", padx=3, pady=(4, 6))
         self.audio_finalize_btn.config(state="disabled")
 
-        self.audio_canvas.drop_target_register(DND_FILES)
-        self.audio_canvas.dnd_bind("<<Drop>>", self._on_drop_audio)
+        for target in (self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner):
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<Drop>>", self._on_drop_audio)
 
     # ---- preview canvas drawing (same caching approach as the crop tab) --
     def _draw_audio_placeholder(self, text):
@@ -6967,7 +7280,8 @@ class LosslessVideoApp(_BaseTk):
             })
 
         self._audio_rebuild_track_rows()
-        self.audio_balance_btn.config(state="normal")
+        for btn in (self.audio_balance_btn, self.audio_enable_all_btn, self.audio_disable_all_btn):
+            btn.config(state="normal")
         self.audio_finalize_btn.config(state="normal")
         self._audio_update_preview(0)
         self.status_lbl.config(text="Ready")
@@ -6978,50 +7292,54 @@ class LosslessVideoApp(_BaseTk):
             child.destroy()
 
         if not self.audio_tracks:
-            tk.Label(
+            # Like the Combine and Bulk Cut lists' empty text.
+            placeholder = tk.Label(
                 self.audio_tracks_inner,
-                text="  (open a video to see its audio tracks)",
-                bg="#1e1e1e", fg="#888888", anchor="w", font=("Consolas", 10),
-            ).pack(fill="x", ipady=16)
+                text="(drag & drop a video here, or click 'Open Video...')",
+                bg="SystemWindow", fg="#777777", anchor="w", font=("Segoe UI", 10),
+            )
+            placeholder.pack(fill="x", padx=px(10), pady=px(8))
+            placeholder.drop_target_register(DND_FILES)
+            placeholder.dnd_bind("<<Drop>>", self._on_drop_audio)
             return
 
         for track in self.audio_tracks:
-            row = tk.Frame(self.audio_tracks_inner, bg="#2a2a2a")
+            row = tk.Frame(self.audio_tracks_inner, bg="#f0f0f0")
             row.pack(fill="x", padx=4, pady=4)
 
-            top = tk.Frame(row, bg="#2a2a2a")
+            top = tk.Frame(row, bg="#f0f0f0")
             top.pack(fill="x", padx=3, pady=(4, 2))
 
             tk.Checkbutton(
-                top, variable=track["enabled_var"], bg="#2a2a2a",
-                activebackground="#2a2a2a", selectcolor="#3d8bfd",
+                top, variable=track["enabled_var"], bg="#f0f0f0",
+                activebackground="#f0f0f0", selectcolor="SystemWindow",
                 command=lambda t=track: self._audio_track_toggled(t),
             ).pack(side="left")
 
             label_text = (
-                f"Track {track['a_index'] + 1}  ({track['codec']}, "
-                f"{track['channels']}ch, {track['sample_rate']} Hz)"
+                f"Track {track['a_index'] + 1}   ({track['codec']} · "
+                f"{track['channels']} ch · {track['sample_rate']} Hz)"
             )
             name_lbl = tk.Label(
-                top, text=label_text, bg="#2a2a2a", fg="white",
-                font=("Consolas", 10), anchor="w"
+                top, text=label_text, bg="#f0f0f0", font=("Segoe UI", 10), anchor="w",
+                fg="#000000" if track["enabled_var"].get() else "#777777",
             )
-            name_lbl.pack(side="left", padx=(6, 12))
+            name_lbl.pack(side="left", padx=(2, 12))
             track["name_label"] = name_lbl
 
-            vol_frame = tk.Frame(top, bg="#2a2a2a")
+            vol_frame = tk.Frame(top, bg="#f0f0f0")
             vol_frame.pack(side="right")
             tk.Label(
-                vol_frame, text="Volume:", bg="#2a2a2a", fg="#cccccc"
+                vol_frame, text="Volume:", bg="#f0f0f0", fg="#555555"
             ).pack(side="left", padx=(0, 4))
             vol_lbl = tk.Label(
-                vol_frame, text="100%", bg="#2a2a2a", fg="white",
-                width=5, font=("Consolas", 10)
+                vol_frame, text="100%", bg="#f0f0f0", fg="#000000",
+                width=5, font=("Segoe UI", 10)
             )
             vol_lbl.pack(side="right")
             vol_slider = TimeSlider(
                 vol_frame, command=lambda v, t=track: self._audio_volume_changed(t, v),
-                width=160, height=22, bg="#2a2a2a", track_color="#555555",
+                width=160, height=22,
             )
             vol_slider.config_range(to=2.0)
             vol_slider.set(1.0)
@@ -7043,11 +7361,21 @@ class LosslessVideoApp(_BaseTk):
             self._audio_generate_waveform(track)
 
     def _audio_track_toggled(self, track):
-        enabled = track["enabled_var"].get()
         lbl = track.get("name_label")
         if lbl is not None:
-            lbl.config(fg="white" if enabled else "#777777")
+            self._configure_light(lbl, fg="#000000" if track["enabled_var"].get() else "#777777")
         self._audio_maybe_restart_playback()
+
+    def _audio_set_all_enabled(self, enabled):
+        """Enable All / Disable All."""
+        changed = [t for t in self.audio_tracks if t["enabled_var"].get() != enabled]
+        for track in changed:
+            track["enabled_var"].set(enabled)
+            lbl = track.get("name_label")
+            if lbl is not None:
+                self._configure_light(lbl, fg="#000000" if enabled else "#777777")
+        if changed:
+            self._audio_maybe_restart_playback()
 
     def _audio_volume_changed(self, track, value):
         lbl = track.get("volume_lbl")
