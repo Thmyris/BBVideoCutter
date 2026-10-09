@@ -229,9 +229,44 @@ def seconds_to_ffmpeg_time_keyframe_ss(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
-# How close a requested cut boundary has to be to an actual keyframe to be
-# treated as "already aligned" (skip re-encoding that edge entirely).
-KEYFRAME_ALIGN_TOLERANCE = 0.05
+# Cut times are whole milliseconds, frame times generally aren't: a keyframe
+# at 2.333333 s typed as 2.333 is still taken to be that keyframe.
+CUT_TIME_SLACK = 0.0005
+
+# A re-encoded cut piece is decoded from this many seconds before the
+# keyframe it needs (see _ffmpeg_reencode_segment).
+CUT_SEEK_PREROLL = 1.0
+
+# Audio copied into an MP4 cut starts this many seconds early, hidden by the
+# track's edit list (see _join_cut_pieces).
+CUT_AUDIO_LEAD = 0.05
+
+
+def probe_interval(origin, lo_sec, hi_sec):
+    """ffprobe -read_intervals value for lo_sec..hi_sec on ffmpeg -ss's
+    clock (origin: the file's start time). An interval from the file's
+    start reads from the beginning instead of seeking there: a seek to the
+    start of an MPEG-TS file can land after its first keyframe."""
+    if lo_sec <= 0:
+        return f"%{hi_sec + origin:.6f}"
+    return f"{lo_sec + origin:.6f}%{hi_sec + origin:.6f}"
+
+
+def keep_av_streams_args(input_index):
+    """Extra ffmpeg output (appended after the real one) that copies every
+    video and audio stream of input input_index into nothing.
+
+    For an MPEG-TS-like input, ffmpeg recomputes the start time from the
+    streams in use and, if that differs from the file's start time (only
+    the video is read, and the audio starts first), changes what -ss
+    counts from. Builds before 2024 or so get that wrong (a misplaced
+    parenthesis drops the file's start time), and the cut lands up to
+    that offset away. With every video and audio stream in use, the start
+    time doesn't change and -ss means the same on every build. The cut
+    also never seeks to less than _probe_av_offset, which keeps current
+    builds right should a subtitle or data stream start first."""
+    return ["-map", f"{input_index}:v?", "-map", f"{input_index}:a?",
+            "-c", "copy", "-f", "null", "-"]
 
 
 # --------------------------------------------------------------------------
@@ -2744,11 +2779,14 @@ class LosslessVideoApp(_BaseTk):
     # concat technique _run_combine uses (see its docstring for why TS
     # avoids the "frozen frame" MP4-concat bug). Shared by Cut and Bulk Cut.
     def _probe_keyframes_near(self, ffprobe_exe, path, center_sec, pad=8.0):
-        lo = max(0.0, center_sec - pad)
-        hi = center_sec + pad
+        """Keyframe times within `pad` seconds of center_sec, on ffmpeg -ss's
+        clock: seconds from the file's start time. ffprobe itself reads and
+        reports the file's own timestamps, which don't start at 0 in e.g.
+        many MPEG-TS files (1.4 s is common), so they are shifted here."""
+        origin = self._probe_start_time(ffprobe_exe, path)
         cmd = [
             ffprobe_exe, "-v", "error", "-select_streams", "v:0",
-            "-read_intervals", f"{seconds_to_ffmpeg_time(lo)}%{seconds_to_ffmpeg_time(hi)}",
+            "-read_intervals", probe_interval(origin, center_sec - pad, center_sec + pad),
             "-skip_frame", "nokey",
             "-show_entries", "frame=best_effort_timestamp_time",
             "-of", "csv=p=0", path,
@@ -2756,14 +2794,122 @@ class LosslessVideoApp(_BaseTk):
         proc = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
         times = []
         for line in proc.stdout.splitlines():
-            line = line.strip()
+            line = line.strip().rstrip(",")
             if not line:
                 continue
             try:
-                times.append(float(line))
+                times.append(float(line) - origin)
             except ValueError:
                 pass
         return sorted(times)
+
+    def _probe_start_time(self, ffprobe_exe, path):
+        """The file's start time: what ffmpeg -ss (and the player) count
+        from. 0 when there is none."""
+        try:
+            out = subprocess.run(
+                [ffprobe_exe, "-v", "error", "-show_entries", "format=start_time",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                capture_output=True, text=True, **SUBPROCESS_KWARGS,
+            ).stdout.strip()
+            return float(out)
+        except (ValueError, OSError):
+            return 0.0
+
+    def _probe_frame_duration(self, ffprobe_exe, path):
+        """Seconds per frame of the first video stream (1/30 if unknown)."""
+        try:
+            out = subprocess.run(
+                [ffprobe_exe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=avg_frame_rate,r_frame_rate", "-of", "csv=p=0", path],
+                capture_output=True, text=True, **SUBPROCESS_KWARGS,
+            ).stdout.strip().splitlines()
+        except OSError:
+            out = []
+        for rate in (out[0].split(",") if out else []):
+            num, _, den = rate.partition("/")
+            try:
+                fps = float(num) / float(den or 1)
+            except (ValueError, ZeroDivisionError):
+                continue
+            if 1 <= fps <= 1000:
+                return 1.0 / fps
+        return 1.0 / 30
+
+    def _probe_keyframe_dts(self, ffprobe_exe, path, keyframe_sec):
+        """Decode timestamp (same clock as _probe_keyframes_near) of the
+        keyframe packet at keyframe_sec, or None. With B-frames, a packet's
+        decode time comes before its display time, and a stream copy's -to
+        stops at the first packet whose decode time reaches it."""
+        origin = self._probe_start_time(ffprobe_exe, path)
+        at = keyframe_sec + origin
+        try:
+            out = subprocess.run(
+                [ffprobe_exe, "-v", "error", "-select_streams", "v:0",
+                 "-read_intervals", probe_interval(origin, keyframe_sec - 2, keyframe_sec + 1),
+                 "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0", path],
+                capture_output=True, text=True, **SUBPROCESS_KWARGS,
+            ).stdout.splitlines()
+        except OSError:
+            return None
+        for line in out:
+            parts = line.strip().split(",")
+            if len(parts) < 3 or "K" not in parts[2]:
+                continue
+            try:
+                pts, dts = float(parts[0]), float(parts[1])
+            except ValueError:
+                continue
+            if abs(pts - at) < 0.001:
+                return dts - origin
+        return None
+
+    def _probe_av_offset(self, ffprobe_exe, path):
+        """How far after the file's start time its first video or audio
+        stream starts (0 unless, say, a subtitle stream starts first). See
+        keep_av_streams_args for why the cut's commands never seek to less."""
+        origin = self._probe_start_time(ffprobe_exe, path)
+        try:
+            out = subprocess.run(
+                [ffprobe_exe, "-v", "error", "-show_entries", "stream=codec_type,start_time",
+                 "-of", "csv=p=0", path],
+                capture_output=True, text=True, **SUBPROCESS_KWARGS,
+            ).stdout.split()
+        except OSError:
+            return 0.0
+        starts = []
+        for row in out:
+            kind, _, value = row.strip(",").partition(",")
+            if kind in ("video", "audio"):
+                try:
+                    starts.append(float(value))
+                except ValueError:
+                    pass
+        return max(0.0, min(starts) - origin) if starts else 0.0
+
+    def _probe_first_frame_at(self, ffprobe_exe, path, at_sec):
+        """Display time (same clock as _probe_keyframes_near) of the first
+        video frame shown at or after at_sec; at_sec if none is found."""
+        origin = self._probe_start_time(ffprobe_exe, path)
+        at = at_sec + origin
+        try:
+            out = subprocess.run(
+                [ffprobe_exe, "-v", "error", "-select_streams", "v:0",
+                 "-read_intervals", probe_interval(origin, at_sec - 2, at_sec + 2),
+                 "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+                capture_output=True, text=True, **SUBPROCESS_KWARGS,
+            ).stdout.split()
+        except OSError:
+            return at_sec
+        later = []
+        for value in out:
+            try:
+                pts = float(value.strip(","))
+            except ValueError:
+                continue
+            if pts >= at - 1e-6:
+                later.append(pts)
+        return min(later) - origin if later else at_sec
 
     def _ffmpeg_stream_copy_cut(self, ffmpeg, input_path, start_sec, end_sec, out_path,
                                 progress=None):
@@ -2783,49 +2929,63 @@ class LosslessVideoApp(_BaseTk):
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:])
 
-    def _ffmpeg_reencode_segment(self, ffmpeg, input_path, start_sec, end_sec,
-                                  out_path, encoder_args, to_ts=False, progress=None):
-        # Every call here encodes a short segment (always under one keyframe
-        # interval, by construction -- that's the whole point of only
-        # re-encoding the boundary). With B-frames enabled, the encoder's
-        # reorder/lookahead buffer doesn't get enough subsequent frames to
-        # drain properly before such a short segment ends, leaving the last
-        # few frames with no resolvable presentation timestamp (confirmed:
-        # ffprobe reports pkt_pts_time=N/A on exactly the trailing frames of
-        # an isolated segment encoded this way) -- that's what was causing
-        # the "middle plays as missing / seeking only reaches start or end"
-        # corruption. Disabling B-frames (-bf 0) for just these short
-        # segment encodes fixes it cleanly (verified: zero N/A timestamps
-        # afterward) without affecting the Crop tab's full-video re-encode,
-        # which doesn't go through this method.
-        # -avoid_negative_ts make_zero is only applied for a standalone
-        # segment (to_ts=False, the "full" single-pass mode -- this becomes
-        # the final playable file and needs to start at/near timestamp 0).
-        # A to_ts=True piece (head/tail) instead gets concatenated with a
-        # stream-copied "middle" segment that keeps the source's own large,
-        # absolute original timestamps (never rebased -- see
-        # _ffmpeg_copy_segment_to_ts). Forcing this piece to zero-base too
-        # would put it in a different timestamp domain than the middle it's
-        # about to be glued to, relying on ffmpeg's mpegts-demuxer
-        # discontinuity auto-correction to smooth over that seam --
-        # confirmed unreliable on a real, long (~40min) source: it produced
-        # a "non monotonically increasing dts" collision right at the
-        # middle->tail boundary even after every other timing fix. Leaving
-        # the natural (un-rebased) timestamps in place keeps every piece on
-        # one continuous timeline from the start, so there's no seam left
-        # for the demuxer to have to guess at.
-        avoid_neg_ts = [] if to_ts else ["-avoid_negative_ts", "make_zero"]
+    # The cut's video is made of pieces (MPEG-TS files, one video stream
+    # each) that _join_cut_pieces joins byte for byte. That only works if
+    # they share one clock, so every piece is written with each frame's
+    # time in the source minus zero_sec, the cut's start. ffmpeg's
+    # avoid_negative_ts would move a piece whose first decode time is just
+    # below 0 (a B-frame stream decodes ahead of what it shows), so it is
+    # off; the MPEG-TS muxer's own 1.4 s offset keeps the stored times
+    # positive. These commands write only the video (or only the audio), so
+    # they keep the source's other streams in use (keep_av_streams_args),
+    # never seek to less than min_seek (_probe_av_offset), and give -ss in
+    # microseconds so that holds exactly.
+    def _ffmpeg_reencode_segment(self, ffmpeg, input_path, start_sec, end_sec, seek_sec,
+                                  zero_sec, min_seek, out_path, encoder_args, dts_lead=0.0,
+                                  progress=None):
+        """Re-encodes the video frames shown from start_sec up to (not
+        including) end_sec into a piece for _join_cut_pieces.
+
+        The frames are picked by the trim filter on their own times (counted
+        from the -ss point). -ss and -to can't do it exactly: -to becomes a
+        length counted from the first frame kept, which can let one frame
+        too many through, and in an MPEG-TS file -ss can land between
+        keyframes, so the frames up to the next keyframe can't be decoded
+        and are lost. So ffmpeg starts reading at seek_sec, which the
+        caller puts a second before the keyframe the first frame needs
+        (mpv's player seeks a second early in the same way), and -to, a
+        second after end_sec, only stops it reading on to the end of the
+        file.
+
+        B-frames are off (-bf 0): in a piece this short the encoder can't
+        drain its reorder buffer, and the last frames came out with no
+        display time. A copied piece with B-frames, though, decodes ahead
+        of what it shows: each packet's decode time (dts) is dts_lead before
+        the display time of its frame. With this piece's dts equal to its
+        pts, the copied piece after it would start with a dts at or before
+        this piece's last one, so setts moves this piece's decode times the
+        same amount earlier."""
+        ss_sec = round(max(min_seek, min(start_sec, max(0.0, seek_sec))), 6)
+        ss = f"{ss_sec:.6f}"
+        first = max(0.0, start_sec - ss_sec)
+        keep = max(first, end_sec - ss_sec)
+        vf = (f"trim=start={first:.6f}:end={keep:.6f},"
+              f"setpts=PTS+{ss_sec - zero_sec:.6f}/TB")
+        lead_bsf = ["-bsf:v", f"setts=dts=PTS-{dts_lead:.6f}/TB"] if dts_lead > 0 else []
 
         def build(enc_args):
-            cmd = [
-                ffmpeg, "-y", "-ss", seconds_to_ffmpeg_time(start_sec),
-                "-to", seconds_to_ffmpeg_time(end_sec), "-i", input_path,
-                "-map", "0:v:0", "-map", "0:a?",
-                *enc_args, "-bf", "0", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                *avoid_neg_ts,
+            return [
+                ffmpeg, "-y", "-ss", ss,
+                "-to", seconds_to_ffmpeg_time(end_sec + 1.0), "-i", input_path,
+                "-map", "0:v:0", "-vf", vf,
+                # The encoder would otherwise count time in frames
+                # (1/framerate) and round each frame's time to that grid,
+                # off the copied pieces' exact times by up to half a frame.
+                "-enc_time_base:v", "1/90000", "-fps_mode", "passthrough",
+                *enc_args, "-bf", "0", "-pix_fmt", "yuv420p", *lead_bsf,
+                "-avoid_negative_ts", "disabled", "-f", "mpegts", out_path,
+                *keep_av_streams_args(0),
             ]
-            cmd += ["-f", "mpegts", out_path] if to_ts else ["-movflags", "+faststart", out_path]
-            return cmd
 
         duration = end_sec - start_sec
         proc = run_ffmpeg(build(encoder_args), duration, progress)
@@ -2844,54 +3004,108 @@ class LosslessVideoApp(_BaseTk):
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:])
 
-    def _ffmpeg_copy_segment_to_ts(self, ffmpeg, input_path, start_sec, end_sec, out_path, video_bsf,
-                                    progress=None):
-        # start_sec here is always an exact probed keyframe timestamp (the
-        # sole caller passes kf_at_start) -- use the ceil-rounding formatter
-        # so -ss can't round it down below the real keyframe pts and snap
-        # the demuxer back to the *previous* keyframe (see
-        # seconds_to_ffmpeg_time_keyframe_ss's docstring).
-        cmd = [
-            ffmpeg, "-y", "-ss", seconds_to_ffmpeg_time_keyframe_ss(start_sec),
-            "-to", seconds_to_ffmpeg_time(end_sec), "-i", input_path,
-            "-c", "copy",
-        ]
+    def _ffmpeg_copy_gops(self, ffmpeg, input_path, kf_start, kf_end, kf_end_dts, frame_sec,
+                          zero_sec, min_seek, out_path, video_bsf, progress=None):
+        """Stream-copies the video frames from keyframe kf_start up to (not
+        including) keyframe kf_end into a piece for _join_cut_pieces.
+
+        Start: ffmpeg starts reading a second before kf_start (in an MPEG-TS
+        file -ss can land anywhere before its target, not on a keyframe, so
+        a -ss close to kf_start could start reading after kf_start's
+        packet). -itsoffset puts the point half a frame before kf_start at
+        time 0, and -copypriorss 0 drops every packet shown before 0, so the
+        copy starts at kf_start, its first keyframe after 0. (-ss as an
+        output option would drop by decode time, which for a B-frame stream
+        comes before kf_start's display time, and lose kf_start.) setts then
+        moves the times onto the pieces' shared clock.
+
+        End: with B-frames the packets aren't stored in display order, and a
+        copy's -to stops at the first packet whose decode time (dts) reaches
+        it. Cut at kf_end's display time, it would let kf_end itself and
+        frames after it through (their dts come earlier), so it is cut half
+        a frame before kf_end's own dts (kf_end_dts) instead: everything
+        stored before kf_end's packet, which is every frame before kf_end.
+        -to is counted on the clock -itsoffset shifted, so it is shifted the
+        same way."""
+        half = frame_sec / 2
+        ss_sec = round(max(min_seek, kf_start - CUT_SEEK_PREROLL, 0.0), 6)
+        ss = f"{ss_sec:.6f}"
+        offset = ss_sec - (kf_start - half)
+        to = (kf_end_dts if kf_end_dts is not None else kf_end) - half + offset
+        # (setts=ts=... would give dts the pts's value.)
+        shift = kf_start - half - zero_sec
+        bsf = f"setts=pts=PTS+{shift:.6f}/TB:dts=DTS+{shift:.6f}/TB"
         if video_bsf:
-            cmd += ["-bsf:v", video_bsf]
-        cmd += ["-f", "mpegts", out_path]
-        proc = run_ffmpeg(cmd, end_sec - start_sec, progress)
+            bsf = f"{video_bsf},{bsf}"
+        cmd = [
+            ffmpeg, "-y", "-itsoffset", f"{offset:.6f}", "-ss", ss,
+            "-to", seconds_to_ffmpeg_time(to), "-i", input_path,
+            "-map", "0:v:0", "-copypriorss", "0", "-c", "copy", "-bsf:v", bsf,
+            "-avoid_negative_ts", "disabled", "-f", "mpegts", out_path,
+            *keep_av_streams_args(0),
+        ]
+        proc = run_ffmpeg(cmd, kf_end - kf_start, progress)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:])
 
-    def _concat_ts_segments(self, ffmpeg, segments, out_path, audio_bsf,
-                            total_sec=None, progress=None):
-        # Uses the concat *demuxer* (-f concat), not the concat: protocol.
-        # The protocol is a literal byte-level join that assumes the pieces
-        # already share one continuous timestamp timeline -- they don't
-        # (the copied "middle" piece keeps the source's real, large
-        # timestamps; the re-encoded head/tail pieces get whatever small
-        # values their own encode happens to start at), so it depends on
-        # ffmpeg's mpegts-demuxer discontinuity heuristics to bridge the
-        # seams by guesswork. That heuristic handles a *forward* jump (head
-        # ending small, middle starting at its real large value) fine, but
-        # confirmed NOT a large *backward* jump (middle's real large value
-        # dropping back down to the tail's small one) -- reproduced a real
-        # "non monotonically increasing dts" collision right at that seam
-        # on an actual ~40-minute source, even after every other timing fix
-        # in this file. The concat demuxer is built specifically to retime
-        # independent inputs into one correct continuous output instead of
-        # guessing from raw timestamps -- verified on the same repro: zero
-        # decode warnings, a fully populated keyframe/seek index across the
-        # whole duration, where the protocol version still collided.
-        list_path = os.path.join(os.path.dirname(segments[0]), "concat_list.txt")
-        with open(list_path, "w", encoding="utf-8") as f:
-            for seg in segments:
-                f.write("file '{}'\n".format(seg.replace("'", "'\\''")))
-        cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy"]
-        if audio_bsf:
-            cmd += ["-bsf:a", audio_bsf]
-        cmd += ["-movflags", "+faststart", out_path]
-        proc = run_ffmpeg(cmd, total_sec, progress)
+    def _join_cut_pieces(self, ffmpeg, pieces, input_path, start_sec, end_sec, video_start,
+                         min_seek, out_path, audio_bsf, progress=None):
+        """Joins the video pieces (paths, in order) and copies every audio
+        track of input_path from start_sec to end_sec beside them, into
+        out_path.
+
+        Video: the pieces already share one clock, so they are joined byte
+        for byte (the concat: protocol) and read as one MPEG-TS stream. The
+        format is named because ffmpeg mistakes an MPEG-TS file of only a
+        frame or two (fewer than 10 TS packets) for MPEG-PS. (The concat
+        demuxer, used before, can't be told the format, and it places each
+        piece by its longest stream's end, which left gaps once audio was
+        in the pieces.)
+
+        Audio: copied in one go from the source, so it has no seams and
+        isn't re-encoded. Cut into pieces along with the video, it left a
+        gap of up to an audio frame (~21 ms) at every join, because audio
+        frames don't end where video frames do, plus the AAC encoder's
+        start-up samples at the start of each re-encoded piece.
+
+        Both are put on one clock with start_sec at 0: ffmpeg starts each
+        input at 0, so the video, whose first frame is shown at video_start
+        in the source, gets -itsoffset video_start - start_sec. The audio is
+        read from a second early, -itsoffset puts start_sec - lead at 0 and
+        -copypriorss 0 drops the audio before it. -to is counted on the
+        shifted clock, so it is shifted the same way.
+
+        lead: an audio packet holds ~20-30 ms, and the one that start_sec
+        falls in starts before it; a decoder also needs the packet before
+        a packet to decode it fully. Dropped, the cut's sound would start up
+        to a packet late, and its first packet would play damaged. So for
+        an MP4 the packets from CUT_AUDIO_LEAD before start_sec are kept,
+        setts moves them back to negative times, and the MP4 muxer writes
+        an edit list that skips them, as an encoder does with AAC's own
+        start-up samples: playback starts exactly at start_sec. Matroska
+        and MPEG-TS have no such list (ffmpeg would shift every stream to
+        make the times positive), so there the audio starts at the first
+        packet at or after start_sec."""
+        lead = CUT_AUDIO_LEAD if out_path.lower().endswith((".mp4", ".mov", ".m4v")) else 0.0
+        audio_ss_sec = round(max(min_seek, start_sec - lead - CUT_SEEK_PREROLL, 0.0), 6)
+        audio_ss = f"{audio_ss_sec:.6f}"
+        audio_offset = audio_ss_sec - (start_sec - lead)
+        cmd = [
+            ffmpeg, "-y",
+            "-itsoffset", f"{video_start - start_sec:.6f}",
+            "-f", "mpegts", "-i", "concat:" + "|".join(pieces),
+            "-itsoffset", f"{audio_offset:.6f}", "-ss", audio_ss,
+            "-to", seconds_to_ffmpeg_time(end_sec + audio_offset), "-i", input_path,
+            # 1:a? -- every audio track, not just the one ffmpeg would pick.
+            "-map", "0:v:0", "-map", "1:a?", "-copypriorss:a", "0", "-c", "copy",
+        ]
+        audio_bsfs = [audio_bsf] if audio_bsf else []
+        if lead:
+            audio_bsfs.append(f"setts=pts=PTS-{lead:.6f}/TB:dts=DTS-{lead:.6f}/TB")
+        if audio_bsfs:
+            cmd += ["-bsf:a", ",".join(audio_bsfs)]
+        cmd += ["-movflags", "+faststart", out_path, *keep_av_streams_args(1)]
+        proc = run_ffmpeg(cmd, end_sec - start_sec, progress)
         if proc.returncode != 0:
             raise RuntimeError(
                 "Couldn't join the cut segments back together.\n\n" + proc.stderr[-2000:]
@@ -3036,14 +3250,25 @@ class LosslessVideoApp(_BaseTk):
 
     def _reencode_mode_cut(self, ffmpeg, ffprobe, input_path, start_sec, end_sec,
                             out_path, search_window=8.0, progress=None):
+        # The cut holds the frames shown at or after start_sec and before
+        # end_sec. Pieces: the frames before the first keyframe in it
+        # (head, re-encoded), keyframe to keyframe (middle, copied), the
+        # frames from the last keyframe on (tail, re-encoded).
         kf_near_start = self._probe_keyframes_near(ffprobe, input_path, start_sec, pad=search_window)
         kf_at_start = next(
-            (t for t in kf_near_start if t >= start_sec - KEYFRAME_ALIGN_TOLERANCE), None
+            (t for t in kf_near_start if t >= start_sec - CUT_TIME_SLACK), None
         )
         kf_near_end = self._probe_keyframes_near(ffprobe, input_path, end_sec, pad=search_window)
         kf_before_end = max(
-            (t for t in kf_near_end if t <= end_sec + KEYFRAME_ALIGN_TOLERANCE), default=None
+            (t for t in kf_near_end if t <= end_sec + CUT_TIME_SLACK), default=None
         )
+        # Where decoding of a re-encoded piece starting at start_sec begins:
+        # before the keyframe at or before start_sec (from the file's start
+        # if none was found).
+        kf_before_start = max(
+            (t for t in kf_near_start if t <= start_sec + CUT_TIME_SLACK), default=0.0
+        )
+        head_seek = kf_before_start - CUT_SEEK_PREROLL
 
         if kf_at_start is None or kf_before_end is None:
             # No keyframe found in the probed window (extremely sparse GOPs,
@@ -3052,48 +3277,56 @@ class LosslessVideoApp(_BaseTk):
             self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path, progress)
             return {"mode": "copy", "encoder": None, "reencoded_sec": 0.0, "verified": False}
 
-        start_aligned = abs(kf_at_start - start_sec) <= KEYFRAME_ALIGN_TOLERANCE
-        end_aligned = abs(kf_before_end - end_sec) <= KEYFRAME_ALIGN_TOLERANCE
-
-        if start_aligned and end_aligned:
-            self._ffmpeg_stream_copy_cut(ffmpeg, input_path, start_sec, end_sec, out_path, progress)
-            return {"mode": "copy", "encoder": None, "reencoded_sec": 0.0, "verified": True}
-
-        # Re-encode with an encoder that matches the source's own video
-        # codec -- this result may get concatenated with a stream-copied
-        # (unchanged-codec) piece of the same file below, and mixing codecs
-        # in that concat silently corrupts whichever segment doesn't match
-        # the codec the muxer locks onto (see get_video_encoder_args).
+        # An edge needs no re-encoding when no frame lies between it and a
+        # keyframe: the start less than a frame before the keyframe, the end
+        # less than a frame before one (marks end half a frame after the
+        # last frame) or at one (within the millisecond rounding).
+        frame_sec = self._probe_frame_duration(ffprobe, input_path)
+        start_aligned = kf_at_start - start_sec < frame_sec - CUT_TIME_SLACK
+        kf_after_end = next(
+            (t for t in kf_near_end if t >= end_sec - CUT_TIME_SLACK), None
+        )
+        end_aligned = (kf_after_end is not None
+                       and kf_after_end - end_sec < frame_sec - CUT_TIME_SLACK)
+        if end_aligned:
+            kf_before_end = kf_after_end
         video_codec = self._probe_codec(ffprobe, input_path, "v")
-        encoder_args, encoder_label = get_video_encoder_args(ffmpeg, video_codec)
+        video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
 
-        if kf_at_start >= kf_before_end:
-            # No room for a copied middle -- the whole requested range fits
-            # inside one GOP. Re-encode it in a single pass.
-            self._ffmpeg_reencode_segment(
-                ffmpeg, input_path, start_sec, end_sec, out_path, encoder_args, progress=progress
-            )
-            return {
-                "mode": "full", "encoder": encoder_label,
-                "reencoded_sec": end_sec - start_sec, "verified": True,
-            }
+        if start_aligned and end_aligned and kf_at_start < kf_before_end:
+            # Nothing to re-encode; the copy below still goes through the
+            # same TS piece and join as the other cuts.
+            encoder_args, encoder_label = None, None
+        else:
+            # Re-encode with an encoder that matches the source's own video
+            # codec -- this result may get concatenated with a stream-copied
+            # (unchanged-codec) piece of the same file below, and mixing
+            # codecs in that concat silently corrupts whichever segment
+            # doesn't match the codec the muxer locks onto (see
+            # get_video_encoder_args).
+            encoder_args, encoder_label = get_video_encoder_args(ffmpeg, video_codec)
+
+        # No whole GOP inside the range: re-encode all of its video.
+        full = kf_at_start >= kf_before_end
 
         audio_codec = self._probe_codec(ffprobe, input_path, "a")
-        video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
         audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
 
         # Rough relative cost of each step, used only to split the progress
         # bar: head/tail re-encodes are tiny but slow per second, the copied
         # middle and the final join each pass over (almost) the whole clip.
-        weights = {"middle": 3.0, "concat": 2.0}
-        if not start_aligned:
-            weights["head"] = 1.0
-        if not end_aligned:
-            weights["tail"] = 1.0
+        if full:
+            weights = {"head": 1.0, "join": 2.0}
+        else:
+            weights = {"middle": 3.0, "join": 2.0}
+            if not start_aligned:
+                weights["head"] = 1.0
+            if not end_aligned:
+                weights["tail"] = 1.0
         stage_bounds = {}
         acc = 0.0
         total_weight = sum(weights.values())
-        for name in ("head", "middle", "tail", "concat"):
+        for name in ("head", "middle", "tail", "join"):
             if name in weights:
                 stage_bounds[name] = (acc / total_weight, (acc + weights[name]) / total_weight)
                 acc += weights[name]
@@ -3104,41 +3337,66 @@ class LosslessVideoApp(_BaseTk):
         reencoded_sec = 0.0
         tmpdir = tempfile.mkdtemp(prefix="lossless_cut_")
         try:
-            segments = []
-            if not start_aligned:
-                head_path = os.path.join(tmpdir, "head.ts")
+            pieces = []
+            # The pieces meet half a frame before each keyframe, between two
+            # frames, so neither rounding to milliseconds nor how ffmpeg
+            # treats a frame exactly on a boundary can move a frame across.
+            # Each piece's clock has start_sec at 0.
+            if start_aligned and not full:
+                video_start = kf_at_start
+            else:
+                video_start = self._probe_first_frame_at(ffprobe, input_path, start_sec)
+            min_seek = self._probe_av_offset(ffprobe, input_path)
+            if full:
+                full_path = os.path.join(tmpdir, "full.ts")
                 self._ffmpeg_reencode_segment(
-                    ffmpeg, input_path, start_sec, kf_at_start, head_path,
-                    encoder_args, to_ts=True, progress=stage("head"),
+                    ffmpeg, input_path, start_sec, end_sec, head_seek, start_sec,
+                    min_seek, full_path, encoder_args, progress=stage("head"),
                 )
-                segments.append(head_path)
-                reencoded_sec += kf_at_start - start_sec
+                pieces.append(full_path)
+                reencoded_sec = end_sec - start_sec
+            else:
+                if not start_aligned:
+                    head_path = os.path.join(tmpdir, "head.ts")
+                    start_dts = self._probe_keyframe_dts(ffprobe, input_path, kf_at_start)
+                    self._ffmpeg_reencode_segment(
+                        ffmpeg, input_path, start_sec, kf_at_start - frame_sec / 2, head_seek,
+                        start_sec, min_seek, head_path, encoder_args,
+                        dts_lead=0.0 if start_dts is None else max(0.0, kf_at_start - start_dts),
+                        progress=stage("head"),
+                    )
+                    pieces.append(head_path)
+                    reencoded_sec += kf_at_start - start_sec
 
-            middle_path = os.path.join(tmpdir, "middle.ts")
-            self._ffmpeg_copy_segment_to_ts(
-                ffmpeg, input_path, kf_at_start, kf_before_end, middle_path, video_bsf,
-                progress=stage("middle"),
-            )
-            segments.append(middle_path)
-
-            if not end_aligned:
-                tail_path = os.path.join(tmpdir, "tail.ts")
-                self._ffmpeg_reencode_segment(
-                    ffmpeg, input_path, kf_before_end, end_sec, tail_path,
-                    encoder_args, to_ts=True, progress=stage("tail"),
+                middle_path = os.path.join(tmpdir, "middle.ts")
+                self._ffmpeg_copy_gops(
+                    ffmpeg, input_path, kf_at_start, kf_before_end,
+                    self._probe_keyframe_dts(ffprobe, input_path, kf_before_end), frame_sec,
+                    start_sec, min_seek, middle_path, video_bsf, progress=stage("middle"),
                 )
-                segments.append(tail_path)
-                reencoded_sec += end_sec - kf_before_end
+                pieces.append(middle_path)
 
-            self._concat_ts_segments(
-                ffmpeg, segments, out_path, audio_bsf,
-                total_sec=end_sec - start_sec, progress=stage("concat"),
+                if not end_aligned:
+                    tail_path = os.path.join(tmpdir, "tail.ts")
+                    self._ffmpeg_reencode_segment(
+                        ffmpeg, input_path, kf_before_end - frame_sec / 2, end_sec,
+                        kf_before_end - CUT_SEEK_PREROLL, start_sec, min_seek, tail_path,
+                        encoder_args, progress=stage("tail"),
+                    )
+                    pieces.append(tail_path)
+                    reencoded_sec += end_sec - kf_before_end
+
+            self._join_cut_pieces(
+                ffmpeg, pieces, input_path, start_sec, end_sec, video_start,
+                min_seek, out_path, audio_bsf, progress=stage("join"),
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+        if encoder_args is None:
+            return {"mode": "copy", "encoder": None, "reencoded_sec": 0.0, "verified": True}
         return {
-            "mode": "partial", "encoder": encoder_label,
+            "mode": "full" if full else "partial", "encoder": encoder_label,
             "reencoded_sec": reencoded_sec, "verified": True,
         }
 
