@@ -893,6 +893,8 @@ THEME_COLORS = {
         "range_edge": "#2e7d4a",
         "timeslider_track": "#d5d5d5",
         "aspect_active": "#cfe2ff",
+        "icon": "#1a1a1a",            # the Cut tab's speaker
+        "icon_hover": "#dadada",      # ...and the square behind it under the mouse
         # The menu bar matches the title bar above it, so the two read as
         # one header: white like the Windows 10 caption in light mode...
         "menubar_bg": "#ffffff",
@@ -908,6 +910,8 @@ THEME_COLORS = {
         "range_edge": "#7fd19c",
         "timeslider_track": "#505056",
         "aspect_active": "#28456f",
+        "icon": DARK["text"],
+        "icon_hover": DARK["button_active"],
         # ...and the panel color, next to the dark caption, in dark mode.
         "menubar_bg": DARK["panel"],
         "menubar_fg": DARK["text"],
@@ -2566,6 +2570,8 @@ class LosslessVideoApp(_BaseTk):
         self._style_menu_bar()
         self._set_title_bar_dark(self._is_dark())
         self._redraw_slider()  # canvas items drawn with theme colors
+        if getattr(self, "cut_mute_btn", None) is not None:
+            self._draw_cut_speaker()
 
     def _configure_light(self, w, **options):
         """Configure w using light-theme colors, as code always does; in dark
@@ -3085,8 +3091,20 @@ class LosslessVideoApp(_BaseTk):
         player.set_muted(self.settings.get("player_muted", False))
         self._cut_audio_save_id = None
 
-        self.cut_mute_btn = tk.Button(parent, width=7, command=self._cut_toggle_mute)
+        # A speaker icon, clicked to mute / unmute.
+        self.cut_mute_btn = tk.Canvas(parent, width=px(26), height=px(22), bg="#f0f0f0",
+                                      highlightthickness=0, cursor="hand2")
         self.cut_mute_btn.pack(side="left", padx=(px(24), 2))
+        self.cut_mute_btn.bind("<Button-1>", lambda e: self._cut_toggle_mute())
+        self._cut_speaker_hover = False
+        self._cut_speaker_icon = None    # what it shows: "muted", or "waves N"
+
+        def hover(on):
+            self._cut_speaker_hover = on
+            self._draw_cut_speaker()
+
+        self.cut_mute_btn.bind("<Enter>", lambda e: hover(True), add="+")
+        self.cut_mute_btn.bind("<Leave>", lambda e: hover(False), add="+")
         self.cut_volume_slider = TimeSlider(parent, command=self._cut_volume_changed,
                                             width=100, height=22)
         self.cut_volume_slider.config_range(to=100.0)
@@ -3113,7 +3131,7 @@ class LosslessVideoApp(_BaseTk):
         if shown == getattr(self, "_cut_audio_shown", None):
             return   # called on every player change, ~30 times a second in playback
         self._cut_audio_shown = shown
-        self.cut_mute_btn.config(text="Unmute" if player.muted else "Mute")
+        self._draw_cut_speaker()
         self.cut_volume_lbl.config(text=f"{int(round(player.volume))}%")
         if key != self._cut_track_list:
             self._cut_track_list = key
@@ -3134,6 +3152,29 @@ class LosslessVideoApp(_BaseTk):
             text = f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾"
             self.cut_track_btn.config(text=text,
                                       state="normal" if len(tracks) > 1 else "disabled")
+
+    def _draw_cut_speaker(self):
+        player, c = self.cut_player, self.cut_mute_btn
+        if player.muted:
+            icon = "muted"
+        else:
+            icon = f"waves {0 if player.volume <= 0 else 1 if player.volume < 50 else 2}"
+        self._cut_speaker_icon = icon
+        c.delete("all")
+        k = px(100) / 100              # the drawing is laid out on a 26 x 22 grid
+        color = self._theme_color("icon")
+        if self._cut_speaker_hover:
+            c.create_rectangle(0, 0, 26 * k, 22 * k, fill=self._theme_color("icon_hover"), width=0)
+        c.create_polygon(*[v * k for v in (3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5)],
+                         fill=color, outline=color)
+        line = max(1.0, 1.6 * k)
+        if icon == "muted":
+            c.create_line(15 * k, 8 * k, 21 * k, 14 * k, fill=color, width=line, capstyle="round")
+            c.create_line(15 * k, 14 * k, 21 * k, 8 * k, fill=color, width=line, capstyle="round")
+        else:
+            for r in (4, 7.5)[:int(icon[-1])]:
+                c.create_arc((12 - r) * k, (11 - r) * k, (12 + r) * k, (11 + r) * k,
+                             start=-50, extent=100, style="arc", outline=color, width=line)
 
     def _cut_post_track_menu(self):
         menu = self.cut_track_menu
