@@ -3240,9 +3240,8 @@ class LosslessVideoApp(_BaseTk):
         self.cut_volume_lbl = tk.Label(parent, bg="#f0f0f0", width=4, anchor="w")
         self.cut_volume_lbl.pack(side="left")
 
-        self.cut_track_btn = tk.Button(parent, text="No audio", state="disabled",
-                                       command=self._cut_post_track_menu)
-        self.cut_track_btn.pack(side="left", padx=(px(8), 0))
+        # Packed only while the video has more than one audio track.
+        self.cut_track_btn = tk.Button(parent, text="", command=self._cut_post_track_menu)
         self.cut_track_menu = tk.Menu(self.cut_track_btn, tearoff=0)
         self.cut_track_var = tk.IntVar(value=0)
         self._cut_track_list = None       # the tracks the menu was built for
@@ -3270,13 +3269,14 @@ class LosslessVideoApp(_BaseTk):
         ids = [t["id"] for t in tracks]
         if current in ids and ids.index(current) != self._wave_track:
             self._start_waveform(ids.index(current))   # the waveform shows the track heard
-        if not tracks:
-            self.cut_track_btn.config(text="No audio", state="disabled")
-        else:
+        if len(tracks) > 1:
             n = ids.index(current) + 1 if current in ids else 0
             text = f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾"
-            self.cut_track_btn.config(text=text,
-                                      state="normal" if len(tracks) > 1 else "disabled")
+            self.cut_track_btn.config(text=text)
+            if not self.cut_track_btn.winfo_manager():
+                self.cut_track_btn.pack(side="left", padx=(px(8), 0))
+        elif self.cut_track_btn.winfo_manager():
+            self.cut_track_btn.pack_forget()
 
     def _draw_cut_speaker(self):
         player, c = self.cut_player, self.cut_mute_btn
@@ -3931,7 +3931,8 @@ class LosslessVideoApp(_BaseTk):
                 mask = render_waveform(path, track, 2400, 64, span=span,
                                        on_start=started).convert("L")
             except Exception as exc:
-                note = "No audio" if "matches no streams" in str(exc) else "Waveform unavailable"
+                # No audio stream: the strip stays empty, without a note.
+                note = "" if "matches no streams" in str(exc) else "Waveform unavailable"
             try:
                 self.after(0, self._on_waveform_ready, gen, key, mask, note)
             except (RuntimeError, tk.TclError):
