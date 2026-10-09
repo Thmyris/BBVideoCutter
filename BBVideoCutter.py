@@ -1352,6 +1352,22 @@ def probe_shown_video_size(ffprobe, path):
     return width, height, turn
 
 
+def _plain_number(value):
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def describe_audio_stream(stream):
+    """'aac · 48 kHz · 2 ch' for one of ffprobe's audio stream entries."""
+    parts = [stream.get("codec_name") or "?"]
+    try:
+        parts.append(f"{_plain_number(int(stream['sample_rate']) / 1000)} kHz")
+    except (KeyError, TypeError, ValueError):
+        pass
+    if stream.get("channels"):
+        parts.append(f"{stream['channels']} ch")
+    return " · ".join(parts)
+
+
 def probe_file_summary(ffprobe, path):
     """(length, video, audio) texts for the Combine list, e.g.
     ("00:01:05", "h264 · 1920×1080 · 29.97 fps", "aac · 48 kHz · 2 ch").
@@ -1377,9 +1393,6 @@ def probe_file_summary(ffprobe, path):
     videos = [s for s in streams if s.get("codec_type") == "video"]
     audios = [s for s in streams if s.get("codec_type") == "audio"]
 
-    def number(value):
-        return f"{value:.3f}".rstrip("0").rstrip(".")
-
     video = "none"
     if videos:
         v = videos[0]
@@ -1389,21 +1402,13 @@ def probe_file_summary(ffprobe, path):
         try:
             num, den = (int(x) for x in str(v.get("avg_frame_rate", "0/0")).split("/"))
             if num and den:
-                parts.append(f"{number(num / den)} fps")
+                parts.append(f"{_plain_number(num / den)} fps")
         except ValueError:
             pass
         video = " · ".join(parts)
     audio = "none"
     if audios:
-        a = audios[0]
-        parts = [a.get("codec_name") or "?"]
-        try:
-            parts.append(f"{number(int(a['sample_rate']) / 1000)} kHz")
-        except (KeyError, TypeError, ValueError):
-            pass
-        if a.get("channels"):
-            parts.append(f"{a['channels']} ch")
-        audio = " · ".join(parts)
+        audio = describe_audio_stream(audios[0])
         if len(audios) > 1:
             audio = f"{len(audios)} tracks: {audio}"
     return length, video, audio
@@ -7231,16 +7236,17 @@ class LosslessVideoApp(_BaseTk):
             audio_result = subprocess.run(
                 [ffprobe, "-v", "error", "-select_streams", "a",
                  "-show_entries", "stream=codec_name,channels,sample_rate",
-                 "-of", "csv=p=0", path],
-                capture_output=True, text=True, check=True, **SUBPROCESS_KWARGS
+                 "-of", "json", path],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                check=True, **SUBPROCESS_KWARGS
             )
+            audio_streams = json.loads(audio_result.stdout or "{}").get("streams") or []
         except Exception as exc:
             messagebox.showerror("Error loading video", str(exc))
             self.status_lbl.config(text="Ready")
             return
 
-        track_lines = [ln for ln in audio_result.stdout.strip().splitlines() if ln.strip()]
-        if not track_lines:
+        if not audio_streams:
             messagebox.showerror(
                 "No audio tracks",
                 "This video doesn't have any audio streams to mix."
@@ -7262,13 +7268,10 @@ class LosslessVideoApp(_BaseTk):
         self.audio_duration_lbl.config(text=f"/ {seconds_to_hms(duration)}")
 
         self.audio_tracks = []
-        for i, line in enumerate(track_lines):
-            codec_name, channels, sample_rate = (line.split(",") + ["", "", ""])[:3]
+        for i, stream in enumerate(audio_streams):
             self.audio_tracks.append({
                 "a_index": i,
-                "codec": codec_name or "?",
-                "channels": channels or "?",
-                "sample_rate": sample_rate or "?",
+                "desc": describe_audio_stream(stream),
                 "enabled_var": tk.BooleanVar(value=True),
                 "volume_slider": None,
                 "volume_lbl": None,
@@ -7317,8 +7320,7 @@ class LosslessVideoApp(_BaseTk):
             ).pack(side="left")
 
             label_text = (
-                f"Track {track['a_index'] + 1}   ({track['codec']} · "
-                f"{track['channels']} ch · {track['sample_rate']} Hz)"
+                f"Track {track['a_index'] + 1}   ({track['desc']})"
             )
             name_lbl = tk.Label(
                 top, text=label_text, bg="#f0f0f0", font=("Segoe UI", 10), anchor="w",
