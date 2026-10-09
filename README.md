@@ -35,7 +35,10 @@ Ctrl/Shift-click to select several rows, Delete to remove them, and Move
 Up/Down or drag to reorder (the dragged rows follow the cursor, and a line
 shows where they will land). Bulk Cut cuts the files in the list's order.
 
-Drag & drop supported throughout. Dark mode under **View**.
+Drag & drop supported throughout. Dark mode under **View**. Under
+**Options**: save to the source video's folder (on) or ask where to save,
+for every tab; warn before overwriting; show the Cut tab's frame-step
+buttons (the `,` and `.` keys step a frame either way).
 
 ## Running from source
 

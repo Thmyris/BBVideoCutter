@@ -2295,6 +2295,9 @@ class LosslessVideoApp(_BaseTk):
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", False)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
+        # Every tab saves next to the source video, or asks where to save.
+        self.save_to_source_var = tk.BooleanVar(
+            value=bool(self.settings.get("save_to_current_folder", True)))
         self._ttk_light_theme = ttk.Style(self).theme_use()
         self._set_treeview_row_height(ttk.Style(self))
 
@@ -2422,6 +2425,11 @@ class LosslessVideoApp(_BaseTk):
         )
 
         options_menu = self._add_menu_bar_menu("Options")
+        options_menu.add_checkbutton(
+            label="Save to current folder",
+            variable=self.save_to_source_var,
+            command=lambda: self._save_option("save_to_current_folder", self.save_to_source_var),
+        )
         options_menu.add_checkbutton(
             label="Warn before overwriting existing files",
             variable=self.warn_overwrite_var,
@@ -2849,13 +2857,6 @@ class LosslessVideoApp(_BaseTk):
         open_btn = tk.Button(header, text="Open Video...", command=self.open_file_for_cut)
         open_btn.pack(side="right", padx=(4, 10))
 
-        self.save_to_source_var = tk.BooleanVar(value=True)
-        save_to_source_chk = tk.Checkbutton(
-            header, text="Save to current folder", variable=self.save_to_source_var,
-            bg="#f0f0f0", anchor="e",
-        )
-        save_to_source_chk.pack(side="right", padx=(10, 4))
-
         # ---- preview (a Canvas, which scales properly with the window --
         #      unlike a Label, a Canvas's width/height are always pixels)
         preview_frame = tk.Frame(root, bg="black")
@@ -3081,6 +3082,10 @@ class LosslessVideoApp(_BaseTk):
             if "Left" in sequence or "Right" in sequence:
                 self.notebook.bind(sequence, lambda e, a=action, s=sequence: self._on_cut_key(e, a, s))
 
+    def _save_option(self, key, var):
+        self.settings[key] = var.get()
+        save_settings(self.settings)
+
     def _on_show_frame_buttons_toggled(self, save=True):
         if getattr(self, "cut_frame_buttons", None):
             back, fwd = self.cut_frame_buttons
@@ -3091,8 +3096,7 @@ class LosslessVideoApp(_BaseTk):
                 back.pack_forget()
                 fwd.pack_forget()
         if save:
-            self.settings["show_frame_buttons"] = self.show_frame_buttons_var.get()
-            save_settings(self.settings)
+            self._save_option("show_frame_buttons", self.show_frame_buttons_var)
 
     def _build_cut_audio_controls(self, parent):
         """Mute, volume and the audio track heard. A cut keeps every audio
@@ -4812,12 +4816,6 @@ class LosslessVideoApp(_BaseTk):
                                                  command=self._combine_toggle_preview)
             self.combine_preview_btn.pack(pady=(10, 2))
 
-        self.combine_save_to_source_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            side, text="Save to\ncurrent folder", variable=self.combine_save_to_source_var,
-            bg="#f0f0f0", justify="left", anchor="w",
-        ).pack(pady=(16, 2), anchor="w")
-
         footer = tk.Frame(root, bg="#f0f0f0")
         footer.grid(row=2, column=0, sticky="ew", padx=3, pady=(4, 2))
         tk.Label(footer, text="Note: lossless joining requires all videos to share the "
@@ -5060,7 +5058,7 @@ class LosslessVideoApp(_BaseTk):
         first_ext = os.path.splitext(first_path)[1]
         default_name = f"{first_base}.COMBINED{first_ext}"
 
-        from_dialog = not self.combine_save_to_source_var.get()
+        from_dialog = not self.save_to_source_var.get()
         if not from_dialog:
             out_path = os.path.join(first_dir, default_name)
         else:
@@ -5261,12 +5259,6 @@ class LosslessVideoApp(_BaseTk):
                                               command=self._bulk_preview_selected)
             self.bulk_preview_btn.pack(pady=(10, 2))
             self.bulk_tree.bind("<Double-Button-1>", self._bulk_tree_double_click)
-
-        self.bulk_save_to_source_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            side, text="Save to\ncurrent folder", variable=self.bulk_save_to_source_var,
-            bg="#f0f0f0", justify="left", anchor="w",
-        ).pack(pady=(16, 2), anchor="w")
 
         footer = tk.Frame(root, bg="#f0f0f0")
         footer.grid(row=2, column=0, sticky="ew", padx=3, pady=(4, 2))
@@ -5513,7 +5505,7 @@ class LosslessVideoApp(_BaseTk):
             )
             return
 
-        if self.bulk_save_to_source_var.get():
+        if self.save_to_source_var.get():
             output_dir = None  # each file saved next to itself
         else:
             chosen = filedialog.askdirectory(title="Choose output folder for bulk cuts")
@@ -5705,12 +5697,6 @@ class LosslessVideoApp(_BaseTk):
         tk.Button(
             header, text="Open Video...", command=self.open_file_for_resize
         ).pack(side="right", padx=(4, 10))
-
-        self.resize_save_to_source_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            header, text="Save to current folder", variable=self.resize_save_to_source_var,
-            bg="#f0f0f0", anchor="e",
-        ).pack(side="right", padx=(10, 4))
 
         tk.Button(
             header, text="How does crop re-encoding work?",
@@ -6852,7 +6838,7 @@ class LosslessVideoApp(_BaseTk):
         turn = self.resize_user_rotation
         default_name = f"{base_name}.CROP.{crop_w}x{crop_h}{f'.ROT{turn}' if turn else ''}.mp4"
 
-        from_dialog = not self.resize_save_to_source_var.get()
+        from_dialog = not self.save_to_source_var.get()
         if not from_dialog:
             out_path = os.path.join(source_dir, default_name)
             if os.path.abspath(out_path) == os.path.abspath(self.resize_input_path):
@@ -6944,7 +6930,7 @@ class LosslessVideoApp(_BaseTk):
         ext = ext.lower() if ext.lower() in (".mp4", ".m4v", ".mov") else ".mp4"
         default_name = f"{base_name}.ROT{turn}{ext}"
 
-        from_dialog = not self.resize_save_to_source_var.get()
+        from_dialog = not self.save_to_source_var.get()
         if not from_dialog:
             out_path = os.path.join(source_dir, default_name)
         else:
@@ -7059,12 +7045,6 @@ class LosslessVideoApp(_BaseTk):
         tk.Button(
             header, text="Open Video...", command=self.open_file_for_audio
         ).pack(side="right", padx=(4, 10))
-
-        self.audio_save_to_source_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            header, text="Save to current folder", variable=self.audio_save_to_source_var,
-            bg="#f0f0f0", anchor="e",
-        ).pack(side="right", padx=(10, 4))
 
         # ---- preview
         preview_frame = tk.Frame(root, bg="black")
@@ -7794,7 +7774,7 @@ class LosslessVideoApp(_BaseTk):
         ext = os.path.splitext(self.audio_input_path)[1] or ".mp4"
         default_name = f"{base_name}.AUDIOMIX{ext}"
 
-        from_dialog = not self.audio_save_to_source_var.get()
+        from_dialog = not self.save_to_source_var.get()
         if not from_dialog:
             out_path = os.path.join(source_dir, default_name)
             if os.path.abspath(out_path) == os.path.abspath(self.audio_input_path):
