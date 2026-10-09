@@ -1707,6 +1707,58 @@ def edl_url(segments):
     return "edl://" + ";".join(entries)
 
 
+class Tooltip:
+    """A hint shown under a widget once the mouse has rested on it for a
+    moment, gone when the mouse leaves or clicks. It is a label placed in
+    the widget's window rather than a window of its own, so it can never
+    take the focus. text is a string or a function returning one (for a
+    hint that follows the widget's state). Light colors, themed like any
+    other widget."""
+    DELAY_MS = 500
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self._after_id = None
+        self.label = None
+        widget.tooltip = self
+        widget.bind("<Enter>", self._schedule, add="+")
+        for sequence in ("<Leave>", "<ButtonPress>", "<Destroy>"):
+            widget.bind(sequence, self.hide, add="+")
+
+    def _schedule(self, event=None):
+        self.hide()
+        self._after_id = self.widget.after(self.DELAY_MS, self.show)
+
+    def show(self):
+        self._after_id = None
+        text = self.text() if callable(self.text) else self.text
+        if not text or not self.widget.winfo_ismapped():
+            return
+        root = self.widget.winfo_toplevel()
+        # Made afresh each time: the newest child is drawn over the others.
+        self.label = tk.Label(root, text=text, bg="#f0f0f0", fg="#000000",
+                              font=("Segoe UI", 9), padx=px(6), pady=px(2),
+                              highlightthickness=1, highlightbackground="#828790",
+                              highlightcolor="#828790")
+        self.label.update_idletasks()
+        w, h = self.label.winfo_reqwidth(), self.label.winfo_reqheight()
+        x = self.widget.winfo_rootx() - root.winfo_rootx()
+        y = self.widget.winfo_rooty() - root.winfo_rooty() + self.widget.winfo_height() + px(3)
+        if y + h > root.winfo_height():          # no room below: above it
+            y = self.widget.winfo_rooty() - root.winfo_rooty() - h - px(3)
+        x = max(0, min(x, root.winfo_width() - w))
+        self.label.place(x=x, y=max(0, y))
+
+    def hide(self, event=None):
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+        if self.label is not None:
+            self.label.destroy()
+            self.label = None
+
+
 class ClipPreview:
     """A player with its own controls, for watching clips back to back as
     one video (an edl_url): the Combine tab's videos in their joined
@@ -1738,6 +1790,7 @@ class ClipPreview:
             b.pack(side="left", padx=1)
             self.buttons.append(b)
         self.play_btn = self.buttons[1]
+        Tooltip(self.play_btn, "Shortcut: Space")
         self.time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27, font=("Segoe UI", 9))
         self.time_lbl.pack(side="left", padx=6)
         # width=1: it takes the room left over (and is cut short with … to
@@ -2878,17 +2931,21 @@ class LosslessVideoApp(_BaseTk):
         time_row = tk.Frame(controls, bg="#f0f0f0")
         time_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
         self.handle_var = tk.StringVar(value="end")
-        tk.Radiobutton(time_row, text="Start:", variable=self.handle_var, value="start",
-                        bg="#f0f0f0", command=lambda: self._set_active_handle("start")
-                        ).pack(side="left")
+        start_radio = tk.Radiobutton(
+            time_row, text="Start:", variable=self.handle_var, value="start",
+            bg="#f0f0f0", command=lambda: self._set_active_handle("start"))
+        start_radio.pack(side="left")
+        Tooltip(start_radio, "Shortcut: I sets the start at the frame on screen")
         self.start_entry = tk.Entry(time_row, width=13, justify="center")
         self.start_entry.pack(side="left", padx=(2, 20))
         self.start_entry.bind("<Return>", lambda e: self._on_start_entry())
         self.start_entry.bind("<FocusOut>", lambda e: self._on_start_entry())
 
-        tk.Radiobutton(time_row, text="End:", variable=self.handle_var, value="end",
-                        bg="#f0f0f0", command=lambda: self._set_active_handle("end")
-                        ).pack(side="left")
+        end_radio = tk.Radiobutton(
+            time_row, text="End:", variable=self.handle_var, value="end",
+            bg="#f0f0f0", command=lambda: self._set_active_handle("end"))
+        end_radio.pack(side="left")
+        Tooltip(end_radio, "Shortcut: O sets the end at the frame on screen")
         self.end_entry = tk.Entry(time_row, width=13, justify="center")
         self.end_entry.pack(side="left", padx=2)
         self.end_entry.bind("<Return>", lambda e: self._on_end_entry())
@@ -2942,8 +2999,9 @@ class LosslessVideoApp(_BaseTk):
         self.cut_send_btn = tk.Button(save_row, height=2, width=19,
                                       command=self._cut_send_ranges_to_bulk)
         self.cut_send_btn.pack(side="right", padx=(2, 0))
-        self.cut_add_range_btn = tk.Button(save_row, text="Add range (A)", height=2, width=13,
+        self.cut_add_range_btn = tk.Button(save_row, text="Add range", height=2, width=13,
                                            command=self._cut_add_range)
+        Tooltip(self.cut_add_range_btn, "Shortcut: A")
         self.cut_add_range_btn.pack(side="right", padx=(2, 0))
         self.save_btn = tk.Button(save_row, text="Save this Scene!", height=2,
                                    font=("Segoe UI", 10, "bold"),
@@ -3028,6 +3086,9 @@ class LosslessVideoApp(_BaseTk):
         # Shown only with Options > Show frame by frame movement buttons;
         # the , and . keys step a frame either way.
         self.cut_frame_buttons = (frame_back, frame_fwd)
+        Tooltip(self.cut_play_btn, "Shortcut: Space")
+        Tooltip(frame_back, "Shortcut: ,")
+        Tooltip(frame_fwd, "Shortcut: .")
         self._on_show_frame_buttons_toggled(save=False)
         self.cut_time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27,
                                      font=("Segoe UI", 9))
@@ -3105,6 +3166,8 @@ class LosslessVideoApp(_BaseTk):
 
         self.cut_mute_btn.bind("<Enter>", lambda e: hover(True), add="+")
         self.cut_mute_btn.bind("<Leave>", lambda e: hover(False), add="+")
+        Tooltip(self.cut_mute_btn,
+                lambda: f"{'Unmute' if self.cut_player.muted else 'Mute'} (shortcut: M)")
         self.cut_volume_slider = TimeSlider(parent, command=self._cut_volume_changed,
                                             width=100, height=22)
         self.cut_volume_slider.config_range(to=100.0)
@@ -3112,6 +3175,7 @@ class LosslessVideoApp(_BaseTk):
         self.cut_volume_slider.pack(side="left")
         self.cut_volume_slider.bind(
             "<MouseWheel>", lambda e: self._cut_volume_step(5 if e.delta > 0 else -5))
+        Tooltip(self.cut_volume_slider, "Shortcuts: Up / Down, or the mouse wheel")
         self.cut_volume_lbl = tk.Label(parent, bg="#f0f0f0", width=4, anchor="w")
         self.cut_volume_lbl.pack(side="left")
 
@@ -4796,7 +4860,10 @@ class LosslessVideoApp(_BaseTk):
         side = tk.Frame(body, bg="#f0f0f0")
         side.grid(row=0, column=1, sticky="ns", padx=(8, 0))
         tk.Button(side, text="Add Files...", width=16, command=self.add_files_for_combine).pack(pady=2)
-        tk.Button(side, text="Remove Selected", width=16, command=self._combine_remove_selected).pack(pady=2)
+        remove_btn = tk.Button(side, text="Remove Selected", width=16,
+                               command=self._combine_remove_selected)
+        remove_btn.pack(pady=2)
+        Tooltip(remove_btn, "Shortcut: Delete")
         tk.Button(side, text="Move Up", width=16, command=lambda: self._combine_move(-1)).pack(pady=2)
         tk.Button(side, text="Move Down", width=16, command=lambda: self._combine_move(1)).pack(pady=2)
         tk.Button(side, text="Clear All", width=16, command=self._combine_clear).pack(pady=2)
@@ -5238,7 +5305,10 @@ class LosslessVideoApp(_BaseTk):
         side = tk.Frame(body, bg="#f0f0f0")
         side.grid(row=0, column=2, sticky="ns", padx=(8, 0))
         tk.Button(side, text="Add Files...", width=16, command=self.add_files_for_bulk).pack(pady=2)
-        tk.Button(side, text="Remove Selected", width=16, command=self._bulk_remove_selected).pack(pady=2)
+        remove_btn = tk.Button(side, text="Remove Selected", width=16,
+                               command=self._bulk_remove_selected)
+        remove_btn.pack(pady=2)
+        Tooltip(remove_btn, "Shortcut: Delete")
         tk.Button(side, text="Move Up", width=16, command=lambda: self.bulk_table.move(-1)).pack(pady=2)
         tk.Button(side, text="Move Down", width=16, command=lambda: self.bulk_table.move(1)).pack(pady=2)
         tk.Button(side, text="Clear All", width=16, command=self._bulk_clear).pack(pady=2)
@@ -5738,6 +5808,7 @@ class LosslessVideoApp(_BaseTk):
             self.resize_play_btn = tk.Button(time_row, text="▶ Play", width=8, state="disabled",
                                              command=self._resize_toggle_play)
             self.resize_play_btn.pack(side="left", padx=(0, 12))
+            Tooltip(self.resize_play_btn, "Shortcut: Space")
         tk.Label(time_row, text="Frame:", bg="#f0f0f0").pack(side="left")
         self.resize_time_lbl = tk.Label(
             time_row, text="00:00:00", width=12, bg="#f0f0f0", font=("Consolas", 10)
