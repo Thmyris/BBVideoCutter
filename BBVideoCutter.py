@@ -2659,6 +2659,29 @@ class LosslessVideoApp(_BaseTk):
         )
 
     # ====================================================================
+    # Shared: the empty "Open or drop a video to begin" area
+    # ====================================================================
+    OPEN_PROMPT = "Open or drop a video to begin"
+
+    def _make_open_button(self, canvas, command, on_drop):
+        """The "Open Video..." button of a tab's empty video area; drawn
+        by _draw_open_prompt. A drop on it counts as a drop on the tab."""
+        button = tk.Button(canvas, text="Open Video...", command=command,
+                           padx=px(12), pady=px(3))
+        button.drop_target_register(DND_FILES)
+        button.dnd_bind("<<Drop>>", on_drop)
+        return button
+
+    def _draw_open_prompt(self, canvas, button, w, h):
+        """The prompt text with the Open Video button under it. The button
+        is a canvas window item, so clearing the canvas for a video frame
+        takes it away too."""
+        canvas.create_text(w / 2, h / 2 - px(16), text=self.OPEN_PROMPT, fill="#888888",
+                           font=("Segoe UI", 12), tags=("placeholder",))
+        canvas.create_window(w / 2, h / 2 + px(4), window=button, anchor="n",
+                             tags=("placeholder",))
+
+    # ====================================================================
     # Shared: move the window by dragging an empty "drop a video" area
     # ====================================================================
     def _bind_window_drag(self, widget, is_empty):
@@ -2984,9 +3007,6 @@ class LosslessVideoApp(_BaseTk):
                                   font=("Segoe UI", 9))
         self.info_lbl.pack(side="right")
 
-        open_btn = tk.Button(header, text="Open Video...", command=self.open_file_for_cut)
-        open_btn.pack(side="right", padx=(4, 10))
-
         # ---- preview (a Canvas, which scales properly with the window --
         #      unlike a Label, a Canvas's width/height are always pixels)
         preview_frame = tk.Frame(root, bg="black")
@@ -2995,7 +3015,9 @@ class LosslessVideoApp(_BaseTk):
         self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda e: self._redraw_preview_canvas())
         self._bind_window_drag(self.preview_canvas, lambda e: not self.input_path)
-        self._draw_preview_placeholder("Open or drop a video to begin")
+        self.cut_open_btn = self._make_open_button(
+            self.preview_canvas, self.open_file_for_cut, self._on_drop_cut)
+        self._draw_preview_placeholder(self.OPEN_PROMPT)
 
         # The embedded player covers the still-frame canvas while a video is
         # loaded (see _cut_use_player); without libmpv there is no player
@@ -3553,15 +3575,16 @@ class LosslessVideoApp(_BaseTk):
         c.delete("all")
         w = c.winfo_width() or 400
         h = c.winfo_height() or 225
-        c.create_text(w / 2, h / 2, text=text, fill="#888888",
-                       font=("Segoe UI", 12))
+        if text == self.OPEN_PROMPT:
+            self._draw_open_prompt(c, self.cut_open_btn, w, h)
+        else:
+            c.create_text(w / 2, h / 2, text=text, fill="#888888",
+                          font=("Segoe UI", 12))
 
     def _redraw_preview_canvas(self):
         c = self.preview_canvas
         if self.raw_preview_img is None:
-            self._draw_preview_placeholder(
-                "Open or drop a video to begin" if not self.input_path else ""
-            )
+            self._draw_preview_placeholder(self.OPEN_PROMPT if not self.input_path else "")
             return
         cw = c.winfo_width()
         ch = c.winfo_height()
@@ -3612,6 +3635,9 @@ class LosslessVideoApp(_BaseTk):
 
         self.filename_lbl.config(text=os.path.basename(path))
         self.info_lbl.config(text=f"[{seconds_to_hms(duration)}]   {format_size(self.file_size)}")
+        # Takes away the empty-area prompt and its Open Video button (the
+        # player covers the canvas, which isn't redrawn otherwise).
+        self._redraw_preview_canvas()
 
         self._set_cut_controls_enabled(True)
         self._sync_entries()
@@ -5941,10 +5967,6 @@ class LosslessVideoApp(_BaseTk):
         self.resize_info_lbl.pack(side="right")
 
         tk.Button(
-            header, text="Open Video...", command=self.open_file_for_resize
-        ).pack(side="right", padx=(4, 10))
-
-        tk.Button(
             header, text="How does crop re-encoding work?",
             command=self._show_crop_info
         ).pack(side="right", padx=(4, 8))
@@ -5981,7 +6003,9 @@ class LosslessVideoApp(_BaseTk):
         self.resize_canvas.bind("<Button-4>", self._resize_mouse_wheel)
         self.resize_canvas.bind("<Button-5>", self._resize_mouse_wheel)
         self._bind_window_drag(self.resize_canvas, lambda e: not self.resize_input_path)
-        self._draw_resize_placeholder("Open or drop a video to begin")
+        self.resize_open_btn = self._make_open_button(
+            self.resize_canvas, self.open_file_for_resize, self._on_drop_resize)
+        self._draw_resize_placeholder(self.OPEN_PROMPT)
 
         controls = tk.Frame(root, bg="#f0f0f0")
         controls.grid(row=2, column=0, sticky="ew", padx=3, pady=(2, 4))
@@ -6172,9 +6196,12 @@ class LosslessVideoApp(_BaseTk):
         self.resize_canvas.delete("all")
         w = self.resize_canvas.winfo_width() or 700
         h = self.resize_canvas.winfo_height() or 400
+        if text == self.OPEN_PROMPT:
+            self._draw_open_prompt(self.resize_canvas, self.resize_open_btn, w, h)
+            return
         self.resize_canvas.create_text(
             w / 2, h / 2, text=text, fill="#888888",
-            font=("Segoe UI", 12)
+            font=("Segoe UI", 12), tags=("placeholder",)
         )
 
     def open_file_for_resize(self):
@@ -6620,8 +6647,7 @@ class LosslessVideoApp(_BaseTk):
             self._resize_bg_image_id = None
             self._resize_bg_cache_key = None
             self._draw_resize_placeholder(
-                "Open or drop a video to begin"
-                if not self.resize_input_path else "Loading frame..."
+                self.OPEN_PROMPT if not self.resize_input_path else "Loading frame..."
             )
             return
 
@@ -6631,6 +6657,7 @@ class LosslessVideoApp(_BaseTk):
 
         scale, dx0, dy0, dw, dh = geom
         cache_key = (id(self.resize_frame_img), dw, dh)
+        c.delete("placeholder")   # the empty-area prompt, Open Video button included
 
         if self._resize_player_on:
             self._resize_place_player(geom)
@@ -7289,9 +7316,6 @@ class LosslessVideoApp(_BaseTk):
             header, text="", anchor="e", bg="#f0f0f0", font=("Segoe UI", 9)
         )
         self.audio_info_lbl.pack(side="right")
-        tk.Button(
-            header, text="Open Video...", command=self.open_file_for_audio
-        ).pack(side="right", padx=(4, 10))
 
         # ---- preview
         preview_frame = tk.Frame(root, bg="black")
@@ -7300,7 +7324,9 @@ class LosslessVideoApp(_BaseTk):
         self.audio_canvas.pack(fill="both", expand=True)
         self.audio_canvas.bind("<Configure>", lambda e: self._redraw_audio_canvas())
         self._bind_window_drag(self.audio_canvas, lambda e: not self.audio_input_path)
-        self._draw_audio_placeholder("Open or drop a video to begin")
+        self.audio_open_btn = self._make_open_button(
+            self.audio_canvas, self.open_file_for_audio, self._on_drop_audio)
+        self._draw_audio_placeholder(self.OPEN_PROMPT)
 
         # ---- playback controls
         controls = tk.Frame(root, bg="#f0f0f0")
@@ -7430,13 +7456,16 @@ class LosslessVideoApp(_BaseTk):
         self._audio_bg_cache_key = None
         w = c.winfo_width() or 700
         h = c.winfo_height() or 350
-        c.create_text(w / 2, h / 2, text=text, fill="#888888", font=("Segoe UI", 12))
+        if text == self.OPEN_PROMPT:
+            self._draw_open_prompt(c, self.audio_open_btn, w, h)
+        else:
+            c.create_text(w / 2, h / 2, text=text, fill="#888888", font=("Segoe UI", 12))
 
     def _redraw_audio_canvas(self):
         c = self.audio_canvas
         if not self.audio_frame_img:
             self._draw_audio_placeholder(
-                "Open or drop a video to begin" if not self.audio_input_path else "Loading frame..."
+                self.OPEN_PROMPT if not self.audio_input_path else "Loading frame..."
             )
             return
         cw = c.winfo_width()
