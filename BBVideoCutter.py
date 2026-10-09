@@ -1608,6 +1608,12 @@ class VideoPlayer:
         if self.mpv is not None:
             self.mpv.video_crop = spec
 
+    def set_video_rotate(self, degrees):
+        """Turns the video clockwise by degrees (0/90/180/270), on top of the
+        file's own rotation. video-crop stays in the stored frame's pixels."""
+        if self.mpv is not None:
+            self.mpv.video_rotate = degrees
+
     def show_overlay(self, ass_events, width, height):
         """Draws ASS events (one per line) over the video, in a coordinate
         space of width x height spanning the player's frame."""
@@ -1879,13 +1885,16 @@ class LosslessVideoApp(_BaseTk):
         # Resize/Crop tab state
         self.resize_input_path = None
         self.resize_duration = 0.0
-        # The video's size as it is shown, i.e. after its rotation: the
-        # still frames, the player and ffmpeg's crop filter all work on
-        # the turned frame, so the crop box does too.
+        # The video's size as it is shown, i.e. after its rotation and the
+        # Rotate buttons' turn: the still frames, the player and ffmpeg's
+        # crop filter all work on the turned frame, so the crop box does too.
         self.resize_src_w = 0
         self.resize_src_h = 0
-        self.resize_rotation = 0         # clockwise turn applied to the stored frames
-        self.resize_frame_img = None
+        self.resize_rotation = 0         # clockwise turn the file asks for, on the stored frames
+        self.resize_user_rotation = 0    # clockwise turn picked with the Rotate buttons, on top
+        self.resize_rotate_buttons = {}  # 0/90/180/270 -> its button
+        self.resize_frame_raw = None     # the still frame as ffmpeg gives it (file's turn only)
+        self.resize_frame_img = None     # ...and turned by the Rotate buttons' turn too
         self.resize_frame_photo = None
         self.resize_crop = None          # x0, y0, x1, y1 in (shown) video pixels
         self.resize_drag_mode = None     # "move", "nw", "ne", "sw", "se", "new"
@@ -5503,6 +5512,17 @@ class LosslessVideoApp(_BaseTk):
             coords_row, text="Apply", command=self._resize_apply_crop_entries
         ).pack(side="left", padx=(8, 2))
 
+        # Turn the picture clockwise, on top of however the file already
+        # shows it. The saved video comes out turned the same way.
+        tk.Label(coords_row, text="Rotate ↻:", bg="#f0f0f0").pack(side="left", padx=(16, 2))
+        self.resize_rotate_buttons = {}
+        for turn in (0, 90, 180, 270):
+            btn = tk.Button(coords_row, text=f"{turn}°", width=4,
+                            command=lambda t=turn: self._resize_set_rotation(t))
+            btn.pack(side="left", padx=1)
+            self.resize_rotate_buttons[turn] = btn
+        self._resize_highlight_rotate_button()
+
         # Zoom controls for fine-tuning the crop edges precisely.
         zoom_row = tk.Frame(controls, bg="#f0f0f0")
         zoom_row.pack(pady=(0, 2))
@@ -5559,6 +5579,9 @@ class LosslessVideoApp(_BaseTk):
             "chosen to keep processing fast rather than maximally compressed. "
             "It is NOT bit-for-bit lossless the way Cut/Combine are, because "
             "re-encoding always involves at least some quantization.\n\n"
+            "Rotate turns the frames in that same re-encode (ffmpeg's transpose "
+            "filter, applied before the crop), so a turn adds no second pass "
+            "and no extra quality loss.\n\n"
             "The pixel format is forced to yuv420p for the widest player/"
             "device compatibility.\n\n"
             "The audio track is NOT re-encoded — cropping is purely a video/"
@@ -5614,6 +5637,9 @@ class LosslessVideoApp(_BaseTk):
         self.resize_src_w = src_w
         self.resize_src_h = src_h
         self.resize_rotation = rotation
+        self.resize_user_rotation = 0
+        self._resize_highlight_rotate_button()
+        self.resize_frame_raw = None
         self.resize_time_sec = 0.0
         self.resize_crop = (0, 0, src_w, src_h)
         self.resize_aspect_lock = (src_w, src_h)
@@ -5660,6 +5686,7 @@ class LosslessVideoApp(_BaseTk):
             volume, muted = self._player_audio_settings()
             self.resize_player.set_volume(volume)
             self.resize_player.set_muted(muted)
+            self.resize_player.set_video_rotate(self.resize_user_rotation)
             self.resize_player.load(path)
         except RuntimeError as exc:
             self.status_lbl.config(text=str(exc))
@@ -5678,6 +5705,7 @@ class LosslessVideoApp(_BaseTk):
         still frames (when the player can't open the file)."""
         self._resize_player_on = on
         self._resize_view = None
+        self.resize_frame_raw = None
         self.resize_frame_img = None
         self.resize_canvas.delete("all")
         self._resize_bg_image_id = None
@@ -5746,9 +5774,9 @@ class LosslessVideoApp(_BaseTk):
     def _resize_stored_rect_spec(self, x0, y0, x1, y1):
         """mpv's video-crop "WxH+X+Y" for a rect of the shown (turned)
         frame: video-crop is in the stored frame's pixels, before mpv turns
-        it the way the file asks."""
+        it the way the file asks and then by the Rotate buttons' turn."""
         w, h = self.resize_src_w, self.resize_src_h   # shown size
-        turn = self.resize_rotation
+        turn = (self.resize_rotation + self.resize_user_rotation) % 360
         if turn == 90:      # shown x = stored height - stored y, shown y = stored x
             x0, x1, y0, y1 = y0, y1, w - x1, w - x0
         elif turn == 180:
@@ -5943,8 +5971,18 @@ class LosslessVideoApp(_BaseTk):
     def _resize_set_frame_if_current(self, img, request_id):
         if request_id != self.resize_request_id:
             return
-        self.resize_frame_img = img
+        self.resize_frame_raw = img
+        self.resize_frame_img = self._resize_turned_frame(img)
         self._redraw_resize_canvas()
+
+    def _resize_turned_frame(self, img):
+        """img (a still frame, which ffmpeg already turned the way the file
+        asks) turned clockwise by the Rotate buttons' turn."""
+        if img is None or not self.resize_user_rotation:
+            return img
+        transpose = getattr(Image, "Transpose", Image)    # PIL's turns are counterclockwise
+        return img.transpose({90: transpose.ROTATE_270, 180: transpose.ROTATE_180,
+                              270: transpose.ROTATE_90}[self.resize_user_rotation])
 
     def _resize_canvas_geometry(self):
         c = self.resize_canvas
@@ -6412,6 +6450,51 @@ class LosslessVideoApp(_BaseTk):
         self._resize_update_labels()
         self._redraw_resize_canvas()
 
+    def _resize_highlight_rotate_button(self):
+        for turn, btn in self.resize_rotate_buttons.items():
+            active = turn == self.resize_user_rotation
+            self._configure_light(
+                btn,
+                relief="sunken" if active else "raised",
+                bg="#cfe2ff" if active else self._resize_button_default_bg,
+            )
+
+    def _resize_set_rotation(self, turn):
+        """Turns the picture clockwise by turn degrees, on top of the file's
+        own rotation. The crop box turns with the picture, so it keeps
+        covering the same part of the video."""
+        if not self.resize_input_path:
+            return
+        steps = (turn - self.resize_user_rotation) % 360 // 90
+        if not steps:
+            return
+        for _ in range(steps):
+            # 90° clockwise: the point (x, y) of a W×H frame goes to (H - y, x)
+            # of the H×W one.
+            x0, y0, x1, y1 = self.resize_crop
+            h = self.resize_src_h
+            self.resize_crop = (h - y1, x0, h - y0, x1)
+            self.resize_src_w, self.resize_src_h = h, self.resize_src_w
+        if steps % 2:
+            # The box's shape turned too, so 16:9 is now 9:16 (Original and
+            # Freeform stay as they are).
+            if self.resize_aspect_lock:
+                self.resize_aspect_lock = self.resize_aspect_lock[::-1]
+            if ":" in (self.resize_aspect_key or ""):
+                self.resize_aspect_key = ":".join(self.resize_aspect_key.split(":")[::-1])
+            self._resize_highlight_aspect_button()
+        self.resize_user_rotation = turn
+        self._resize_highlight_rotate_button()
+        self.resize_info_lbl.config(
+            text=f"{self.resize_src_w}×{self.resize_src_h}   [{seconds_to_hms(self.resize_duration)}]")
+        if self._resize_player_on:
+            self.resize_player.set_video_rotate(turn)
+            self._resize_view = None                  # re-place it at the turned shape
+        else:
+            self.resize_frame_img = self._resize_turned_frame(self.resize_frame_raw)
+        self._resize_update_labels()
+        self._redraw_resize_canvas()
+
     def _resize_save_clicked(self):
         if not self.resize_input_path or not self.resize_crop:
             return
@@ -6424,7 +6507,8 @@ class LosslessVideoApp(_BaseTk):
 
         source_dir = os.path.dirname(os.path.abspath(self.resize_input_path))
         base_name = os.path.splitext(os.path.basename(self.resize_input_path))[0]
-        default_name = f"{base_name}.CROP.{crop_w}x{crop_h}.mp4"
+        turn = self.resize_user_rotation
+        default_name = f"{base_name}.CROP.{crop_w}x{crop_h}{f'.ROT{turn}' if turn else ''}.mp4"
 
         from_dialog = not self.resize_save_to_source_var.get()
         if not from_dialog:
@@ -6450,11 +6534,13 @@ class LosslessVideoApp(_BaseTk):
         crop = self.resize_crop
         threading.Thread(
             target=self._resize_run_crop,
-            args=(out_path, crop),
+            args=(out_path, crop, turn),
             daemon=True
         ).start()
 
-    def _resize_run_crop(self, out_path, crop):
+    def _resize_run_crop(self, out_path, crop, turn=0):
+        """Saves the crop box's part of the video, after turning the picture
+        clockwise by turn (crop is in the turned frame's pixels)."""
         try:
             ffmpeg = find_exe("ffmpeg")
             x0, y0, x1, y1 = crop
@@ -6463,8 +6549,13 @@ class LosslessVideoApp(_BaseTk):
             # Arbitrary spatial cropping cannot be done with -c copy because the
             # encoded macroblocks/frames still contain the pixels outside the crop.
             # Use fast H.264 re-encoding (GPU-accelerated when available) while
-            # copying the existing audio stream.
+            # copying the existing audio stream. ffmpeg has already turned the
+            # frames the way the file asks before -vf, so the Rotate buttons'
+            # turn goes on top, then the crop.
             vf = f"crop={crop_w}:{crop_h}:{x0}:{y0}"
+            rotate = {90: "transpose=clock", 180: "hflip,vflip", 270: "transpose=cclock"}.get(turn)
+            if rotate:
+                vf = f"{rotate},{vf}"
 
             def build_cmd(encoder_args):
                 return [
