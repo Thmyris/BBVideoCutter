@@ -1228,6 +1228,18 @@ def load_mpv():
     return mpv
 
 
+def describe_audio_track(track):
+    """Menu label for one of mpv's track-list entries, e.g.
+    '2: Commentary [eng] (aac, 2 ch)'."""
+    label = str(track.get("id", "?"))
+    name = " ".join(str(v) for v in (track.get("title"),
+                                      f"[{track['lang']}]" if track.get("lang") else None) if v)
+    details = ", ".join(str(v) for v in (
+        track.get("codec"),
+        f"{track['demux-channel-count']} ch" if track.get("demux-channel-count") else None) if v)
+    return label + (f": {name}" if name else "") + (f" ({details})" if details else "")
+
+
 class VideoPlayer:
     """libmpv playing into a Tk frame (self.frame), created on the first
     load. mpv reports property changes on its own thread; those only land
@@ -1237,7 +1249,8 @@ class VideoPlayer:
     # Extra mpv options for every player; the tests use {"ao": "null"} so
     # nothing is heard.
     extra_options = {}
-    OBSERVED = ("time-pos", "pause", "duration", "eof-reached", "container-fps", "path")
+    OBSERVED = ("time-pos", "pause", "duration", "eof-reached", "container-fps", "path",
+                "track-list", "aid")
 
     def __init__(self, parent, on_change=None):
         self.frame = tk.Frame(parent, bg="black", takefocus=0)
@@ -1247,6 +1260,9 @@ class VideoPlayer:
         self._poll_id = None
         self._last_seen = None
         self._disabled_windows = set()
+        # Kept here too, so they can be set before mpv is started.
+        self.volume = 100.0
+        self.muted = False
 
     # ---- life cycle ----------------------------------------------------
     def _ensure_mpv(self):
@@ -1267,6 +1283,7 @@ class VideoPlayer:
             input_default_bindings=False, input_vo_keyboard=False,
             osc=False, osd_level=0, load_scripts=False, ytdl=False,
             sub_auto="no", audio_file_auto="no",
+            volume=self.volume, mute="yes" if self.muted else "no",
         )
         options.update(self.extra_options)
         self.mpv = mpv.MPV(**options)
@@ -1363,6 +1380,20 @@ class VideoPlayer:
         fps = self.state.get("container-fps")
         return 1.0 / fps if fps and fps > 0 else 1.0 / 30
 
+    @property
+    def audio_tracks(self):
+        """The loaded file's audio tracks: mpv's track-list entries (id,
+        title, lang, codec, demux-channel-count...), in file order."""
+        if not self.loaded:
+            return []
+        return [t for t in self.state.get("track-list") or [] if t.get("type") == "audio"]
+
+    @property
+    def audio_track(self):
+        """The id of the audio track being played, or None."""
+        aid = self.state.get("aid")
+        return aid if isinstance(aid, int) and not isinstance(aid, bool) else None
+
     # ---- commands --------------------------------------------------------
     def _async(self, *args):
         # Asynchronous, so the UI never waits on mpv; errors (a seek past
@@ -1415,6 +1446,21 @@ class VideoPlayer:
     def frame_step(self, forward=True):
         if self.mpv is not None:
             self._async("frame-step" if forward else "frame-back-step")
+
+    def set_volume(self, volume):
+        """volume: 0-100 (percent)."""
+        self.volume = max(0.0, min(100.0, float(volume)))
+        if self.mpv is not None:
+            self.mpv.volume = self.volume
+
+    def set_muted(self, muted):
+        self.muted = bool(muted)
+        if self.mpv is not None:
+            self.mpv.mute = self.muted
+
+    def set_audio_track(self, track_id):
+        if self.mpv is not None:
+            self.mpv.aid = track_id
 
     # A-B loop: playback jumps back to a on reaching b.
     looping = False
@@ -1594,6 +1640,9 @@ class LosslessVideoApp(_BaseTk):
         # is left running after the window closes.
         self._audio_stop_ffplay()
         if self.cut_player is not None:
+            if self._cut_audio_save_id is not None:   # a volume change not saved yet
+                self.after_cancel(self._cut_audio_save_id)
+                self._save_cut_audio_settings()
             self.cut_player.terminate()
         self.destroy()
 
@@ -2100,6 +2149,8 @@ class LosslessVideoApp(_BaseTk):
         self.end_entry.pack(side="left", padx=2)
         self.end_entry.bind("<Return>", lambda e: self._on_end_entry())
         self.end_entry.bind("<FocusOut>", lambda e: self._on_end_entry())
+        if self.cut_player is not None:
+            self._build_cut_audio_controls(time_row)
 
         step_row = tk.Frame(controls, bg="#f0f0f0")
         step_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
@@ -2230,6 +2281,11 @@ class LosslessVideoApp(_BaseTk):
             "<KeyPress-Right>": lambda: self._cut_seek_by(5),
             "<Shift-KeyPress-Left>": lambda: self._cut_seek_by(-1),
             "<Shift-KeyPress-Right>": lambda: self._cut_seek_by(1),
+            # M mute, Up / Down volume.
+            "<KeyPress-m>": lambda: self._cut_toggle_mute(),
+            "<KeyPress-M>": lambda: self._cut_toggle_mute(),
+            "<KeyPress-Up>": lambda: self._cut_volume_step(5),
+            "<KeyPress-Down>": lambda: self._cut_volume_step(-5),
         }
         for sequence, action in keys.items():
             self.bind(sequence, lambda e, a=action, s=sequence: self._on_cut_key(e, a, s))
@@ -2238,6 +2294,106 @@ class LosslessVideoApp(_BaseTk):
             # the arrows seek instead.
             if "Left" in sequence or "Right" in sequence:
                 self.notebook.bind(sequence, lambda e, a=action, s=sequence: self._on_cut_key(e, a, s))
+
+    def _build_cut_audio_controls(self, parent):
+        """Mute, volume and the audio track heard. A cut keeps every audio
+        track; the picker only chooses which one the player plays. Volume
+        and mute are remembered between runs."""
+        player = self.cut_player
+        player.set_volume(self.settings.get("player_volume", 100.0))
+        player.set_muted(self.settings.get("player_muted", False))
+        self._cut_audio_save_id = None
+
+        self.cut_mute_btn = tk.Button(parent, width=7, command=self._cut_toggle_mute)
+        self.cut_mute_btn.pack(side="left", padx=(px(24), 2))
+        self.cut_volume_slider = TimeSlider(parent, command=self._cut_volume_changed,
+                                            width=100, height=22)
+        self.cut_volume_slider.config_range(to=100.0)
+        self.cut_volume_slider.set(player.volume)
+        self.cut_volume_slider.pack(side="left")
+        self.cut_volume_slider.bind(
+            "<MouseWheel>", lambda e: self._cut_volume_step(5 if e.delta > 0 else -5))
+        self.cut_volume_lbl = tk.Label(parent, bg="#f0f0f0", width=4, anchor="w")
+        self.cut_volume_lbl.pack(side="left")
+
+        self.cut_track_btn = tk.Button(parent, text="No audio", state="disabled",
+                                       command=self._cut_post_track_menu)
+        self.cut_track_btn.pack(side="left", padx=(px(8), 0))
+        self.cut_track_menu = tk.Menu(self.cut_track_btn, tearoff=0)
+        self.cut_track_var = tk.IntVar(value=0)
+        self._cut_track_list = None       # the tracks the menu was built for
+        self._update_cut_audio_controls()
+
+    def _update_cut_audio_controls(self):
+        player = self.cut_player
+        tracks = player.audio_tracks
+        key = [(t.get("id"), t.get("title"), t.get("lang"), t.get("codec")) for t in tracks]
+        shown = (key, player.audio_track, player.muted, player.volume)
+        if shown == getattr(self, "_cut_audio_shown", None):
+            return   # called on every player change, ~30 times a second in playback
+        self._cut_audio_shown = shown
+        self.cut_mute_btn.config(text="Unmute" if player.muted else "Mute")
+        self.cut_volume_lbl.config(text=f"{int(round(player.volume))}%")
+        if key != self._cut_track_list:
+            self._cut_track_list = key
+            self.cut_track_menu.delete(0, "end")
+            for t in tracks:
+                self.cut_track_menu.add_radiobutton(
+                    label=describe_audio_track(t), variable=self.cut_track_var, value=t["id"],
+                    command=lambda tid=t["id"]: self.cut_player.set_audio_track(tid))
+        current = player.audio_track
+        self.cut_track_var.set(current if current is not None else 0)
+        if not tracks:
+            self.cut_track_btn.config(text="No audio", state="disabled")
+        else:
+            ids = [t["id"] for t in tracks]
+            n = ids.index(current) + 1 if current in ids else 0
+            text = f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾"
+            self.cut_track_btn.config(text=text,
+                                      state="normal" if len(tracks) > 1 else "disabled")
+
+    def _cut_post_track_menu(self):
+        menu = self.cut_track_menu
+        if menu.index("end") is None:
+            return
+        menu.configure(DARK_MENU if self._is_dark() else self._menu_light_colors)
+        b = self.cut_track_btn
+        x, y = b.winfo_rootx(), b.winfo_rooty() + b.winfo_height()
+        margin = DARK_MENU["background"] if self._is_dark() else None
+        post_with_menu_margin(lambda: menu.tk_popup(x, y), margin)
+
+    def _cut_toggle_mute(self):
+        if self.cut_player is None:
+            return
+        self.cut_player.set_muted(not self.cut_player.muted)
+        self._cut_audio_settings_changed()
+
+    def _cut_volume_changed(self, value):
+        player = self.cut_player
+        player.set_volume(value)
+        if player.muted and value > 0:
+            player.set_muted(False)   # turning the volume up means wanting to hear it
+        self._cut_audio_settings_changed()
+
+    def _cut_volume_step(self, delta):
+        if self.cut_player is None:
+            return
+        self.cut_player.set_volume(self.cut_player.volume + delta)
+        self.cut_volume_slider.set(self.cut_player.volume)
+        self._cut_volume_changed(self.cut_player.volume)
+
+    def _cut_audio_settings_changed(self):
+        self._update_cut_audio_controls()
+        # Saved once the slider has rested, not on every step of a drag.
+        if self._cut_audio_save_id is not None:
+            self.after_cancel(self._cut_audio_save_id)
+        self._cut_audio_save_id = self.after(500, self._save_cut_audio_settings)
+
+    def _save_cut_audio_settings(self):
+        self._cut_audio_save_id = None
+        self.settings["player_volume"] = self.cut_player.volume
+        self.settings["player_muted"] = self.cut_player.muted
+        save_settings(self.settings)
 
     def _on_cut_key(self, event, action, sequence):
         if not self._cut_player_on or self.notebook.index("current") != 0:
@@ -2372,6 +2528,7 @@ class LosslessVideoApp(_BaseTk):
             return
         playing = not player.paused
         self.cut_play_btn.config(text="❚❚ Pause" if playing else "▶ Play")
+        self._update_cut_audio_controls()
         pos = player.position
         if pos is None:
             self.cut_time_lbl.config(text="")
