@@ -2293,6 +2293,8 @@ class LosslessVideoApp(_BaseTk):
 
         self.settings = load_settings()
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", False)))
+        self.show_frame_buttons_var = tk.BooleanVar(
+            value=bool(self.settings.get("show_frame_buttons", False)))
         self._ttk_light_theme = ttk.Style(self).theme_use()
         self._set_treeview_row_height(ttk.Style(self))
 
@@ -2423,6 +2425,11 @@ class LosslessVideoApp(_BaseTk):
         options_menu.add_checkbutton(
             label="Warn before overwriting existing files",
             variable=self.warn_overwrite_var,
+        )
+        options_menu.add_checkbutton(
+            label="Show frame by frame movement buttons",
+            variable=self.show_frame_buttons_var,
+            command=self._on_show_frame_buttons_toggled,
         )
 
         help_menu = self._add_menu_bar_menu("Help")
@@ -3026,10 +3033,14 @@ class LosslessVideoApp(_BaseTk):
             return b
 
         button("|◀ Start", lambda: self._cut_go_to("start"))
-        button("◀ Frame", lambda: self._cut_frame_step(False))
+        frame_back = button("◀ Frame", lambda: self._cut_frame_step(False))
         self.cut_play_btn = button("▶ Play", self._cut_toggle_play, width=8)
-        button("Frame ▶", lambda: self._cut_frame_step(True))
+        frame_fwd = button("Frame ▶", lambda: self._cut_frame_step(True))
         button("End ▶|", lambda: self._cut_go_to("end"))
+        # Shown only with Options > Show frame by frame movement buttons;
+        # the , and . keys step a frame either way.
+        self.cut_frame_buttons = (frame_back, frame_fwd)
+        self._on_show_frame_buttons_toggled(save=False)
         self.cut_time_lbl = tk.Label(row, text="", bg="#f0f0f0", width=27,
                                      font=("Segoe UI", 9))
         self.cut_time_lbl.pack(side="left", padx=6)
@@ -3069,6 +3080,19 @@ class LosslessVideoApp(_BaseTk):
             # the arrows seek instead.
             if "Left" in sequence or "Right" in sequence:
                 self.notebook.bind(sequence, lambda e, a=action, s=sequence: self._on_cut_key(e, a, s))
+
+    def _on_show_frame_buttons_toggled(self, save=True):
+        if getattr(self, "cut_frame_buttons", None):
+            back, fwd = self.cut_frame_buttons
+            if self.show_frame_buttons_var.get():
+                back.pack(side="left", padx=1, before=self.cut_play_btn)
+                fwd.pack(side="left", padx=1, after=self.cut_play_btn)
+            else:
+                back.pack_forget()
+                fwd.pack_forget()
+        if save:
+            self.settings["show_frame_buttons"] = self.show_frame_buttons_var.get()
+            save_settings(self.settings)
 
     def _build_cut_audio_controls(self, parent):
         """Mute, volume and the audio track heard. A cut keeps every audio
