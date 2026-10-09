@@ -16,6 +16,9 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 - **Cut** — trim a clip, three modes: Lossless (fastest), Re-encode edges
   (frame-exact), Edit-list trim (experimental). The mode and the keyframe
   search window (default 8 s) are set in the **Cut** menu, for Bulk Cut too.
+  **Add selected scene to cutter list** marks several ranges in one video;
+  **Cut selected ranges** cuts them all into separate clips, named the way
+  Bulk Cut names them.
 - **Combine** — join videos without re-encoding (same codec/format).
 - **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last

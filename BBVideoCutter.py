@@ -2273,7 +2273,7 @@ class LosslessVideoApp(_BaseTk):
         self._wave_note = ""             # shown instead while drawing, or when it can't be drawn
         self._wave_sized = (None, None)  # (size, the mask resized to it)
         self._wave_photo = (None, None)  # (what the strip's image was made for, PhotoImage)
-        self.cut_ranges = []             # ranges marked for Bulk Cut: (start, end), by start
+        self.cut_ranges = []             # ranges marked to cut: (start, end), by start
         self._cut_ranges_by_file = {}    # path -> its marked ranges, kept when switching videos
 
         # Resize/Crop tab state
@@ -3026,12 +3026,13 @@ class LosslessVideoApp(_BaseTk):
 
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", pady=(2, 1))
-        # Several ranges of one video: marked here, cut as a batch by Bulk Cut.
-        self.cut_send_btn = tk.Button(save_row, height=2, width=19,
-                                      command=self._cut_send_ranges_to_bulk)
-        self.cut_send_btn.pack(side="right", padx=(2, 0))
-        self.cut_add_range_btn = tk.Button(save_row, text="Add range", height=2, width=13,
-                                           command=self._cut_add_range)
+        # Several scenes of one video: each added to a list, then all cut
+        # at once, each into its own clip.
+        self.cut_ranges_btn = tk.Button(save_row, height=2, width=17,
+                                        command=self._cut_selected_ranges)
+        self.cut_ranges_btn.pack(side="right", padx=(2, 0))
+        self.cut_add_range_btn = tk.Button(save_row, text="Add selected scene\nto cutter list",
+                                           height=2, width=17, command=self._cut_add_range)
         Tooltip(self.cut_add_range_btn, "Shortcut: A")
         self.cut_add_range_btn.pack(side="right", padx=(2, 0))
         self.save_btn = tk.Button(save_row, text="Save this Scene!", height=2,
@@ -3170,7 +3171,7 @@ class LosslessVideoApp(_BaseTk):
             "<KeyPress-Right>": lambda: self._cut_seek_by(5),
             "<Shift-KeyPress-Left>": lambda: self._cut_seek_by(-1),
             "<Shift-KeyPress-Right>": lambda: self._cut_seek_by(1),
-            # A add the range to the ranges for Bulk Cut.
+            # A adds the scene to the cutter list.
             "<KeyPress-a>": lambda: self._cut_add_range(),
             "<KeyPress-A>": lambda: self._cut_add_range(),
             # M mute, Up / Down volume.
@@ -3635,11 +3636,11 @@ class LosslessVideoApp(_BaseTk):
         self._sync_entries()
         self._redraw_slider()
 
-    # ---- ranges for Bulk Cut -------------------------------------------
+    # ---- the cutter list -------------------------------------------------
     # Several scenes of one video: each Start-End is added to a list (A),
-    # shown in green on the slider and the waveform, and the list is sent
-    # to Bulk Cut as one row, which cuts each range into its own clip. The
-    # list belongs to the video and stays while another one is open.
+    # shown in green on the slider and the waveform, and "Cut selected
+    # ranges" cuts each into its own clip. The list belongs to the video
+    # and stays while another one is open.
     def _cut_add_range(self):
         if not self.input_path or str(self.save_btn.cget("state")) == "disabled":
             return
@@ -3662,13 +3663,14 @@ class LosslessVideoApp(_BaseTk):
         self._update_cut_range_buttons()
 
     def _update_cut_range_buttons(self):
-        if not hasattr(self, "cut_send_btn"):
+        if not hasattr(self, "cut_ranges_btn"):
             return   # still building the tab
         n = len(self.cut_ranges)
-        self.cut_send_btn.config(
-            text=f"Send {n} range{'' if n == 1 else 's'}\nto Bulk Cut" if n else "Send ranges\nto Bulk Cut",
-            state="normal" if n else "disabled")
-        self.cut_add_range_btn.config(state="normal" if self.input_path else "disabled")
+        enabled = bool(self.input_path) and str(self.save_btn.cget("state")) != "disabled"
+        self.cut_ranges_btn.config(
+            text=f"Cut {n} selected\nrange{'' if n == 1 else 's'}" if n else "Cut selected\nranges",
+            state="normal" if n and enabled else "disabled")
+        self.cut_add_range_btn.config(state="normal" if enabled else "disabled")
 
     def _cut_ranges_at(self, x):
         t = self._x_to_exact_time(x)
@@ -3714,22 +3716,100 @@ class LosslessVideoApp(_BaseTk):
         self.status_lbl.config(text=f"Removed {n} range{'' if n == 1 else 's'}")
         self._cut_ranges_changed()
 
-    def _cut_send_ranges_to_bulk(self):
-        """Adds the video with its marked ranges to Bulk Cut as one row and
-        shows that tab; the ranges are moved there, not copied."""
-        if not self.input_path or not self.cut_ranges:
+    def _cut_selected_ranges(self):
+        """Cuts each range on the cutter list into its own clip, right away:
+        named like Bulk Cut names them (name.CUT01.(range).ext...), with the
+        Cut menu's mode, saved next to the video or in a folder asked for.
+        The ranges cut are taken off the list; any that fail stay on it."""
+        if (not self.input_path or not self.cut_ranges
+                or str(self.save_btn.cget("state")) == "disabled"):
             return
-        self._ensure_tab_built(2)
+        path = self.input_path
         ranges = list(self.cut_ranges)
-        iid = self._bulk_add_row(self.input_path, ranges)
-        self.cut_ranges.clear()
-        self._cut_ranges_changed()
-        self.notebook.select(self.bulk_tab)
-        self.bulk_tree.selection_set(iid)
-        self.bulk_tree.see(iid)
+        output_dir = None   # next to the video
+        if not self.save_to_source_var.get():
+            output_dir = filedialog.askdirectory(
+                title="Choose a folder for the clips",
+                initialdir=os.path.dirname(os.path.abspath(path)))
+            if not output_dir:
+                return
+        outs = self._bulk_output_paths({"path": path, "ranges": ranges}, output_dir)
+        if self.warn_overwrite_var.get():
+            existing = [o for o in outs if os.path.exists(o)]
+            if existing:
+                choice = self._ask_overwrite(existing)
+                if choice is None:
+                    return
+                if choice == "rename":
+                    outs = [unique_output_path(o) if os.path.exists(o) else o for o in outs]
+
+        self._set_cut_controls_enabled(False)
         n = len(ranges)
-        self.status_lbl.config(text=f"Sent {n} range{'' if n == 1 else 's'} of "
-                                    f"{os.path.basename(self.input_path)} to Bulk Cut")
+        self.status_lbl.config(text=f"Cutting {n} range{'' if n == 1 else 's'}... 0%")
+        threading.Thread(
+            target=self._run_cut_ranges,
+            args=(path, ranges, outs, self.cut_mode_var.get(), self.cut_search_window,
+                  self.cut_ranges),
+            daemon=True,
+        ).start()
+
+    def _run_cut_ranges(self, path, ranges, outs, mode, search_window, range_list):
+        n = len(ranges)
+        report = self._progress_reporter(
+            lambda pct: f"Cutting {n} range{'' if n == 1 else 's'}... {pct}%", "cut")
+        # Progress by length: a 10-minute clip takes about 10x a 1-minute one.
+        lengths = [max(0.0, e - s) for s, e in ranges]
+        total = sum(lengths) or 1.0
+        done_sec = 0.0
+        made, failed = [], []
+        for (rng, out, length) in zip(ranges, outs, lengths):
+            try:
+                result = self._lossless_cut(
+                    path, rng[0], rng[1], out, mode=mode, search_window=search_window,
+                    progress=lambda f, base=done_sec, length=length: report((base + f * length) / total),
+                )
+                made.append((rng, out, result))
+            except Exception as exc:
+                failed.append((rng, str(exc)))
+            done_sec += length
+        self.after(0, lambda: self._cut_ranges_done(path, range_list, made, failed))
+
+    def _cut_ranges_done(self, path, range_list, made, failed):
+        self._end_progress("cut")
+        for rng, _out, _result in made:
+            if rng in range_list:
+                range_list.remove(rng)
+        self._set_cut_controls_enabled(bool(self.input_path))
+        self._cut_ranges_changed()
+        hows = []
+        for _rng, _out, result in made:
+            how = self._describe_cut_result(result)
+            if how not in hows:
+                hows.append(how)
+        how_text = "\n".join(h[0].upper() + h[1:] + "." for h in hows)
+        n_made = len(made)
+        if made:
+            folder = os.path.dirname(made[0][1])
+            names = "\n".join(os.path.basename(out) for _rng, out, _result in made)
+            self.status_lbl.config(
+                text=f"Cut {n_made} clip{'' if n_made == 1 else 's'} of {os.path.basename(path)}"
+                     + (f", {len(failed)} failed" if failed else "") + f" ({'; '.join(hows)})")
+        else:
+            self.status_lbl.config(text="Cutting the ranges failed")
+        if failed:
+            details = "\n\n".join(
+                f"{seconds_to_ffmpeg_time(s)} - {seconds_to_ffmpeg_time(e)}:\n{err[-600:]}"
+                for (s, e), err in failed)
+            done = (f"{n_made} clip{'' if n_made == 1 else 's'} saved to:\n{folder}\n\n"
+                    if made else "")
+            messagebox.showerror(
+                "Some ranges failed" if made else "ffmpeg error",
+                f"{done}{len(failed)} range{'' if len(failed) == 1 else 's'} could not be cut "
+                f"(left on the list):\n\n{details}")
+        else:
+            messagebox.showinfo(
+                "Done", f"{n_made} clip{'' if n_made == 1 else 's'} saved to:\n{folder}\n\n"
+                        f"{names}\n\n{how_text}")
 
     # ---- keyframe ticks -----------------------------------------------
     def _start_keyframe_scan(self, path):
