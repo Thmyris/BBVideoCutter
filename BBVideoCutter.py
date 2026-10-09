@@ -805,6 +805,22 @@ def find_bulk_cut_range(filename: str):
     return None
 
 
+def bulk_time_text(seconds: float) -> str:
+    """A time in Bulk Cut's list: HH:MM:SS, with .mmm when it is not whole
+    seconds (ranges sent from the Cut tab)."""
+    if abs(seconds - round(seconds)) < 0.0005:
+        return seconds_to_hms(seconds)
+    return seconds_to_ffmpeg_time(seconds)
+
+
+def bulk_ranges_text(ranges) -> str:
+    return " | ".join(f"{bulk_time_text(s)} - {bulk_time_text(e)}" for s, e in ranges)
+
+
+def bulk_lengths_text(ranges) -> str:
+    return " | ".join(bulk_time_text(e - s) for s, e in ranges)
+
+
 def strip_bracket_from_name(name_no_ext: str) -> str:
     """Remove all [start-end] brackets from a filename and tidy separators."""
     stripped = BULK_LAST_MINUTE_RE.sub("", BULK_BRACKET_RE.sub("", name_no_ext))
@@ -873,6 +889,8 @@ THEME_COLORS = {
         "slider_start": "#1a1a1a",
         "slider_keyframe": "#8c8c8c",
         "wave": "#a6a6a6",            # the Cut waveform outside the selection (inside: blue)
+        "range": "#5cb87a",           # ranges marked for Bulk Cut, on the slider and waveform
+        "range_edge": "#2e7d4a",
         "timeslider_track": "#d5d5d5",
         "aspect_active": "#cfe2ff",
         # The menu bar matches the title bar above it, so the two read as
@@ -886,6 +904,8 @@ THEME_COLORS = {
         "slider_start": "#d0d0d4",
         "slider_keyframe": "#86868c",
         "wave": "#5e5e64",
+        "range": "#3f8f5c",
+        "range_edge": "#7fd19c",
         "timeslider_track": "#505056",
         "aspect_active": "#28456f",
         # ...and the panel color, next to the dark caption, in dark mode.
@@ -1586,6 +1606,8 @@ class LosslessVideoApp(_BaseTk):
         self._wave_note = ""             # shown instead while drawing, or when it can't be drawn
         self._wave_sized = (None, None)  # (size, the mask resized to it)
         self._wave_photo = (None, None)  # (what the strip's image was made for, PhotoImage)
+        self.cut_ranges = []             # ranges marked for Bulk Cut: (start, end), by start
+        self._cut_ranges_by_file = {}    # path -> its marked ranges, kept when switching videos
 
         # Resize/Crop tab state
         self.resize_input_path = None
@@ -2236,6 +2258,7 @@ class LosslessVideoApp(_BaseTk):
         self.slider_canvas.bind("<Button-1>", self._slider_click)
         self.slider_canvas.bind("<B1-Motion>", self._slider_drag)
         self.slider_canvas.bind("<ButtonRelease-1>", self._slider_release)
+        self.slider_canvas.bind("<Button-3>", self._cut_ranges_menu)
         self._drag_target = None
 
         # ---- waveform of the audio heard, on the slider's time axis
@@ -2248,6 +2271,7 @@ class LosslessVideoApp(_BaseTk):
             self.wave_canvas.bind("<Button-1>", self._wave_click)
             self.wave_canvas.bind("<B1-Motion>", self._slider_drag)
             self.wave_canvas.bind("<ButtonRelease-1>", self._slider_release)
+            self.wave_canvas.bind("<Button-3>", self._cut_ranges_menu)
 
         # ---- cut mode: classic (original, may snap to nearest keyframe) vs
         # smart-cut (re-encode just the edges for exact accuracy) vs
@@ -2256,10 +2280,20 @@ class LosslessVideoApp(_BaseTk):
             self._build_cut_mode_controls(controls, default_mode="classic")
         )
 
-        self.save_btn = tk.Button(controls, text="Save this Scene!", height=2,
+        save_row = tk.Frame(controls, bg="#f0f0f0")
+        save_row.pack(fill="x", pady=(2, 1))
+        # Several ranges of one video: marked here, cut as a batch by Bulk Cut.
+        self.cut_send_btn = tk.Button(save_row, height=2, width=19,
+                                      command=self._cut_send_ranges_to_bulk)
+        self.cut_send_btn.pack(side="right", padx=(2, 0))
+        self.cut_add_range_btn = tk.Button(save_row, text="Add range (A)", height=2, width=13,
+                                           command=self._cut_add_range)
+        self.cut_add_range_btn.pack(side="right", padx=(2, 0))
+        self.save_btn = tk.Button(save_row, text="Save this Scene!", height=2,
                                    font=("Segoe UI", 10, "bold"),
                                    command=self._save_scene_clicked)
-        self.save_btn.pack(fill="x", pady=(2, 1))
+        self.save_btn.pack(side="left", fill="x", expand=True)
+        self._update_cut_range_buttons()
 
     def _build_cut_mode_controls(self, parent, default_mode="classic"):
         """Build the cut-mode radiobuttons + keyframe-search-window entry
@@ -2316,6 +2350,7 @@ class LosslessVideoApp(_BaseTk):
         self.save_btn.config(state=state)
         for b in self.step_buttons + self.cut_mark_buttons:
             b.config(state=state)
+        self._update_cut_range_buttons()
 
     # ---- embedded player ---------------------------------------------
     def _build_cut_transport(self, parent):
@@ -2358,6 +2393,9 @@ class LosslessVideoApp(_BaseTk):
             "<KeyPress-Right>": lambda: self._cut_seek_by(5),
             "<Shift-KeyPress-Left>": lambda: self._cut_seek_by(-1),
             "<Shift-KeyPress-Right>": lambda: self._cut_seek_by(1),
+            # A add the range to the ranges for Bulk Cut.
+            "<KeyPress-a>": lambda: self._cut_add_range(),
+            "<KeyPress-A>": lambda: self._cut_add_range(),
             # M mute, Up / Down volume.
             "<KeyPress-m>": lambda: self._cut_toggle_mute(),
             "<KeyPress-M>": lambda: self._cut_toggle_mute(),
@@ -2678,6 +2716,8 @@ class LosslessVideoApp(_BaseTk):
         self.file_size = os.path.getsize(path)
         self.start_sec = 0.0
         self.end_sec = duration
+        self.cut_ranges = self._cut_ranges_by_file.setdefault(
+            os.path.normcase(os.path.abspath(path)), [])
 
         self.filename_lbl.config(text=os.path.basename(path))
         self.info_lbl.config(text=f"[{seconds_to_hms(duration)}]   {format_size(self.file_size)}")
@@ -2758,6 +2798,103 @@ class LosslessVideoApp(_BaseTk):
         self._sync_entries()
         self._redraw_slider()
         self._cut_range_changed()
+
+    # ---- ranges for Bulk Cut -------------------------------------------
+    # Several scenes of one video: each Start-End is added to a list (A),
+    # shown in green on the slider and the waveform, and the list is sent
+    # to Bulk Cut as one row, which cuts each range into its own clip. The
+    # list belongs to the video and stays while another one is open.
+    def _cut_add_range(self):
+        if not self.input_path or str(self.save_btn.cget("state")) == "disabled":
+            return
+        start, end = round(self.start_sec, 3), round(self.end_sec, 3)
+        if end <= start:
+            self.status_lbl.config(text="Nothing to add: the end is not after the start")
+            return
+        if (start, end) in self.cut_ranges:
+            self.status_lbl.config(text="This range is already added")
+            return
+        self.cut_ranges.append((start, end))
+        self.cut_ranges.sort()
+        n = self.cut_ranges.index((start, end)) + 1
+        self.status_lbl.config(text=f"Range {n} added: {seconds_to_ffmpeg_time(start)} - "
+                                    f"{seconds_to_ffmpeg_time(end)}")
+        self._cut_ranges_changed()
+
+    def _cut_ranges_changed(self):
+        self._redraw_slider()
+        self._update_cut_range_buttons()
+
+    def _update_cut_range_buttons(self):
+        if not hasattr(self, "cut_send_btn"):
+            return   # still building the tab
+        n = len(self.cut_ranges)
+        self.cut_send_btn.config(
+            text=f"Send {n} range{'' if n == 1 else 's'}\nto Bulk Cut" if n else "Send ranges\nto Bulk Cut",
+            state="normal" if n else "disabled")
+        self.cut_add_range_btn.config(state="normal" if self.input_path else "disabled")
+
+    def _cut_ranges_at(self, x):
+        t = self._x_to_exact_time(x)
+        tol = px(3) * self.duration / max(1, self._track_x1 - self._track_x0)   # 3 px either side
+        return [i for i, (s, e) in enumerate(self.cut_ranges) if s - tol <= t <= e + tol]
+
+    def _cut_ranges_menu(self, event):
+        """Right-click on the slider or the waveform: select or remove the
+        marked range there, or remove them all."""
+        if not self.input_path or not self.cut_ranges:
+            return
+        menu = tk.Menu(self, tearoff=0)
+        for i in self._cut_ranges_at(event.x):
+            s, e = self.cut_ranges[i]
+            label = f"range {i + 1} ({seconds_to_ffmpeg_time(s)} - {seconds_to_ffmpeg_time(e)})"
+            menu.add_command(label=f"Select {label}",
+                             command=lambda r=(s, e): self._cut_select_range(r))
+            menu.add_command(label=f"Remove {label}",
+                             command=lambda r=(s, e): self._cut_remove_ranges([r]))
+            menu.add_separator()
+        n = len(self.cut_ranges)
+        menu.add_command(label=f"Remove all {n} range{'' if n == 1 else 's'}",
+                         command=lambda: self._cut_remove_ranges(list(self.cut_ranges)))
+        menu.configure(DARK_MENU if self._is_dark() else self._menu_light_colors)
+        self._cut_ranges_menu_widget = menu   # for the tests
+        x, y = event.x_root, event.y_root
+        post_with_menu_margin(lambda: menu.tk_popup(x, y),
+                              DARK_MENU["background"] if self._is_dark() else None)
+
+    def _cut_select_range(self, rng):
+        """Makes a marked range the Start-End again, to look at or change it
+        (an adjusted range is added as a new one; remove the old one)."""
+        self.start_sec, self.end_sec = rng
+        self._sync_entries()
+        self._redraw_slider()
+        self._cut_range_changed()
+        self._cut_show_time(self.start_sec, "start")
+
+    def _cut_remove_ranges(self, ranges):
+        for r in ranges:
+            if r in self.cut_ranges:
+                self.cut_ranges.remove(r)
+        n = len(ranges)
+        self.status_lbl.config(text=f"Removed {n} range{'' if n == 1 else 's'}")
+        self._cut_ranges_changed()
+
+    def _cut_send_ranges_to_bulk(self):
+        """Adds the video with its marked ranges to Bulk Cut as one row and
+        shows that tab; the ranges are moved there, not copied."""
+        if not self.input_path or not self.cut_ranges:
+            return
+        self._ensure_tab_built(2)
+        ranges = list(self.cut_ranges)
+        iid = self._bulk_add_row(self.input_path, ranges)
+        self.cut_ranges.clear()
+        self._cut_ranges_changed()
+        self.notebook.select(self.bulk_tab)
+        self.bulk_tree.selection_set(iid)
+        self.bulk_tree.see(iid)
+        n = len(ranges)
+        self.status_lbl.config(text=f"Sent {n} range{'' if n == 1 else 's'} of "
+                                    f"{os.path.basename(self.input_path)} to Bulk Cut")
 
     # ---- keyframe ticks -----------------------------------------------
     def _start_keyframe_scan(self, path):
@@ -2907,8 +3044,8 @@ class LosslessVideoApp(_BaseTk):
 
     def _redraw_waveform(self):
         """The strip: the waveform across the same span as the slider's
-        track, blue inside the selection and gray outside it, and the
-        player's playhead."""
+        track, blue inside the selection, green in ranges marked for Bulk
+        Cut and gray elsewhere, and the player's playhead."""
         c = self.wave_canvas
         if c is None:
             return
@@ -2930,8 +3067,11 @@ class LosslessVideoApp(_BaseTk):
         width = x1 - x0
         sel0 = round((x1 - x0) * self.start_sec / self.duration)
         sel1 = round((x1 - x0) * self.end_sec / self.duration)
+        spans = tuple((round(width * s / self.duration), round(width * e / self.duration))
+                      for s, e in self.cut_ranges)
         bg = self.wave_canvas.cget("bg")
-        made_for = (id(self._wave_mask), width, h, sel0, sel1, bg, self._theme_color("wave"))
+        made_for = (id(self._wave_mask), width, h, sel0, sel1, spans, bg,
+                    self._theme_color("wave"), self._theme_color("range"))
         if self._wave_photo[0] == made_for:
             return self._wave_photo[1]
         if self._wave_sized[0] != (id(self._wave_mask), width, h):
@@ -2941,6 +3081,9 @@ class LosslessVideoApp(_BaseTk):
         rgb = tuple(v // 257 for v in self.wave_canvas.winfo_rgb(bg))
         img = Image.new("RGB", (width, h), rgb)
         img.paste(self._theme_color("wave"), (0, 0, width, h), mask)
+        for a, b in spans:   # ranges marked for Bulk Cut
+            if b > a:
+                img.paste(self._theme_color("range"), (a, 0, b, h), mask.crop((a, 0, b, h)))
         if sel1 > sel0:
             img.paste("#3d8bfd", (sel0, 0, sel1, h), mask.crop((sel0, 0, sel1, h)))
         photo = ImageTk.PhotoImage(img)
@@ -2986,6 +3129,16 @@ class LosslessVideoApp(_BaseTk):
             for x in self._keyframe_tick_xs(x_for):
                 c.create_line(x, y + px(4), x, y + px(9), fill=tick, width=max(1, px(1)),
                               tags=("keyframe",))
+        if self.cut_ranges:
+            # Ranges marked for Bulk Cut: a wider band under the selection,
+            # with a bar at each end so neighbouring ranges stay apart.
+            band, edge = self._theme_color("range"), self._theme_color("range_edge")
+            for s, e in self.cut_ranges:
+                a, b = x_for(s), x_for(e)
+                c.create_line(a, y, b, y, fill=band, width=px(8), tags=("range",))
+                for x in (a, b):
+                    c.create_line(x, y - px(5), x, y + px(5), fill=edge, width=max(1, px(1)),
+                                  tags=("range",))
         sx, ex = x_for(self.start_sec), x_for(self.end_sec)
         c.create_line(sx, y, ex, y, fill="#3d8bfd", width=px(4), capstyle="round")
         if self._cut_player_on:
@@ -4426,36 +4579,39 @@ class LosslessVideoApp(_BaseTk):
                 length_txt = "—"
                 status = "Failed (no valid bracket)"
             elif any(e <= s for s, e in valid_ranges):
-                range_txt = " | ".join(
-                    f"{seconds_to_hms(s)} - {seconds_to_hms(e)}" for s, e in valid_ranges
-                )
+                range_txt = bulk_ranges_text(valid_ranges)
                 length_txt = "—"
                 status = "Failed (end <= start)"
             else:
-                range_txt = " | ".join(
-                    f"{seconds_to_hms(s)} - {seconds_to_hms(e)}" for s, e in valid_ranges
-                )
+                range_txt = bulk_ranges_text(valid_ranges)
                 if invalid_count:
                     status = "Failed (invalid bracket present)"
                     length_txt = "—"
                 else:
-                    length_txt = " | ".join(
-                        seconds_to_hms(e - s) for s, e in valid_ranges
-                    )
+                    length_txt = bulk_lengths_text(valid_ranges)
                     status = "Pending"
+            self._bulk_insert_row(p, valid_ranges, range_txt, length_txt, status)
 
-            with self._bulk_lock:
-                # Added while a run is going: join its queue straight away.
-                if status == "Pending" and self._bulk_running:
-                    status = "Queued"
-                iid = self.bulk_tree.insert(
-                    "", "end", text=os.path.basename(p),
-                    values=(range_txt, length_txt, status),
-                )
-                self.bulk_items.append({
-                    "path": p, "ranges": valid_ranges,
-                    "status": status, "iid": iid,
-                })
+    def _bulk_add_row(self, path, ranges):
+        """A row for ranges that are already known (sent from the Cut tab):
+        valid (start, end) seconds, end after start. Returns its tree id."""
+        return self._bulk_insert_row(path, list(ranges), bulk_ranges_text(ranges),
+                                     bulk_lengths_text(ranges), "Pending")
+
+    def _bulk_insert_row(self, path, ranges, range_txt, length_txt, status):
+        with self._bulk_lock:
+            # Added while a run is going: join its queue straight away.
+            if status == "Pending" and self._bulk_running:
+                status = "Queued"
+            iid = self.bulk_tree.insert(
+                "", "end", text=os.path.basename(path),
+                values=(range_txt, length_txt, status),
+            )
+            self.bulk_items.append({
+                "path": path, "ranges": ranges,
+                "status": status, "iid": iid,
+            })
+        return iid
 
     # Removing a queued row takes it out of bulk_items, which is the list the
     # running worker picks its next item from -- so it is never processed.
