@@ -2430,7 +2430,7 @@ class LosslessVideoApp(_BaseTk):
         self.notebook.add(self.cut_tab, text="Cut Clip")
         self.notebook.add(self.combine_tab, text="Combine Videos")
         self.notebook.add(self.bulk_tab, text="Bulk Cut")
-        self.notebook.add(self.resize_tab, text="Crop")
+        self.notebook.add(self.resize_tab, text="Crop/Rotate")
         self.notebook.add(self.audio_tab, text="Audio")
 
         # Lazy tab construction: only the Cut tab (the one visible at
@@ -2529,7 +2529,7 @@ class LosslessVideoApp(_BaseTk):
 
         file_menu = self._add_menu_bar_menu("File")
         file_menu.add_command(label="Open Video (Cut tab)...", command=self.open_file_for_cut)
-        file_menu.add_command(label="Open Video (Crop tab)...", command=self.open_file_for_resize)
+        file_menu.add_command(label="Open Video (Crop/Rotate tab)...", command=self.open_file_for_resize)
         file_menu.add_command(label="Open Video (Audio tab)...", command=self.open_file_for_audio)
         file_menu.add_command(label="Add Videos (Combine tab)...", command=self.add_files_for_combine)
         file_menu.add_separator()
@@ -2653,8 +2653,8 @@ class LosslessVideoApp(_BaseTk):
             "an edge that doesn't land exactly on a keyframe, so the cut lands "
             "on the exact second you asked for (GPU-accelerated when "
             "available) — everything else stays byte-identical.\n\n"
-            "Drag & drop is enabled — drop a video onto the Cut or Crop tab, "
-            "or onto the Combine tab's list. The Crop tab uses a visual crop editor; "
+            "Drag & drop is enabled — drop a video onto the Cut, Crop/Rotate or Audio tab, "
+            "or onto the Combine tab's list. The Crop/Rotate tab uses a visual crop editor; "
             "arbitrary spatial cropping requires video re-encoding.\n\n"
             "Built with Python by Thmyris.",
         )

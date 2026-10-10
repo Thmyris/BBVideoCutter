@@ -25,7 +25,7 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
   minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
   second 27 of the last minute that has it to the end: 19:27–20:10.
-- **Crop** — visual crop editor with widescreen/vertical aspect presets, and
+- **Crop/Rotate** — visual crop editor with widescreen/vertical aspect presets, and
   a 90°/180°/270° rotate done in the same re-encode, or saved on its own
   losslessly (stream copy; only the file's rotation info changes).
 - **Audio** — mute/mix individual audio tracks.
@@ -33,7 +33,7 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; preview
 the joined video on Combine, a row's ranges on Bulk Cut, and the video
-playing under the crop box on Crop.
+playing under the crop box on Crop/Rotate.
 
 The Combine and Bulk Cut lists work the same way: a thumbnail per file,
 Ctrl/Shift-click to select several rows, Delete to remove them, and Move
