@@ -2660,56 +2660,57 @@ class LosslessVideoApp(_BaseTk):
         )
 
     # ====================================================================
-    # Shared: the empty "Open or drop a video to begin" area
+    # Shared: the empty "drop a video" area -- a click opens a video, a drag
+    # moves the window
     # ====================================================================
-    OPEN_PROMPT = "Open or drop a video to begin"
+    OPEN_PROMPT = "Click here or drop a video to begin"
 
-    def _make_open_button(self, canvas, command, on_drop):
-        """The "Open Video..." button of a tab's empty video area; drawn
-        by _draw_open_prompt. A drop on it counts as a drop on the tab."""
-        button = tk.Button(canvas, text="Open Video...", command=command,
-                           padx=px(12), pady=px(3))
-        button.drop_target_register(DND_FILES)
-        button.dnd_bind("<<Drop>>", on_drop)
-        return button
-
-    def _draw_open_prompt(self, canvas, button, w, h):
-        """The prompt text with the Open Video button under it. The button
-        is a canvas window item, so clearing the canvas for a video frame
-        takes it away too."""
-        canvas.create_text(w / 2, h / 2 - px(16), text=self.OPEN_PROMPT, fill="#888888",
+    def _draw_open_prompt(self, canvas, w, h):
+        canvas.create_text(w / 2, h / 2, text=self.OPEN_PROMPT, fill="#888888",
                            font=("Segoe UI", 12), tags=("placeholder",))
-        canvas.create_window(w / 2, h / 2 + px(4), window=button, anchor="n",
-                             tags=("placeholder",))
 
-    # ====================================================================
-    # Shared: move the window by dragging an empty "drop a video" area
-    # ====================================================================
-    def _bind_window_drag(self, widget, is_empty):
+    DRAG_THRESHOLD = 4   # pixels the pointer moves before a press is a drag, not a click
+
+    def _bind_window_drag(self, widget, is_empty, on_click=None):
         """Dragging `widget` with the left button moves the whole window,
         but only while `is_empty(event)` is true, i.e. while the press lands
-        on an empty drop-here area where a click has no other meaning."""
+        on an empty drop-here area where a click has no other meaning.
+        There, a click (press and release without moving) calls on_click."""
         widget.bind("<ButtonPress-1>", lambda e: self._window_drag_start(e, is_empty), add="+")
         widget.bind("<B1-Motion>", self._window_drag_motion, add="+")
-        widget.bind("<ButtonRelease-1>", self._window_drag_end, add="+")
+        widget.bind("<ButtonRelease-1>", lambda e: self._window_drag_end(e, on_click), add="+")
 
     def _window_drag_start(self, event, is_empty):
+        self._window_drag_press = None
         self._window_drag_offset = None
-        if not is_empty(event) or self.state() == "zoomed":
+        if not is_empty(event):
             return
-        # winfo_x/y of a toplevel is its outer frame, the same corner that
-        # geometry("+x+y") positions, so the offset stays exact.
-        self._window_drag_offset = (event.x_root - self.winfo_x(),
-                                    event.y_root - self.winfo_y())
+        self._window_drag_press = (event.x_root, event.y_root)
+        self._window_drag_moved = False
+        if self.state() != "zoomed":
+            # winfo_x/y of a toplevel is its outer frame, the same corner
+            # that geometry("+x+y") positions, so the offset stays exact.
+            self._window_drag_offset = (event.x_root - self.winfo_x(),
+                                        event.y_root - self.winfo_y())
 
     def _window_drag_motion(self, event):
-        offset = getattr(self, "_window_drag_offset", None)
-        if offset is None:
+        press = getattr(self, "_window_drag_press", None)
+        if press is None:
             return
-        self.geometry(f"+{event.x_root - offset[0]}+{event.y_root - offset[1]}")
+        if not self._window_drag_moved:
+            if max(abs(event.x_root - press[0]), abs(event.y_root - press[1])) < px(self.DRAG_THRESHOLD):
+                return   # still a click
+            self._window_drag_moved = True
+        offset = self._window_drag_offset
+        if offset is not None:
+            self.geometry(f"+{event.x_root - offset[0]}+{event.y_root - offset[1]}")
 
-    def _window_drag_end(self, event):
+    def _window_drag_end(self, event, on_click=None):
+        press = getattr(self, "_window_drag_press", None)
+        self._window_drag_press = None
         self._window_drag_offset = None
+        if press is not None and not self._window_drag_moved and on_click is not None:
+            on_click()
 
     # ====================================================================
     # Shared: light / dark theme (View menu)
@@ -3015,9 +3016,8 @@ class LosslessVideoApp(_BaseTk):
         self.preview_canvas = tk.Canvas(preview_frame, bg="black", highlightthickness=0)
         self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda e: self._redraw_preview_canvas())
-        self._bind_window_drag(self.preview_canvas, lambda e: not self.input_path)
-        self.cut_open_btn = self._make_open_button(
-            self.preview_canvas, self.open_file_for_cut, self._on_drop_cut)
+        self._bind_window_drag(self.preview_canvas, lambda e: not self.input_path,
+                               on_click=self.open_file_for_cut)
         self._draw_preview_placeholder(self.OPEN_PROMPT)
 
         # The embedded player covers the still-frame canvas while a video is
@@ -3573,7 +3573,7 @@ class LosslessVideoApp(_BaseTk):
         w = c.winfo_width() or 400
         h = c.winfo_height() or 225
         if text == self.OPEN_PROMPT:
-            self._draw_open_prompt(c, self.cut_open_btn, w, h)
+            self._draw_open_prompt(c, w, h)
         else:
             c.create_text(w / 2, h / 2, text=text, fill="#888888",
                           font=("Segoe UI", 12))
@@ -3632,8 +3632,8 @@ class LosslessVideoApp(_BaseTk):
 
         self.filename_lbl.config(text=os.path.basename(path))
         self.info_lbl.config(text=f"[{seconds_to_hms(duration)}]   {format_size(self.file_size)}")
-        # Takes away the empty-area prompt and its Open Video button (the
-        # player covers the canvas, which isn't redrawn otherwise).
+        # Takes away the empty-area prompt (the player covers the canvas,
+        # which isn't redrawn otherwise).
         self._redraw_preview_canvas()
 
         self._set_cut_controls_enabled(True)
@@ -5999,9 +5999,8 @@ class LosslessVideoApp(_BaseTk):
         self.resize_canvas.bind("<MouseWheel>", self._resize_mouse_wheel)
         self.resize_canvas.bind("<Button-4>", self._resize_mouse_wheel)
         self.resize_canvas.bind("<Button-5>", self._resize_mouse_wheel)
-        self._bind_window_drag(self.resize_canvas, lambda e: not self.resize_input_path)
-        self.resize_open_btn = self._make_open_button(
-            self.resize_canvas, self.open_file_for_resize, self._on_drop_resize)
+        self._bind_window_drag(self.resize_canvas, lambda e: not self.resize_input_path,
+                               on_click=self.open_file_for_resize)
         self._draw_resize_placeholder(self.OPEN_PROMPT)
 
         controls = tk.Frame(root, bg="#f0f0f0")
@@ -6194,7 +6193,7 @@ class LosslessVideoApp(_BaseTk):
         w = self.resize_canvas.winfo_width() or 700
         h = self.resize_canvas.winfo_height() or 400
         if text == self.OPEN_PROMPT:
-            self._draw_open_prompt(self.resize_canvas, self.resize_open_btn, w, h)
+            self._draw_open_prompt(self.resize_canvas, w, h)
             return
         self.resize_canvas.create_text(
             w / 2, h / 2, text=text, fill="#888888",
@@ -6654,7 +6653,7 @@ class LosslessVideoApp(_BaseTk):
 
         scale, dx0, dy0, dw, dh = geom
         cache_key = (id(self.resize_frame_img), dw, dh)
-        c.delete("placeholder")   # the empty-area prompt, Open Video button included
+        c.delete("placeholder")   # the empty-area prompt
 
         if self._resize_player_on:
             self._resize_place_player(geom)
@@ -7320,9 +7319,8 @@ class LosslessVideoApp(_BaseTk):
         self.audio_canvas = tk.Canvas(preview_frame, bg="black", highlightthickness=0)
         self.audio_canvas.pack(fill="both", expand=True)
         self.audio_canvas.bind("<Configure>", lambda e: self._redraw_audio_canvas())
-        self._bind_window_drag(self.audio_canvas, lambda e: not self.audio_input_path)
-        self.audio_open_btn = self._make_open_button(
-            self.audio_canvas, self.open_file_for_audio, self._on_drop_audio)
+        self._bind_window_drag(self.audio_canvas, lambda e: not self.audio_input_path,
+                               on_click=self.open_file_for_audio)
         self._draw_audio_placeholder(self.OPEN_PROMPT)
 
         # ---- playback controls
@@ -7454,7 +7452,7 @@ class LosslessVideoApp(_BaseTk):
         w = c.winfo_width() or 700
         h = c.winfo_height() or 350
         if text == self.OPEN_PROMPT:
-            self._draw_open_prompt(c, self.audio_open_btn, w, h)
+            self._draw_open_prompt(c, w, h)
         else:
             c.create_text(w / 2, h / 2, text=text, fill="#888888", font=("Segoe UI", 12))
 
@@ -7575,7 +7573,7 @@ class LosslessVideoApp(_BaseTk):
             # Like the Combine and Bulk Cut lists' empty text.
             placeholder = tk.Label(
                 self.audio_tracks_inner,
-                text="(drag & drop a video here, or click 'Open Video...')",
+                text="(drag & drop a video here, or click the video area above)",
                 bg="SystemWindow", fg="#777777", anchor="w", font=("Segoe UI", 10),
             )
             placeholder.pack(fill="x", padx=px(10), pady=px(8))
