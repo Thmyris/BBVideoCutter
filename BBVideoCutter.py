@@ -2404,6 +2404,7 @@ class LosslessVideoApp(_BaseTk):
         # "reencode" (Re-encode edges) or "editlist" (Edit-list trim).
         self.cut_mode_var = tk.StringVar(value="classic")
         self.cut_search_window = self.DEFAULT_SEARCH_WINDOW
+        self._search_window_dialog = None   # the box, while it's open
         self._progress_jobs = {}         # running job name -> time.monotonic() it started
 
         self.settings = load_settings()
@@ -2539,16 +2540,16 @@ class LosslessVideoApp(_BaseTk):
             label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
         )
 
-        # For the Cut and Bulk Cut tabs.
+        # For the Cut and Bulk Cut tabs. Choosing Edit-list trim opens a box
+        # asking for the keyframe search window.
         self.cut_menu = self._add_menu_bar_menu("Cut")
-        for label, mode in (
-                ("Lossless (recommended — fastest, may be a few ms off)", "classic"),
-                ("Re-encode edges (slower, frame-accurate)", "reencode"),
-                ("Edit-list trim (experimental — may not work on some players)", "editlist")):
-            self.cut_menu.add_radiobutton(label=label, variable=self.cut_mode_var, value=mode)
-        self.cut_menu.add_separator()
-        self.cut_menu.add_command(command=self._ask_search_window)
-        self._update_search_window_label()
+        for label, mode, command in (
+                ("Lossless (recommended — fastest, may be a few ms off)", "classic", None),
+                ("Re-encode edges (slower, frame-accurate)", "reencode", None),
+                ("Edit-list trim (experimental — may not work on some players)...", "editlist",
+                 self._ask_search_window)):
+            self.cut_menu.add_radiobutton(label=label, variable=self.cut_mode_var, value=mode,
+                                          command=command)
 
         options_menu = self._add_menu_bar_menu("Options")
         options_menu.add_checkbutton(
@@ -3117,13 +3118,10 @@ class LosslessVideoApp(_BaseTk):
     def _format_seconds(value):
         return f"{value:.3f}".rstrip("0").rstrip(".")
 
-    def _update_search_window_label(self):
-        self.cut_menu.entryconfigure(
-            "end", label=f"Keyframe search window: {self._format_seconds(self.cut_search_window)} s...")
-
     def _ask_search_window(self):
-        """Cut menu: a small dialog to set the keyframe search window,
-        stating what it does and its default. Waits until it is closed."""
+        """Opened by choosing Edit-list trim in the Cut menu: a small dialog
+        to set the keyframe search window, stating what it does and its
+        default. Cancel keeps the current value. Waits until it is closed."""
         default = self._format_seconds(self.DEFAULT_SEARCH_WINDOW)
         dlg = tk.Toplevel(self, bg="#f0f0f0")
         dlg.withdraw()
@@ -3158,7 +3156,6 @@ class LosslessVideoApp(_BaseTk):
                 error_lbl.config(text="Enter a number of seconds above 0 (at most 600).")
                 return
             self.cut_search_window = value
-            self._update_search_window_label()
             dlg.destroy()
 
         def reset():
