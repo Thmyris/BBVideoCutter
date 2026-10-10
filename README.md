@@ -68,6 +68,8 @@ installer):
 - `build_exe.bat` — quick test build
 - `build_setup.bat` — installer → `release/BBVideoCutter-Setup.exe`
 - `build_portable.bat` — zip → `release/BBVideoCutter-Portable.zip`
+- `build_portable_and_setup.bat` — both of the above, one after the
+  other, from a single app build
 
 Drop `ffmpeg.exe`/`ffprobe.exe` and `libmpv-2.dll` into `release/build/`
 first to bundle them.
