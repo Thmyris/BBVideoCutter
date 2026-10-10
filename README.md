@@ -17,9 +17,10 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
   (frame-exact), Edit-list trim (experimental). The mode is set in the
   **Cut** menu, for Bulk Cut too; choosing Re-encode edges or Edit-list
   trim opens a box for the keyframe search window (default 8 s).
-  **Add selected scene to cutter list** marks several ranges in one video;
-  **Cut selected ranges** cuts them all into separate clips, named the way
-  Bulk Cut names them.
+  **Add selected scene to the bulk cutting list** (key `A`) puts the
+  Start–End on the Bulk Cut list, on the video's own row, and marks it
+  green on the slider; **Cut selected scenes** goes to the Bulk Cut tab and
+  starts the bulk cut there, each scene into its own clip.
 - **Combine** — join videos without re-encoding (same codec/format).
 - **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
