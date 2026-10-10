@@ -2540,12 +2540,13 @@ class LosslessVideoApp(_BaseTk):
             label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
         )
 
-        # For the Cut and Bulk Cut tabs. Choosing Edit-list trim opens a box
-        # asking for the keyframe search window.
+        # For the Cut and Bulk Cut tabs. Choosing Re-encode edges or Edit-list
+        # trim opens a box asking for the keyframe search window.
         self.cut_menu = self._add_menu_bar_menu("Cut")
         for label, mode, command in (
                 ("Lossless (recommended — fastest, may be a few ms off)", "classic", None),
-                ("Re-encode edges (slower, frame-accurate)", "reencode", None),
+                ("Re-encode edges (slower, frame-accurate)...", "reencode",
+                 self._ask_search_window),
                 ("Edit-list trim (experimental — may not work on some players)...", "editlist",
                  self._ask_search_window)):
             self.cut_menu.add_radiobutton(label=label, variable=self.cut_mode_var, value=mode,
@@ -3119,9 +3120,10 @@ class LosslessVideoApp(_BaseTk):
         return f"{value:.3f}".rstrip("0").rstrip(".")
 
     def _ask_search_window(self):
-        """Opened by choosing Edit-list trim in the Cut menu: a small dialog
-        to set the keyframe search window, stating what it does and its
-        default. Cancel keeps the current value. Waits until it is closed."""
+        """Opened by choosing Re-encode edges or Edit-list trim in the Cut
+        menu: a small dialog to set the keyframe search window, stating what
+        it does and its default. Cancel keeps the current value. Waits until
+        it is closed."""
         default = self._format_seconds(self.DEFAULT_SEARCH_WINDOW)
         dlg = tk.Toplevel(self, bg="#f0f0f0")
         dlg.withdraw()

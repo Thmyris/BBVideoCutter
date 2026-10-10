@@ -15,8 +15,8 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 
 - **Cut** — trim a clip, three modes: Lossless (fastest), Re-encode edges
   (frame-exact), Edit-list trim (experimental). The mode is set in the
-  **Cut** menu, for Bulk Cut too; choosing Edit-list trim opens a box for
-  the keyframe search window (default 8 s).
+  **Cut** menu, for Bulk Cut too; choosing Re-encode edges or Edit-list
+  trim opens a box for the keyframe search window (default 8 s).
   **Add selected scene to cutter list** marks several ranges in one video;
   **Cut selected ranges** cuts them all into separate clips, named the way
   Bulk Cut names them.
