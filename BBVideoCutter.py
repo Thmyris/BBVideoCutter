@@ -2657,7 +2657,9 @@ class LosslessVideoApp(_BaseTk):
             "Drag & drop is enabled — drop a video onto the Cut, Crop/Rotate or Audio tab, "
             "or onto the Combine tab's list. The Crop/Rotate tab uses a visual crop editor; "
             "arbitrary spatial cropping requires video re-encoding.\n\n"
-            "Built with Python by Thmyris.",
+            "Built with Python by Thmyris.\n\n"
+            "Special thanks to\n"
+            "Josh (Madcat) - for testing and feedback",
         )
 
     # ====================================================================
