@@ -590,6 +590,93 @@ def probe_duration(ffprobe_exe: str, path: str):
         return None
 
 
+def _parse_rate(text):
+    """"30000/1001" -> 29.97..., or None for "0/0" and the like."""
+    try:
+        num, _, den = str(text).partition("/")
+        value = float(num) / float(den or 1)
+        return value if value > 0 else None
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def probe_join_format(ffprobe_exe: str, path: str):
+    """What a lossless join needs to be the same in every file: the first
+    video stream's codec, shown size (after rotation), pixel format, frame
+    rate and rotation, and the first audio stream's codec, sample rate and
+    channels. None if the file can't be read."""
+    try:
+        result = subprocess.run(
+            [ffprobe_exe, "-v", "error", "-show_entries",
+             "stream=index,codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,"
+             "r_frame_rate,sample_aspect_ratio,sample_rate,channels:"
+             "stream_side_data=rotation:stream_tags=rotate:format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=30, **SUBPROCESS_KWARGS,
+        )
+        data = json.loads(result.stdout or "{}")
+    except Exception:
+        return None
+    streams = data.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"
+                  and s.get("width")), None)
+    if video is None:
+        return None
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    rotation = 0
+    for side in video.get("side_data_list") or []:
+        if "rotation" in side:
+            rotation = int(round(float(side["rotation"])))
+    if not rotation and (video.get("tags") or {}).get("rotate"):
+        rotation = -int(video["tags"]["rotate"])
+    rotation %= 360
+    width, height = int(video["width"]), int(video["height"])
+    if rotation in (90, 270):
+        width, height = height, width
+    try:
+        duration = float((data.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        duration = None
+    rate_text = video.get("avg_frame_rate")
+    if not _parse_rate(rate_text):
+        rate_text = video.get("r_frame_rate")
+    return {
+        "vcodec": video.get("codec_name"), "width": width, "height": height,
+        "pix_fmt": video.get("pix_fmt"), "rotation": rotation,
+        "fps": _parse_rate(rate_text), "fps_text": rate_text if _parse_rate(rate_text) else None,
+        "acodec": audio.get("codec_name") if audio else None,
+        "sample_rate": int(audio.get("sample_rate") or 0) if audio else None,
+        "channels": int(audio.get("channels") or 0) if audio else None,
+        "duration": duration,
+    }
+
+
+def join_format_differences(formats):
+    """What keeps these files from a lossless join (names for the user,
+    e.g. ["resolution", "frame rate"]); [] if they all match the first one.
+    A None entry is a file that couldn't be read."""
+    if any(f is None for f in formats):
+        return ["unreadable file"]
+    first = formats[0]
+    checks = (
+        ("video codec", lambda f: f["vcodec"]),
+        ("resolution", lambda f: (f["width"], f["height"])),
+        ("pixel format", lambda f: f["pix_fmt"]),
+        ("rotation", lambda f: f["rotation"]),
+        ("audio", lambda f: f["acodec"] is not None),
+        ("audio codec", lambda f: f["acodec"]),
+        ("audio sample rate", lambda f: f["sample_rate"]),
+        ("audio channels", lambda f: f["channels"]),
+    )
+    diffs = [name for name, key in checks if any(key(f) != key(first) for f in formats[1:])]
+    if "audio" in diffs:   # some have none: their codec etc. differ too, say it once
+        diffs = [d for d in diffs if not d.startswith("audio ")]
+    fps = [f["fps"] for f in formats]
+    if all(fps) and any(abs(r - fps[0]) > 0.01 * fps[0] for r in fps[1:]):
+        diffs.insert(2, "frame rate")
+    return diffs
+
+
 _HW_ENCODER_CACHE = {}
 
 
@@ -877,6 +964,7 @@ DARK = {
     "text_dim": "#a9a9ae",
     "text_hint": "#8e8e93",
     "text_disabled": "#6e6e73",
+    "text_warn": "#e8a94a",
     "select": "#3d8bfd",
 }
 
@@ -947,6 +1035,7 @@ _FG_OPTIONS = {
     "black": "text", "#000000": "text",
     "systemdisabledtext": "text_disabled", "#a3a3a3": "text_disabled",
     "#555555": "text_dim", "#777777": "text_hint",
+    "#a35200": "text_warn",   # a notice, e.g. Combine will re-encode
     "systemwindowframe": "border",
 }
 _FG_OPTION_NAMES = ("foreground", "activeforeground", "disabledforeground",
@@ -2390,6 +2479,8 @@ class LosslessVideoApp(_BaseTk):
         self.combine_table = None        # FileTable, once the tab is built
         self.combine_info = {}           # path -> (length, video, audio) texts, once probed
         self.combine_info_pending = set()
+        self._combine_formats = {}       # path -> ((mtime, size), probe_join_format result)
+        self._combine_match_id = None    # pending re-check of whether the list matches
         self.combine_preview = None      # ClipPreview of the joined videos, made on first use
         self._combine_preview_sync_id = None
 
@@ -5050,11 +5141,16 @@ class LosslessVideoApp(_BaseTk):
 
         footer = tk.Frame(root, bg="#f0f0f0")
         footer.grid(row=2, column=0, sticky="ew", padx=3, pady=(4, 2))
-        tk.Label(footer, text="Note: lossless joining requires all videos to share the "
-                 "same codec/resolution/format (e.g. all H.264 MP4s). Mixed formats will "
-                 "fail with an ffmpeg error rather than silently re-encoding.",
+        tk.Label(footer, text="Note: videos that share the same codec, resolution, frame rate "
+                 "and audio format (e.g. all from the same recorder) are joined losslessly. "
+                 "Mixed videos are re-encoded to match the first one instead: slower, and "
+                 "not lossless.",
                  bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left"
                  ).pack(fill="x")
+        # Says when the current list will be re-encoded, and why.
+        self.combine_match_lbl = tk.Label(footer, text="", bg="#f0f0f0", fg="#a35200",
+                                          wraplength=px(850), justify="left", anchor="w")
+        self.combine_match_lbl.pack(fill="x")
 
         self.combine_btn = tk.Button(root, text="Combine Videos!", height=2,
                                       font=("Segoe UI", 10, "bold"),
@@ -5083,12 +5179,62 @@ class LosslessVideoApp(_BaseTk):
         selected = [order.index(i) for i in table.selected()]
         iids = table.replace([(p, self._combine_row_values(p)) for p in self.combine_files])
         table.select([iids[i] for i in selected if i < len(iids)])
+        self._schedule_combine_match_check()
 
     def _combine_table_changed(self):
         """The rows were reordered or removed in the list itself."""
         table = self.combine_table
         self.combine_files = [table.paths[i] for i in table.order()]
         self._schedule_combine_preview_sync()
+        self._schedule_combine_match_check()
+
+    # ---- will the join be lossless? ------------------------------------------
+    def _combine_format(self, ffprobe, path):
+        """probe_join_format of path, kept until the file changes."""
+        try:
+            st = os.stat(path)
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+        cached = self._combine_formats.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        fmt = probe_join_format(ffprobe, path)
+        self._combine_formats[path] = (stamp, fmt)
+        return fmt
+
+    def _combine_differences(self, ffprobe, files):
+        return join_format_differences([self._combine_format(ffprobe, p) for p in files])
+
+    def _schedule_combine_match_check(self):
+        if getattr(self, "combine_match_lbl", None) is None:
+            return
+        if self._combine_match_id is not None:
+            self.after_cancel(self._combine_match_id)
+        self._combine_match_id = self.after(200, self._combine_match_check)
+
+    def _combine_match_check(self):
+        """Probes the list in the background and updates the note under it."""
+        self._combine_match_id = None
+        files = tuple(self.combine_files)
+        if len(files) < 2:
+            self._show_combine_match(files, [])
+            return
+
+        def probe():
+            try:
+                diffs = self._combine_differences(find_exe("ffprobe"), files)
+            except FileNotFoundError:
+                diffs = []
+            self.after(0, lambda: self._show_combine_match(files, diffs))
+        self.thumb_pool.submit(probe)
+
+    def _show_combine_match(self, files, diffs):
+        if files != tuple(self.combine_files):
+            return   # the list changed meanwhile; a newer check is on its way
+        self.combine_match_lbl.config(
+            text=(f"These videos differ ({', '.join(diffs)}), so they will be re-encoded "
+                  "to match the first one.") if diffs else "")
 
     def _request_combine_info(self, path):
         if path in self.combine_info_pending:
@@ -5322,7 +5468,38 @@ class LosslessVideoApp(_BaseTk):
         except Exception:
             return None
 
+    class _LosslessJoinFailed(Exception):
+        """The files can't be joined by stream copy; the message says why."""
+
     def _run_combine(self, out_path):
+        """Joins the list losslessly (stream copy) when every file has the
+        same video and audio format; otherwise, or when ffmpeg can't copy
+        them together, re-encodes them all to match the first file and
+        says so when done."""
+        tmpdir = None
+        try:
+            ffmpeg = find_exe("ffmpeg")
+            ffprobe = find_exe("ffprobe")
+            tmpdir = tempfile.mkdtemp(prefix="lossless_combine_")
+            diffs = self._combine_differences(ffprobe, list(self.combine_files))
+            reason = f"they differ ({', '.join(diffs)})" if diffs else None
+            if reason is None:
+                try:
+                    self._combine_lossless(ffmpeg, ffprobe, tmpdir, out_path)
+                except self._LosslessJoinFailed as exc:
+                    reason = str(exc)
+            if reason is None:
+                self.after(0, lambda: self._combine_done(out_path, True))
+            else:
+                done_path, how = self._combine_reencode(ffmpeg, ffprobe, out_path, reason)
+                self.after(0, lambda: self._combine_done(done_path, True, how))
+        except Exception as exc:
+            self.after(0, lambda e=str(exc): self._combine_done(e, False))
+        finally:
+            if tmpdir and os.path.isdir(tmpdir):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _combine_lossless(self, ffmpeg, ffprobe, tmpdir, out_path):
         """
         Joins clips via an MPEG-TS intermediate step instead of feeding MP4s
         straight into the concat demuxer. Plain "concat demuxer + -c copy" on
@@ -5336,103 +5513,177 @@ class LosslessVideoApp(_BaseTk):
         The file list stays editable while this runs and is re-read before
         every step: a file removed before its turn is skipped, a file added
         mid-run is included, and the final join uses the list's order at
-        that moment.
+        that moment. Raises _LosslessJoinFailed when the final list doesn't
+        match or ffmpeg can't copy the files together.
         """
-        tmpdir = None
-        try:
-            ffmpeg = find_exe("ffmpeg")
-            ffprobe = find_exe("ffprobe")
+        prepared = {}    # path -> (ts path, duration)
+        durations = {}   # path -> duration (None if unreadable)
+        audio_codec = None
 
-            tmpdir = tempfile.mkdtemp(prefix="lossless_combine_")
-            prepared = {}    # path -> (ts path, duration)
-            durations = {}   # path -> duration (None if unreadable)
-            audio_codec = None
+        def overall_fraction(current_path, current_frac):
+            # Every file costs its own duration twice: once to repackage
+            # it, once more during the final join.
+            files = list(self.combine_files)
+            for p in files:
+                if p not in durations:
+                    durations[p] = probe_duration(ffprobe, p) or 1.0
+            total = 2 * sum(durations[p] for p in files) or 1.0
+            done = sum(durations[p] for p in files if p in prepared)
+            if current_path is not None:
+                done += durations.get(current_path, 1.0) * current_frac
+            return done / total
 
-            def overall_fraction(current_path, current_frac):
-                # Every file costs its own duration twice: once to repackage
-                # it, once more during the final join.
-                files = list(self.combine_files)
-                for p in files:
-                    if p not in durations:
-                        durations[p] = probe_duration(ffprobe, p) or 1.0
-                total = 2 * sum(durations[p] for p in files) or 1.0
-                done = sum(durations[p] for p in files if p in prepared)
-                if current_path is not None:
-                    done += durations.get(current_path, 1.0) * current_frac
-                return done / total
-
-            while True:
-                files = list(self.combine_files)
-                remaining = list(dict.fromkeys(p for p in files if p not in prepared))
-                if not remaining:
-                    break
-                p = remaining[0]
-                step = len(prepared) + 1
-                step_total = len(prepared) + len(remaining)
-                report = self._progress_reporter(
-                    lambda pct, s=step, n=step_total: f"Combining {s}/{n}... {pct}%", "combine"
-                )
-                if audio_codec is None:
-                    audio_codec = self._probe_codec(ffprobe, p, "a") or ""
-                video_codec = self._probe_codec(ffprobe, p, "v")
-                video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
-
-                ts_path = os.path.join(tmpdir, f"part_{len(prepared)}.ts")
-                cmd = [ffmpeg, "-y", "-i", p, "-c", "copy"]
-                if video_bsf:
-                    cmd += ["-bsf:v", video_bsf]
-                cmd += ["-f", "mpegts", ts_path]
-                overall_fraction(p, 0.0)  # makes sure p's duration is known
-                proc = run_ffmpeg(
-                    cmd, durations[p],
-                    lambda f, p=p, report=report: report(overall_fraction(p, f)),
-                )
-                if proc.returncode != 0:
-                    raise RuntimeError(
-                        f"Failed to prepare '{os.path.basename(p)}' for combining:\n\n"
-                        + proc.stderr[-1500:]
-                    )
-                prepared[p] = (ts_path, durations[p])
-
-            final_files = list(self.combine_files)
-            if len(final_files) < 2:
-                raise RuntimeError(
-                    "Fewer than 2 videos were left in the list, so nothing was combined."
-                )
-            audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
-            base_frac = overall_fraction(None, 0.0)
+        while True:
+            files = list(self.combine_files)
+            remaining = list(dict.fromkeys(p for p in files if p not in prepared))
+            if not remaining:
+                break
+            p = remaining[0]
+            step = len(prepared) + 1
+            step_total = len(prepared) + len(remaining)
             report = self._progress_reporter(
-                lambda pct, n=len(final_files): f"Combining: joining {n} files... {pct}%", "combine"
+                lambda pct, s=step, n=step_total: f"Combining {s}/{n}... {pct}%", "combine"
             )
-            ts_paths = [prepared[p][0] for p in final_files]
-            concat_arg = "concat:" + "|".join(ts_paths)
-            cmd = [ffmpeg, "-y", "-i", concat_arg, "-c", "copy"]
-            if audio_bsf:
-                cmd += ["-bsf:a", audio_bsf]
-            cmd += [out_path]
+            if audio_codec is None:
+                audio_codec = self._probe_codec(ffprobe, p, "a") or ""
+            video_codec = self._probe_codec(ffprobe, p, "v")
+            video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
+
+            ts_path = os.path.join(tmpdir, f"part_{len(prepared)}.ts")
+            cmd = [ffmpeg, "-y", "-i", p, "-c", "copy"]
+            if video_bsf:
+                cmd += ["-bsf:v", video_bsf]
+            cmd += ["-f", "mpegts", ts_path]
+            overall_fraction(p, 0.0)  # makes sure p's duration is known
             proc = run_ffmpeg(
-                cmd, sum(prepared[p][1] for p in final_files),
-                lambda f: report(base_frac + (1.0 - base_frac) * f),
+                cmd, durations[p],
+                lambda f, p=p, report=report: report(overall_fraction(p, f)),
             )
             if proc.returncode != 0:
-                raise RuntimeError(
-                    "ffmpeg couldn't stream-copy these files together -- this "
-                    "usually means they don't share the same codec/format.\n\n"
-                    + proc.stderr[-2000:]
-                )
-            self.after(0, lambda: self._combine_done(out_path, True))
-        except Exception as exc:
-            self.after(0, lambda e=str(exc): self._combine_done(e, False))
-        finally:
-            if tmpdir and os.path.isdir(tmpdir):
-                shutil.rmtree(tmpdir, ignore_errors=True)
+                raise self._LosslessJoinFailed(
+                    f"ffmpeg couldn't copy '{os.path.basename(p)}' without re-encoding")
+            prepared[p] = (ts_path, durations[p])
 
-    def _combine_done(self, info, success):
+        final_files = list(self.combine_files)
+        if len(final_files) < 2:
+            raise RuntimeError(
+                "Fewer than 2 videos were left in the list, so nothing was combined."
+            )
+        # Files added while this ran are checked too.
+        diffs = self._combine_differences(ffprobe, final_files)
+        if diffs:
+            raise self._LosslessJoinFailed(f"they differ ({', '.join(diffs)})")
+        audio_bsf = {"aac": "aac_adtstoasc"}.get(audio_codec)
+        base_frac = overall_fraction(None, 0.0)
+        report = self._progress_reporter(
+            lambda pct, n=len(final_files): f"Combining: joining {n} files... {pct}%", "combine"
+        )
+        ts_paths = [prepared[p][0] for p in final_files]
+        concat_arg = "concat:" + "|".join(ts_paths)
+        cmd = [ffmpeg, "-y", "-i", concat_arg, "-c", "copy"]
+        if audio_bsf:
+            cmd += ["-bsf:a", audio_bsf]
+        cmd += [out_path]
+        proc = run_ffmpeg(
+            cmd, sum(prepared[p][1] for p in final_files),
+            lambda f: report(base_frac + (1.0 - base_frac) * f),
+        )
+        if proc.returncode != 0:
+            raise self._LosslessJoinFailed("ffmpeg couldn't join them without re-encoding")
+
+    # Containers that can't hold H.264 + AAC; the re-encode writes MP4 instead.
+    _REENCODE_EXT_SWAP = {".webm": ".mp4"}
+    _LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}
+
+    def _combine_reencode(self, ffmpeg, ffprobe, out_path, reason):
+        """Re-encodes the list (as it is now) into one video shaped like the
+        first file: its size (others scaled to fit, with black bars), frame
+        rate and audio format, H.264 + AAC. One ffmpeg run with the concat
+        filter, which also pads a clip's missing or short audio with
+        silence. Returns (the path written, what was done for the user)."""
+        files = list(self.combine_files)
+        if len(files) < 2:
+            raise RuntimeError("Fewer than 2 videos were left in the list, so nothing was combined.")
+        formats = [self._combine_format(ffprobe, p) for p in files]
+        for p, fmt in zip(files, formats):
+            if fmt is None:
+                raise RuntimeError(f"'{os.path.basename(p)}' couldn't be read as a video.")
+        first = formats[0]
+        width, height = first["width"] // 2 * 2, first["height"] // 2 * 2
+        fps_text = first["fps_text"] or "30"
+        with_audio = next((f for f in formats if f["acodec"]), None)
+        sample_rate = (with_audio or {}).get("sample_rate") or 48000
+        channels = (with_audio or {}).get("channels") or 2
+        layout = self._LAYOUTS.get(channels, "stereo")
+
+        root, ext = os.path.splitext(out_path)
+        new_ext = self._REENCODE_EXT_SWAP.get(ext.lower())
+        if new_ext:
+            out_path = root + new_ext
+            if os.path.exists(out_path):
+                out_path = unique_output_path(out_path)
+
+        inputs, chains, pairs = [], [], []
+        for i, (p, fmt) in enumerate(zip(files, formats)):
+            inputs += ["-i", p]
+            chains.append(
+                f"[{i}:v:0]scale={width}:{height}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                f"fps={fps_text},format=yuv420p[v{i}]")
+            if with_audio:
+                if fmt["acodec"]:
+                    chains.append(f"[{i}:a:0]aresample={sample_rate},"
+                                  f"aformat=sample_rates={sample_rate}:channel_layouts={layout}[a{i}]")
+                else:
+                    length = fmt["duration"] or 0.1
+                    chains.append(f"anullsrc=r={sample_rate}:cl={layout},"
+                                  f"atrim=duration={length:.3f}[a{i}]")
+                pairs.append(f"[v{i}][a{i}]")
+            else:
+                pairs.append(f"[v{i}]")
+        chains.append("".join(pairs) + f"concat=n={len(files)}:v=1:a={1 if with_audio else 0}"
+                      + ("[v][a]" if with_audio else "[v]"))
+        graph = ";".join(chains)
+        total = sum(f["duration"] or 0.0 for f in formats) or None
+        report = self._progress_reporter(
+            lambda pct: f"Combining (re-encoding: {reason})... {pct}%", "combine")
+
+        def build_cmd(encoder_args):
+            cmd = [ffmpeg, "-y", *inputs, "-filter_complex", graph, "-map", "[v]"]
+            if with_audio:
+                cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]
+            cmd += [*encoder_args, "-pix_fmt", "yuv420p"]
+            if os.path.splitext(out_path)[1].lower() in (".mp4", ".mov", ".m4v"):
+                cmd += ["-movflags", "+faststart"]
+            return cmd + [out_path]
+
+        encoder_args, label = get_video_encoder_args(ffmpeg)
+        proc = run_ffmpeg(build_cmd(encoder_args), total, report)
+        if proc.returncode != 0 and encoder_args[1] != "libx264":
+            # A GPU encoder can refuse a size or fail in the driver: the
+            # software one, once, before giving up.
+            encoder_args, label = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"],
+                                   "CPU (libx264)")
+            proc = run_ffmpeg(build_cmd(encoder_args), total, report)
+        if proc.returncode != 0:
+            raise RuntimeError("Re-encoding the videos to combine them failed:\n\n"
+                               + proc.stderr[-2000:])
+        rate = _parse_rate(fps_text) or 30.0
+        how = (f"The videos couldn't be joined losslessly because {reason}, so they were "
+               f"re-encoded to match the first one: {width}x{height} at "
+               f"{rate:.3f}".rstrip("0").rstrip(".") + f" fps, H.264 ({label})"
+               + (", AAC audio" if with_audio else "") + ". This is not lossless.")
+        if new_ext:
+            how += f"\n\nWebM can't hold H.264, so it was saved as {new_ext[1:].upper()}."
+        return out_path, how
+
+    def _combine_done(self, info, success, reencoded=None):
         self._end_progress("combine")
         self.combine_btn.config(state="normal")
         if success:
-            self.status_lbl.config(text=f"Saved: {info}")
-            messagebox.showinfo("Done", f"Combined video saved to:\n{info}")
+            self.status_lbl.config(text=f"Saved{' (re-encoded)' if reencoded else ''}: {info}")
+            messagebox.showinfo("Done", f"Combined video saved to:\n{info}"
+                                + (f"\n\n{reencoded}" if reencoded else ""))
         else:
             self.status_lbl.config(text="Combine failed")
             messagebox.showerror("ffmpeg error", info)

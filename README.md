@@ -21,7 +21,11 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
   Start–End on the Bulk Cut list, on the video's own row, and marks it
   green on the slider; **Cut selected scenes** goes to the Bulk Cut tab and
   starts the bulk cut there, each scene into its own clip.
-- **Combine** — join videos without re-encoding (same codec/format).
+- **Combine** — join videos without re-encoding when they share codec,
+  resolution, frame rate and audio format. Mixed videos are re-encoded to
+  match the first one instead (H.264 + AAC, others scaled to fit with black
+  bars); a note under the list says when and why, and so does the message
+  when it's done.
 - **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
   minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
