@@ -2563,7 +2563,7 @@ class LosslessVideoApp(_BaseTk):
             variable=self.warn_overwrite_var,
         )
         options_menu.add_checkbutton(
-            label="Show frame by frame movement buttons",
+            label="Show frame by frame movement buttons in the video player",
             variable=self.show_frame_buttons_var,
             command=self._on_show_frame_buttons_toggled,
         )
@@ -3215,7 +3215,8 @@ class LosslessVideoApp(_BaseTk):
         row.center_on(self.cut_play_btn)
         frame_fwd = button("Frame ▶", lambda: self._cut_frame_step(True))
         button("End ▶|", lambda: self._cut_go_to("end"))
-        # Shown only with Options > Show frame by frame movement buttons;
+        # Shown only with Options > Show frame by frame movement buttons in
+        # the video player;
         # the , and . keys step a frame either way.
         self.cut_frame_buttons = (frame_back, frame_fwd)
         Tooltip(self.cut_play_btn, "Shortcut: Space")
