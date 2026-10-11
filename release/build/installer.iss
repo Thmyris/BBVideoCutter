@@ -13,17 +13,11 @@
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Thmyris"
 #define MyAppExeName "BBVideoCutter.exe"
-; Fixed GUID so re-installs/upgrades are recognized as the same app
-; instead of installing side-by-side -- do not change this once shipped.
-#define MyAppGuid "9E7A6B8B-5C2E-4C9A-9E3B-2B7B6D1E4F21"
-; Where an all-users install (from before installs were per-user only)
-; has its uninstall entry.
-#define OldCopyRootA "HKLM64"
-#define OldCopyRootB "HKLM32"
-#define OldCopyKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\{" + MyAppGuid + "}_is1"
 
 [Setup]
-AppId={{{#MyAppGuid}}
+; Fixed GUID so re-installs/upgrades are recognized as the same app
+; instead of installing side-by-side -- do not change this once shipped.
+AppId={{9E7A6B8B-5C2E-4C9A-9E3B-2B7B6D1E4F21}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -42,7 +36,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Always a per-user install (%LOCALAPPDATA%\Programs): no UAC prompt, and
 ; no second copy from someone picking "all users" one time and "just me"
-; the next. An older all-users copy is offered for removal (see [Code]).
+; the next.
 PrivilegesRequired=lowest
 
 [Languages]
@@ -66,39 +60,3 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
-
-[Code]
-// The uninstaller of an all-users copy, if one is installed.
-function OldCopyUninstaller(var Uninstaller: String): Boolean;
-begin
-  Result := False;
-  if IsWin64 then   // the 64-bit view doesn't exist on 32-bit Windows
-    Result := RegQueryStringValue({#OldCopyRootA}, '{#OldCopyKey}', 'UninstallString', Uninstaller);
-  if not Result then
-    Result := RegQueryStringValue({#OldCopyRootB}, '{#OldCopyKey}', 'UninstallString', Uninstaller);
-  Uninstaller := RemoveQuotes(Uninstaller);
-end;
-
-// This version installs per user only, so an older all-users copy would
-// stay next to it as a second one: offer to remove it.
-function InitializeSetup(): Boolean;
-var
-  Uninstaller: String;
-  ErrorCode: Integer;
-begin
-  Result := True;
-  if not OldCopyUninstaller(Uninstaller) then
-    Exit;
-  Log('An all-users copy is installed; its uninstaller: ' + Uninstaller);
-  if WizardSilent then
-    Exit;
-  if MsgBox('An older copy of {#MyAppName} is installed for all users. This version installs just for you, '
-      + 'so the old copy would stay as a second one.' + #13#10#13#10
-      + 'Remove the old copy now? Windows will ask for permission.', mbConfirmation, MB_YESNO) = IDYES then
-  begin
-    if not ShellExec('runas', Uninstaller, '/SILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_SHOWNORMAL,
-        ewWaitUntilTerminated, ErrorCode) then
-      MsgBox('The old copy could not be removed (' + SysErrorMessage(ErrorCode) + '). '
-        + 'You can remove it from Add or Remove Programs.', mbInformation, MB_OK);
-  end;
-end;
