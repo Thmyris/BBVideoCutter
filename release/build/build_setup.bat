@@ -21,8 +21,8 @@ REM      If ffmpeg.exe/ffprobe.exe are sitting in this same folder,
 REM      they're included so the installed app needs nothing on the
 REM      system PATH. Uses ..\..\assets\barkbark2.ico as the app's icon.
 REM   3) Compiles installer.iss with Inno Setup's ISCC.exe, packaging
-REM      dist\BBVideoCutter\ into a proper installer (Program Files or
-REM      per-user install, Start Menu shortcut, uninstaller) -- also
+REM      dist\BBVideoCutter\ into a proper installer (per-user install to
+REM      %LOCALAPPDATA%\Programs, Start Menu shortcut, uninstaller) -- also
 REM      using ..\..\assets\barkbark2.ico as the installer's own icon.
 REM   4) Copies the finished installer out to release\ (one level up)
 REM      as BBVideoCutter-Setup.exe, then deletes every intermediate
