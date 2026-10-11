@@ -42,6 +42,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
+[InstallDelete]
+; Installing over an older version: clear its bundle first, so files the
+; new build no longer has don't pile up next to it.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "dist\BBVideoCutter\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
