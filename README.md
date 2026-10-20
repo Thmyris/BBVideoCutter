@@ -18,7 +18,8 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
   **Cut** menu, for Bulk Cut too; choosing Re-encode edges or Edit-list
   trim opens a box for the keyframe search window (default 8 s).
   **Mark Start** / **Mark End** (next to Play; keys `I` / `O`) set the
-  start / end at the frame on screen.
+  start / end at the frame on screen, and **Replay selected part** (under
+  the volume) plays Start to End once.
   **Add selected scene to the bulk cutting list** (key `A`) puts the
   Start–End on the Bulk Cut list, on the video's own row, and marks it
   green on the slider; **Cut selected scenes** goes to the Bulk Cut tab and

@@ -1543,6 +1543,7 @@ class VideoPlayer:
         # Kept here too, so they can be set before mpv is started.
         self.volume = 100.0
         self.muted = False
+        self._range = None   # the play_range running: its end and progress
 
     # ---- life cycle ----------------------------------------------------
     def _ensure_mpv(self):
@@ -1627,6 +1628,7 @@ class VideoPlayer:
     def _poll(self):
         self._poll_id = self.frame.after(33, self._poll)
         self._disable_mpv_windows()
+        self._check_range()
         seen = tuple(self.state.get(name) for name in self.OBSERVED + ("ready", "failed"))
         if seen != self._last_seen:
             self._last_seen = seen
@@ -1713,6 +1715,7 @@ class VideoPlayer:
     def load(self, path, start=None):
         """Opens path (a file or an edl_url()), paused, at time start."""
         self._ensure_mpv()
+        self._clear_range()
         self.state.pop("time-pos", None)
         self.state.pop("track-list", None)   # the old file's, until the new one's arrive
         self.state.pop("aid", None)
@@ -1727,6 +1730,7 @@ class VideoPlayer:
 
     def unload(self):
         if self.mpv is not None:
+            self._clear_range()
             self.mpv.pause = True
             self._async("stop")
 
@@ -1762,6 +1766,40 @@ class VideoPlayer:
     def frame_step(self, forward=True):
         if self.mpv is not None:
             self._async("frame-step" if forward else "frame-back-step")
+
+    def play_range(self, start, end):
+        """Plays from start to end once, then stops on the last frame
+        before end. mpv's own end option does the stopping, so it stops
+        right there, not up to a poll later; it is cleared once playback
+        stops (there, or paused earlier) and on the next load."""
+        if self.mpv is None:
+            return
+        self.mpv["end"] = f"{end:.6f}"
+        self._range = {"end": end, "since": time.monotonic(), "started": False}
+        self.show_first_frame_from(start)
+        self.mpv.pause = False
+
+    def _check_range(self):
+        """From _poll: is the play_range over?"""
+        rng = self._range
+        if rng is None or self.mpv is None:
+            return
+        if not self.paused:
+            rng["started"] = True
+            return
+        # Paused: at the end, or by the user. (Right after play_range the
+        # state can still say paused from before; give it a moment.)
+        if rng["started"] or time.monotonic() - rng["since"] > 0.5:
+            reached_end = bool(self.state.get("eof-reached"))
+            self._clear_range()
+            if reached_end:
+                self.show_last_frame_before(rng["end"])
+
+    def _clear_range(self):
+        if self._range is not None:
+            self._range = None
+            if self.mpv is not None:
+                self.mpv["end"] = "none"
 
     def set_volume(self, volume):
         """volume: 0-100 (percent)."""
@@ -3133,8 +3171,17 @@ class LosslessVideoApp(_BaseTk):
         if self.cut_player is not None:
             self._build_cut_transport(controls)
 
-        time_row = tk.Frame(controls, bg="#f0f0f0")
-        time_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
+        # Start / End in the middle; at the right, under the volume, replay.
+        time_box = CenteredRow(controls, bg="#f0f0f0")
+        time_box.pack(fill="x", pady=(1, 2))
+        time_row = time_box.center
+        if self.cut_player is not None:
+            replay = tk.Button(time_box.right, text="Replay selected part", command=self._cut_replay,
+                               state="disabled")
+            replay.pack(side="right")
+            Tooltip(replay, "Plays from Start to End once, then stops")
+            self.cut_transport_buttons.append(replay)
+            self.cut_replay_btn = replay
         self.handle_var = tk.StringVar(value="end")
         start_radio = tk.Radiobutton(
             time_row, text="Start:", variable=self.handle_var, value="start",
@@ -3590,6 +3637,11 @@ class LosslessVideoApp(_BaseTk):
     def _cut_frame_step(self, forward):
         if self._cut_player_on:
             self.cut_player.frame_step(forward)
+
+    def _cut_replay(self):
+        """Plays the selected part, Start to End, once."""
+        if self._cut_player_on and self.end_sec > self.start_sec:
+            self.cut_player.play_range(self.start_sec, self.end_sec)
 
     def _cut_seek_by(self, seconds):
         if self._cut_player_on:
