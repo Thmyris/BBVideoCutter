@@ -3304,11 +3304,16 @@ class LosslessVideoApp(_BaseTk):
             return b
 
         button("|◀ Start", lambda: self._cut_go_to("start"))
+        mark_start = button("Mark Start", lambda: self._cut_mark("start"))
         frame_back = button("◀ Frame", lambda: self._cut_frame_step(False))
         self.cut_play_btn = button("▶ Play", self._cut_toggle_play, width=8)
         row.center_on(self.cut_play_btn)
         frame_fwd = button("Frame ▶", lambda: self._cut_frame_step(True))
+        mark_end = button("Mark End", lambda: self._cut_mark("end"))
         button("End ▶|", lambda: self._cut_go_to("end"))
+        self.cut_mark_buttons = (mark_start, mark_end)
+        Tooltip(mark_start, "Sets the start at the frame on screen. Shortcut: I")
+        Tooltip(mark_end, "Sets the end at the frame on screen. Shortcut: O")
         # Shown only with Options > Show frame by frame movement buttons in
         # the video player;
         # the , and . keys step a frame either way.
