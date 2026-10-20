@@ -2429,6 +2429,7 @@ class LosslessVideoApp(_BaseTk):
 
         self.input_path = None
         self.duration = 0.0
+        self.cut_video_start = 0.0      # first video frame's time (_load_video_for_cut)
         self.file_size = 0
         self.start_sec = 0.0
         self.end_sec = 0.0
@@ -3363,11 +3364,11 @@ class LosslessVideoApp(_BaseTk):
         Tooltip(mark_end, "Sets the end at the frame on screen. Shortcut: O")
         # Shown only with Options > Show frame by frame movement buttons in
         # the video player;
-        # the , and . keys step a frame either way.
+        # the , and . keys move the selected Start / End a frame either way.
         self.cut_frame_buttons = (frame_back, frame_fwd)
         Tooltip(self.cut_play_btn, "Shortcut: Space")
-        Tooltip(frame_back, "Shortcut: ,")
-        Tooltip(frame_fwd, "Shortcut: .")
+        Tooltip(frame_back, "Moves the selected Start / End one frame back. Shortcut: ,")
+        Tooltip(frame_fwd, "Moves the selected Start / End one frame forward. Shortcut: .")
         self._on_show_frame_buttons_toggled(save=False)
         self.cut_time_lbl = tk.Label(row.left, text="", bg="#f0f0f0", anchor="w",
                                      font=("Segoe UI", 9))
@@ -3376,8 +3377,9 @@ class LosslessVideoApp(_BaseTk):
         for b in self.cut_transport_buttons:
             b.config(state="disabled")
 
-        # Keyboard: Space play/pause, I / O set start / end, , / . one
-        # frame back / forward, Left / Right 5 s (with Shift 1 s).
+        # Keyboard: Space play/pause, I / O set start / end, , / . move the
+        # selected start / end one frame back / forward, Left / Right 5 s
+        # (with Shift 1 s).
         keys = {
             "<KeyPress-space>": lambda: self._cut_toggle_play(),
             "<KeyPress-i>": lambda: self._cut_mark("start"),
@@ -3635,8 +3637,34 @@ class LosslessVideoApp(_BaseTk):
             self.cut_player.toggle_pause()
 
     def _cut_frame_step(self, forward):
-        if self._cut_player_on:
-            self.cut_player.frame_step(forward)
+        """Moves the selected Start or End one frame back / forward and
+        shows the frame now first / last in the cut. As with _cut_mark, the
+        time lands half a frame before / after that frame, at the
+        millisecond. Frames are taken one frame duration apart from the
+        video's first one (not from the player's position: after a seek
+        that is the seek's target, not the frame's own time)."""
+        if not self._cut_player_on or str(self.save_btn.cget("state")) == "disabled":
+            return
+        p = self.cut_player
+        fd = p.frame_duration
+        phase = self.cut_video_start
+        step = 1 if forward else -1
+        # A time within 5% of a frame of a frame's own time counts as that
+        # frame's (a file's timestamps can be rounded to the millisecond).
+        tol = 0.05
+        p.set_paused(True)
+        if self.active_handle == "start":
+            # The first frame in the cut is the first one at or after Start.
+            first = math.ceil((self.start_sec - phase) / fd - tol) + step
+            self.start_sec = min(max(0.0, phase + (first - 0.5) * fd), self.end_sec)
+            self._cut_show_time(self.start_sec, "start")
+        else:
+            # The last frame in the cut is the last one before End.
+            last = math.ceil((self.end_sec - phase) / fd - tol) - 1 + step
+            self.end_sec = max(min(self.duration, phase + (last + 0.5) * fd), self.start_sec)
+            self._cut_show_time(self.end_sec, "end")
+        self._sync_entries()
+        self._redraw_slider()
 
     def _cut_replay(self):
         """Plays the selected part, Start to End, once."""
@@ -3766,15 +3794,26 @@ class LosslessVideoApp(_BaseTk):
             self.update_idletasks()
             ffprobe = find_exe("ffprobe")
             result = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                [ffprobe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "format=duration,start_time:stream=start_time",
+                 "-of", "json", path],
                 capture_output=True, text=True, check=True, **SUBPROCESS_KWARGS,
             )
-            duration = float(result.stdout.strip())
+            info = json.loads(result.stdout or "{}")
+            duration = float(info["format"]["duration"])
         except Exception as exc:
             messagebox.showerror("Error loading video", str(exc))
             self.status_lbl.config(text="Ready")
             return
+        # Where the video's frames start on the cut's clock (ffmpeg -ss's,
+        # from the file's start time): the frame buttons step Start / End
+        # on that grid (_cut_frame_step).
+        try:
+            streams = info.get("streams") or [{}]
+            self.cut_video_start = (float(streams[0]["start_time"])
+                                    - float(info["format"].get("start_time", 0)))
+        except (KeyError, ValueError, TypeError):
+            self.cut_video_start = 0.0
 
         self.input_path = path
         self.duration = duration

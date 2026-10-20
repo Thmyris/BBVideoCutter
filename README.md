@@ -51,8 +51,9 @@ shows where they will land). Bulk Cut cuts the files in the list's order.
 Drag & drop supported throughout. Dark mode under **View**. Under
 **Options**: save to the source video's folder (on) or ask where to save,
 for every tab; warn before overwriting; show the frame by frame movement
-buttons in the video player on the Cut tab (the `,` and `.` keys step a
-frame either way).
+buttons in the video player on the Cut tab: they move the selected Start
+or End one frame, to the millisecond (the `,` and `.` keys do it either
+way).
 
 ## Running from source
 
