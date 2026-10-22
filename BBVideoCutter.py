@@ -2676,6 +2676,7 @@ class LosslessVideoApp(_BaseTk):
         self._audio_restart_after_id = None  # debounce for restarting playback after a volume/track change
         self.audio_player = None          # VideoPlayer over the preview (None without libmpv)
         self._audio_player_on = False     # the player shows the video (else still frames + ffplay)
+        self._audio_wave_scrubbing = False  # the mouse is moving the playback on a waveform
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
         self._audio_note = None           # shown instead of the open prompt (_audio_show_no_audio)
         # Noise reduction (DENOISE_LEVELS). The DeepFilterNet levels are
@@ -8488,6 +8489,9 @@ class LosslessVideoApp(_BaseTk):
             wave_canvas = tk.Canvas(row, height=px(96), bg="#0a0a0a", highlightthickness=0)
             wave_canvas.pack(fill="x", padx=3, pady=(0, 6))
             wave_canvas.bind("<Configure>", lambda e, t=track: self._audio_redraw_waveform(t))
+            wave_canvas.bind("<ButtonPress-1>", self._audio_wave_press)
+            wave_canvas.bind("<B1-Motion>", self._audio_wave_drag)
+            wave_canvas.bind("<ButtonRelease-1>", self._audio_wave_release)
             wave_canvas.create_text(
                 px(10), px(48), text="Generating waveform…", fill="#666666",
                 anchor="w", font=("Segoe UI", 9), tags=("placeholder",)
@@ -8632,6 +8636,37 @@ class LosslessVideoApp(_BaseTk):
                 continue
             self._audio_draw_playhead(track, cw, ch)
 
+    def _audio_wave_press(self, event):
+        """A press on a track's waveform moves the playback there; dragging
+        scrubs, like the slider (keyframes while moving, the exact frame on
+        release)."""
+        if not self.audio_input_path or self.audio_duration <= 0:
+            return
+        self._audio_wave_scrubbing = True
+        self._audio_wave_seek(event, exact=False)
+
+    def _audio_wave_drag(self, event):
+        if self._audio_wave_scrubbing:
+            self._audio_wave_seek(event, exact=False)
+
+    def _audio_wave_release(self, event):
+        if self._audio_wave_scrubbing:
+            self._audio_wave_scrubbing = False
+            self._audio_wave_seek(event, exact=True)
+
+    def _audio_wave_seek(self, event, exact):
+        width = max(1, event.widget.winfo_width())
+        t = max(0.0, min(1.0, event.x / width)) * self.audio_duration
+        self.audio_slider.set(t)
+        if self._audio_player_on:
+            if self._audio_player_ready():
+                self.audio_player.seek(t, exact=exact)
+            self._audio_show_time(t)
+        elif exact:
+            self._audio_slider_changed(t)   # ffplay restarts once, on release
+        else:
+            self._audio_show_time(t)
+
     # ---- playback ---------------------------------------------------------
     # With libmpv the video plays in the player (as on the Cut tab), with
     # the enabled tracks mixed at their volumes as Finalize mixes them
@@ -8670,8 +8705,8 @@ class LosslessVideoApp(_BaseTk):
             self._audio_apply_mix()   # the file just opened; else it's already set
         self.audio_play_btn.config(text="▶ Play" if p.paused else "⏸ Pause")
         pos = p.position
-        if pos is None:
-            return
+        if pos is None or self._audio_wave_scrubbing:
+            return   # while scrubbing, the playheads stay under the mouse
         self.audio_time_sec = max(0.0, min(self.audio_duration, pos))
         self.audio_time_lbl.config(text=seconds_to_hms(self.audio_time_sec))
         if not self.audio_slider.dragging:

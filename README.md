@@ -46,7 +46,8 @@ only when the window is too narrow for their names).
   filtering** are DeepFilterNet, worked out in the background first (the
   track plays unfiltered until then, and Save / Auto Balance wait for it).
   Medium lowers the noise by at most 12 dB, so a little background stays
-  and voices sound natural; Extreme takes it all.
+  and voices sound natural; Extreme takes it all. Click or drag on a
+  track's waveform to move the playback there.
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; a video's
