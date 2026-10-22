@@ -7644,6 +7644,10 @@ class LosslessVideoApp(_BaseTk):
     # re-encoded, because combining separate compressed audio streams into
     # one requires decoding them first -- there's no lossless way to mix.
     # ====================================================================
+    # The Audio tab's volume sliders go up to this (400%, +12 dB). Above
+    # 100% a loud track's peaks can go past full scale and clip.
+    AUDIO_MAX_GAIN = 4.0
+
     def _build_audio_tab(self):
         root = self.audio_tab
         root.columnconfigure(0, weight=1)
@@ -7968,7 +7972,7 @@ class LosslessVideoApp(_BaseTk):
                 vol_frame, command=lambda v, t=track: self._audio_volume_changed(t, v),
                 width=160, height=22,
             )
-            vol_slider.config_range(to=2.0)
+            vol_slider.config_range(to=self.AUDIO_MAX_GAIN)
             vol_slider.set(1.0)
             vol_slider.pack(side="right", padx=(6, 6))
             track["volume_slider"] = vol_slider
@@ -8051,7 +8055,7 @@ class LosslessVideoApp(_BaseTk):
         # centerline by the volume factor. Regenerating from ffmpeg per volume
         # tick would be far too slow; this is a cheap PIL resize on a small image.
         base = img.resize((target_w, img.height), Image.BILINEAR)
-        scale = max(0.1, min(2.5, volume))
+        scale = max(0.1, min(self.AUDIO_MAX_GAIN, volume))
         scaled_h = max(4, int(round(base.height * scale)))
         scaled = base.resize((target_w, scaled_h), Image.BILINEAR)
         canvas_img = Image.new("RGB", (target_w, target_h), (10, 10, 10))
@@ -8343,6 +8347,9 @@ class LosslessVideoApp(_BaseTk):
                 m = mean_re.search(proc.stderr)
                 means[track["a_index"]] = float(m.group(1)) if m else None
 
+            # A (nearly) silent track has nothing to match: it keeps 100%
+            # and doesn't pull the others' target down.
+            means = {a: v if v is not None and v > -60.0 else None for a, v in means.items()}
             known = [v for v in means.values() if v is not None]
             if not known:
                 raise RuntimeError("Could not measure loudness for any track.")
@@ -8350,13 +8357,14 @@ class LosslessVideoApp(_BaseTk):
             # boosted, loud ones get pulled down, so nothing dominates.
             target_db = sum(known) / len(known)
 
-            gains = {}
-            for a_index, mean_db in means.items():
-                if mean_db is None:
-                    gains[a_index] = 1.0
-                    continue
-                gain_db = max(-24.0, min(24.0, target_db - mean_db))
-                gains[a_index] = max(0.0, min(2.0, 10 ** (gain_db / 20)))
+            gains_db = {a: max(-24.0, min(24.0, target_db - v))
+                        for a, v in means.items() if v is not None}
+            # Past the volume slider's top, every track is turned down the
+            # same amount instead, so they still come out equally loud.
+            over = max(gains_db.values()) - 20 * math.log10(self.AUDIO_MAX_GAIN)
+            gains = {a: 1.0 for a in means}
+            for a, db in gains_db.items():
+                gains[a] = 10 ** ((db - max(0.0, over)) / 20)
 
             self.after(0, lambda: self._audio_auto_balance_done(gains, True, None))
         except Exception as exc:
