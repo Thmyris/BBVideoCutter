@@ -533,6 +533,14 @@ RNNOISE_MODEL = "cb.rnnn"   # GregorR/rnnoise-models' general-purpose model
 # arnndn's mix for Light: the share of the filtered audio, the rest the
 # original (0.5: the noise drops by at most 6 dB).
 RNNOISE_MIX = 0.5
+# arnndn's output comes 10 ms late (480 samples at its 48 kHz). ffmpeg
+# (Finalize, the ffplay mix) drops those first 10 ms and moves the rest back
+# (RNNOISE_TRIM; a timestamp shift alone is ignored by amix and the
+# encoders). In the player that trim does nothing (its filter graph's
+# timestamps don't start at 0), so there the other tracks are delayed as
+# much and the whole mix plays that much earlier (_audio_apply_mix).
+RNNOISE_DELAY = 0.01
+RNNOISE_TRIM = f"atrim=start={RNNOISE_DELAY},asetpts=PTS-{RNNOISE_DELAY}/TB"
 DEEP_FILTER_EXE = "deep-filter.exe"
 # deep-filter's run time, as a fraction of the track's length: a base plus
 # a part per channel (measured on a Ryzen 7 7800X3D; each run corrects
@@ -1644,6 +1652,7 @@ class VideoPlayer:
         self.audio_mix = None
         self._mix_pending = False
         self._mix_graph = ""   # the lavfi-complex set
+        self._audio_delay = 0.0
 
     # ---- life cycle ----------------------------------------------------
     def _ensure_mpv(self):
@@ -1943,6 +1952,13 @@ class VideoPlayer:
         if self.mpv is not None:
             self.set_audio_mix(None)
             self.mpv.aid = track_id
+
+    def set_audio_delay(self, seconds):
+        """Plays the audio this much later than the video (earlier when
+        negative)."""
+        if self.mpv is not None and seconds != self._audio_delay:
+            self.mpv["audio-delay"] = seconds
+            self._audio_delay = seconds
 
     def set_audio_mix(self, track_ids, volumes=None, filters=None):
         """Plays the audio tracks track_ids (mpv's ids) at once, summed as
@@ -8734,6 +8750,7 @@ class LosslessVideoApp(_BaseTk):
             if not t["enabled_var"].get():
                 continue
             wav, chain = self._audio_denoise_source(t)
+            filters.append(chain)
             track_id = t["a_index"] + 1     # mpv counts audio tracks from 1
             if wav is not None:
                 added = player.external_audio_id(wav)
@@ -8744,7 +8761,13 @@ class LosslessVideoApp(_BaseTk):
                     player.add_audio_file(wav)
             ids.append(track_id)
             volumes.append(t["volume_slider"].get() if t["volume_slider"] else 1.0)
-            filters.append(chain)
+        # Light comes RNNOISE_DELAY late: the other tracks wait as long, and
+        # the mix plays that much earlier.
+        late = any(filters)
+        if late:
+            wait = f"adelay=delays={RNNOISE_DELAY * 1000:g}:all=1"
+            filters = [f or wait for f in filters]
+        player.set_audio_delay(-RNNOISE_DELAY if late else 0.0)
         player.set_audio_mix(ids, volumes, filters)
 
     def _audio_slider_released(self, value):
@@ -9129,6 +9152,8 @@ class LosslessVideoApp(_BaseTk):
         extra_inputs, settings = [], []
         for track, vol, *level in mix:
             wav, chain = self._audio_denoise_source(track, *level)
+            if chain:
+                chain += "," + RNNOISE_TRIM   # Light, back in place
             if wav is not None:
                 extra_inputs.append(wav)
                 settings.append((f"{len(extra_inputs)}:a:0", "", vol))
