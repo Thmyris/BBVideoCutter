@@ -647,6 +647,10 @@ def probe_join_format(ffprobe_exe: str, path: str):
         "acodec": audio.get("codec_name") if audio else None,
         "sample_rate": int(audio.get("sample_rate") or 0) if audio else None,
         "channels": int(audio.get("channels") or 0) if audio else None,
+        # Every audio track's (codec, sample rate, channels), in file order.
+        "audio_tracks": [(s.get("codec_name"), int(s.get("sample_rate") or 0),
+                          int(s.get("channels") or 0))
+                         for s in streams if s.get("codec_type") == "audio"],
         "duration": duration,
     }
 
@@ -658,19 +662,27 @@ def join_format_differences(formats):
     if any(f is None for f in formats):
         return ["unreadable file"]
     first = formats[0]
+    # Each audio track is joined to the same track of the next file, so the
+    # tracks all files have must match one by one.
+    common = min(len(f["audio_tracks"]) for f in formats)
+
+    def tracks(field):
+        return lambda f: tuple(t[field] for t in f["audio_tracks"][:common])
+
     checks = (
         ("video codec", lambda f: f["vcodec"]),
         ("resolution", lambda f: (f["width"], f["height"])),
         ("pixel format", lambda f: f["pix_fmt"]),
         ("rotation", lambda f: f["rotation"]),
         ("audio", lambda f: f["acodec"] is not None),
-        ("audio codec", lambda f: f["acodec"]),
-        ("audio sample rate", lambda f: f["sample_rate"]),
-        ("audio channels", lambda f: f["channels"]),
+        ("number of audio tracks", lambda f: len(f["audio_tracks"])),
+        ("audio codec", tracks(0)),
+        ("audio sample rate", tracks(1)),
+        ("audio channels", tracks(2)),
     )
     diffs = [name for name, key in checks if any(key(f) != key(first) for f in formats[1:])]
-    if "audio" in diffs:   # some have none: their codec etc. differ too, say it once
-        diffs = [d for d in diffs if not d.startswith("audio ")]
+    if "audio" in diffs:   # some have none: their track count differs too, say it once
+        diffs = [d for d in diffs if d == "audio" or "audio" not in d]
     fps = [f["fps"] for f in formats]
     if all(fps) and any(abs(r - fps[0]) > 0.01 * fps[0] for r in fps[1:]):
         diffs.insert(2, "frame rate")
@@ -4662,6 +4674,8 @@ class LosslessVideoApp(_BaseTk):
         cmd = [
             ffmpeg, "-y", "-ss", seconds_to_ffmpeg_time(start_sec),
             "-to", seconds_to_ffmpeg_time(end_sec), "-i", input_path,
+            # Every audio track: ffmpeg on its own keeps only one.
+            "-map", "0:v:0", "-map", "0:a?",
             "-c", "copy", out_path,
         ]
         proc = run_ffmpeg(cmd, end_sec - start_sec, progress)
@@ -5646,7 +5660,8 @@ class LosslessVideoApp(_BaseTk):
             video_bsf = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}.get(video_codec)
 
             ts_path = os.path.join(tmpdir, f"part_{len(prepared)}.ts")
-            cmd = [ffmpeg, "-y", "-i", p, "-c", "copy"]
+            # Every audio track: ffmpeg on its own keeps only one.
+            cmd = [ffmpeg, "-y", "-i", p, "-map", "0:v:0", "-map", "0:a?", "-c", "copy"]
             if video_bsf:
                 cmd += ["-bsf:v", video_bsf]
             cmd += ["-f", "mpegts", ts_path]
@@ -5676,7 +5691,7 @@ class LosslessVideoApp(_BaseTk):
         )
         ts_paths = [prepared[p][0] for p in final_files]
         concat_arg = "concat:" + "|".join(ts_paths)
-        cmd = [ffmpeg, "-y", "-i", concat_arg, "-c", "copy"]
+        cmd = [ffmpeg, "-y", "-i", concat_arg, "-map", "0:v:0", "-map", "0:a?", "-c", "copy"]
         if audio_bsf:
             cmd += ["-bsf:a", audio_bsf]
         cmd += [out_path]
@@ -5708,9 +5723,14 @@ class LosslessVideoApp(_BaseTk):
         width, height = first["width"] // 2 * 2, first["height"] // 2 * 2
         fps_text = first["fps_text"] or "30"
         with_audio = next((f for f in formats if f["acodec"]), None)
-        sample_rate = (with_audio or {}).get("sample_rate") or 48000
-        channels = (with_audio or {}).get("channels") or 2
-        layout = self._LAYOUTS.get(channels, "stereo")
+        # Every audio track is kept: track k of the result joins each file's
+        # track k (silence for a file with fewer tracks), in the sample rate
+        # and channels of the first file that has a track k.
+        n_tracks = max(len(f["audio_tracks"]) for f in formats)
+        track_formats = []
+        for k in range(n_tracks):
+            _, rate, ch = next(f["audio_tracks"][k] for f in formats if len(f["audio_tracks"]) > k)
+            track_formats.append((rate or 48000, self._LAYOUTS.get(ch or 2, "stereo")))
 
         root, ext = os.path.splitext(out_path)
         new_ext = self._REENCODE_EXT_SWAP.get(ext.lower())
@@ -5726,19 +5746,19 @@ class LosslessVideoApp(_BaseTk):
                 f"[{i}:v:0]scale={width}:{height}:force_original_aspect_ratio=decrease:"
                 f"force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                 f"fps={fps_text},format=yuv420p[v{i}]")
-            if with_audio:
-                if fmt["acodec"]:
-                    chains.append(f"[{i}:a:0]aresample={sample_rate},"
-                                  f"aformat=sample_rates={sample_rate}:channel_layouts={layout}[a{i}]")
+            pairs.append(f"[v{i}]")
+            for k, (sample_rate, layout) in enumerate(track_formats):
+                if k < len(fmt["audio_tracks"]):
+                    chains.append(f"[{i}:a:{k}]aresample={sample_rate},"
+                                  f"aformat=sample_rates={sample_rate}:channel_layouts={layout}"
+                                  f"[a{i}_{k}]")
                 else:
                     length = fmt["duration"] or 0.1
                     chains.append(f"anullsrc=r={sample_rate}:cl={layout},"
-                                  f"atrim=duration={length:.3f}[a{i}]")
-                pairs.append(f"[v{i}][a{i}]")
-            else:
-                pairs.append(f"[v{i}]")
-        chains.append("".join(pairs) + f"concat=n={len(files)}:v=1:a={1 if with_audio else 0}"
-                      + ("[v][a]" if with_audio else "[v]"))
+                                  f"atrim=duration={length:.3f}[a{i}_{k}]")
+                pairs.append(f"[a{i}_{k}]")
+        chains.append("".join(pairs) + f"concat=n={len(files)}:v=1:a={n_tracks}[v]"
+                      + "".join(f"[a{k}]" for k in range(n_tracks)))
         graph = ";".join(chains)
         total = sum(f["duration"] or 0.0 for f in formats) or None
         report = self._progress_reporter(
@@ -5746,8 +5766,10 @@ class LosslessVideoApp(_BaseTk):
 
         def build_cmd(encoder_args):
             cmd = [ffmpeg, "-y", *inputs, "-filter_complex", graph, "-map", "[v]"]
-            if with_audio:
-                cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]
+            for k in range(n_tracks):
+                cmd += ["-map", f"[a{k}]"]
+            if n_tracks:
+                cmd += ["-c:a", "aac", "-b:a", "192k"]
             cmd += [*encoder_args, "-pix_fmt", "yuv420p"]
             if os.path.splitext(out_path)[1].lower() in (".mp4", ".mov", ".m4v"):
                 cmd += ["-movflags", "+faststart"]

@@ -13,7 +13,7 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 
 ## Features
 
-- **Cut** — trim a clip, three modes: Lossless (fastest), Re-encode edges
+- **Cut** — trim a clip, keeping every audio track, three modes: Lossless (fastest), Re-encode edges
   (frame-exact), Edit-list trim (experimental). The mode is set in the
   **Cut** menu, for Bulk Cut too; choosing Re-encode edges or Edit-list
   trim opens a box for the keyframe search window (default 8 s).
@@ -25,9 +25,9 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
   green on the slider; **Cut selected scenes** goes to the Bulk Cut tab and
   starts the bulk cut there, each scene into its own clip.
 - **Combine** — join videos without re-encoding when they share codec,
-  resolution, frame rate and audio format. Mixed videos are re-encoded to
+  resolution, frame rate and audio tracks. Mixed videos are re-encoded to
   match the first one instead (H.264 + AAC, others scaled to fit with black
-  bars); a note under the list says when and why, and so does the message
+  bars; a video with fewer audio tracks gets silence on the others); a note under the list says when and why, and so does the message
   when it's done.
 - **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
