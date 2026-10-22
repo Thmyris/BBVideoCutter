@@ -521,11 +521,18 @@ DENOISE_LEVELS = (
     ("medium", "Medium filtering"),
     ("extreme", "Extreme filtering"),
 )
+# Both engines silence the noise between words and let it through with the
+# voice, so at full strength the background cuts in and out with every
+# word. Light and Medium blend some of the original back in, which caps how
+# far it can drop and so how much it jumps.
 # deep-filter's -a, the most it may lower the noise by (dB): Medium keeps
-# some of the background, so voices sound natural; Extreme takes it all
-# (deep-filter's own default, 100 dB).
-DFN_ATTEN_LIMIT_DB = {"medium": 12, "extreme": None}
+# some of the background; Extreme takes it all (deep-filter's own default,
+# 100 dB).
+DFN_ATTEN_LIMIT_DB = {"medium": 9, "extreme": None}
 RNNOISE_MODEL = "cb.rnnn"   # GregorR/rnnoise-models' general-purpose model
+# arnndn's mix for Light: the share of the filtered audio, the rest the
+# original (0.5: the noise drops by at most 6 dB).
+RNNOISE_MIX = 0.5
 DEEP_FILTER_EXE = "deep-filter.exe"
 # deep-filter's run time, as a fraction of the track's length: a base plus
 # a part per channel (measured on a Ryzen 7 7800X3D; each run corrects
@@ -8481,7 +8488,8 @@ class LosslessVideoApp(_BaseTk):
                     "Noise reduction for this track.\n"
                     "Light: RNNoise, applied as the video plays.\n"
                     "Medium / Extreme: DeepFilterNet, worked out in the background "
-                    "first;\nMedium leaves a little of the background in.")
+                    "first.\nLight and Medium leave some of the background in, so it "
+                    "doesn't\ncut in and out with the voice; Extreme takes it all.")
             track["denoise_btn"] = denoise_btn
             track["denoise_menu"] = tk.Menu(denoise_btn, tearoff=0)
             self._audio_show_denoise_level(track)
@@ -9181,7 +9189,7 @@ class LosslessVideoApp(_BaseTk):
             level = track["denoise_var"].get()
         if level == "light":
             model = self._audio_denoise_files()[RNNOISE_MODEL]
-            return None, f"arnndn=m={lavfi_value(model)}" if model else ""
+            return None, f"arnndn=m={lavfi_value(model)}:mix={RNNOISE_MIX}" if model else ""
         if level in DFN_ATTEN_LIMIT_DB:
             return self._dfn_done.get((track["a_index"], level)), ""
         return None, ""
