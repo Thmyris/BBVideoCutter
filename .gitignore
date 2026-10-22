@@ -21,6 +21,8 @@ release/build/ffmpeg.exe
 release/build/ffprobe.exe
 # libmpv (embedded video player), also only bundled into the build
 release/build/libmpv-2.dll
+# DeepFilterNet (the Audio tab's Medium / Extreme noise reduction), likewise
+release/build/deep-filter.exe
 
 # Local tooling config
 .claude/

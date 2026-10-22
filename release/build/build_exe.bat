@@ -50,6 +50,13 @@ REM build, and the app gets its video player (Cut tab, and the previews
 REM on Combine, Bulk Cut and Crop). Without it the build still works
 REM and shows still frames instead. It comes from an mpv "dev" build
 REM for Windows x86_64 (for example shinchiro's mpv-dev-x86_64-*.7z).
+REM
+REM deep-filter.exe: likewise, if it is in this folder it goes into the
+REM build, for the Audio tab's Medium / Extreme noise reduction
+REM (DeepFilterNet). Without it those two are greyed out; Light (RNNoise,
+REM with the model in ..\..\assets\rnnoise, always bundled) still works.
+REM It is deep-filter-*-x86_64-pc-windows-msvc.exe from a DeepFilterNet
+REM release on GitHub (Rikorose/DeepFilterNet), renamed.
 REM ===================================================================
 
 setlocal
@@ -66,6 +73,8 @@ if exist "ffmpeg.exe" if exist "ffprobe.exe" set HAVE_FFMPEG=1
 set BUNDLE=
 if "%HAVE_FFMPEG%"=="1" set BUNDLE=--add-binary "ffmpeg.exe;." --add-binary "ffprobe.exe;."
 if exist "libmpv-2.dll" set BUNDLE=%BUNDLE% --add-binary "libmpv-2.dll;."
+if exist "deep-filter.exe" set BUNDLE=%BUNDLE% --add-binary "deep-filter.exe;."
+set BUNDLE=%BUNDLE% --add-data "..\..\assets\rnnoise\cb.rnnn;."
 echo [2/3] Building the app with PyInstaller...
 if "%HAVE_FFMPEG%"=="1" (
     echo       including ffmpeg.exe/ffprobe.exe from here
@@ -76,6 +85,11 @@ if exist "libmpv-2.dll" (
     echo       including libmpv-2.dll from here -- the video player
 ) else (
     echo       libmpv-2.dll not found here -- the app will show still frames instead of a player
+)
+if exist "deep-filter.exe" (
+    echo       including deep-filter.exe from here -- Medium / Extreme noise reduction
+) else (
+    echo       deep-filter.exe not found here -- the Audio tab will offer Light noise reduction only
 )
 python -m PyInstaller ^
     --onedir ^

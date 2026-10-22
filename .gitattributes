@@ -1,0 +1,2 @@
+# The RNNoise model is read as-is: keep its bytes (no CRLF conversion).
+*.rnnn -text

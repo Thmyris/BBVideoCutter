@@ -509,6 +509,56 @@ def find_exe(name: str) -> str:
     return path
 
 
+# The Audio tab's noise reduction, per track: (key, name). Light is RNNoise
+# (ffmpeg's arnndn filter with the model file below), applied as the video
+# plays and in Finalize. Medium and Extreme are DeepFilterNet
+# (deep-filter.exe), which can't run in a filter graph: each track is
+# cleaned to a WAV in the background first, then played and saved from
+# that.
+DENOISE_LEVELS = (
+    ("off", "Off"),
+    ("light", "Light filtering"),
+    ("medium", "Medium filtering"),
+    ("extreme", "Extreme filtering"),
+)
+# deep-filter's -a, the most it may lower the noise by (dB): Medium keeps
+# some of the background, so voices sound natural; Extreme takes it all
+# (deep-filter's own default, 100 dB).
+DFN_ATTEN_LIMIT_DB = {"medium": 12, "extreme": None}
+RNNOISE_MODEL = "cb.rnnn"   # GregorR/rnnoise-models' general-purpose model
+DEEP_FILTER_EXE = "deep-filter.exe"
+# deep-filter's run time, as a fraction of the track's length: a base plus
+# a part per channel (measured on a Ryzen 7 7800X3D; each run corrects
+# the next estimate by how the last one went).
+DFN_TIME_BASE, DFN_TIME_PER_CHANNEL = 0.015, 0.033
+
+
+def find_denoise_file(name):
+    """The noise reduction file name (RNNOISE_MODEL or DEEP_FILTER_EXE), or
+    None: next to the app, inside a PyInstaller bundle, in assets\\rnnoise
+    (the model, in a source checkout), in release\\build (deep-filter.exe,
+    where the build scripts take it from), or on PATH."""
+    app = _app_dir()
+    dirs = [app]
+    if getattr(sys, "_MEIPASS", None):
+        dirs.append(sys._MEIPASS)
+    dirs += [os.path.join(app, "assets", "rnnoise"), os.path.join(app, "release", "build")]
+    for d in dirs:
+        candidate = os.path.join(d, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which(name)
+
+
+def lavfi_value(value):
+    """value (a file path, say) written as a filter option inside a filter
+    graph, for ffmpeg's -filter_complex and mpv's lavfi-complex alike: its
+    \\ ' : escaped for the option, then \\ ' [ ] , ; for the graph."""
+    v = value.replace("\\", "/")
+    v = re.sub(r"([\\':])", r"\\\1", v)
+    return re.sub(r"([\\'\[\],;])", r"\\\1", v)
+
+
 # On Windows, launching a console-subsystem program (ffmpeg/ffprobe) from a
 # process that itself has no console (pythonw.exe, or a PyInstaller
 # --windowed exe) makes Windows pop up a brand new console window for that
@@ -1727,7 +1777,25 @@ class VideoPlayer:
         title, lang, codec, demux-channel-count...), in file order."""
         if not self.loaded:
             return []
-        return [t for t in self.state.get("track-list") or [] if t.get("type") == "audio"]
+        return [t for t in self.state.get("track-list") or []
+                if t.get("type") == "audio" and not t.get("external")]
+
+    def add_audio_file(self, path):
+        """Adds the audio file path to the loaded file as an extra track,
+        not played until a mix names it (external_audio_id). It goes when
+        another file is loaded."""
+        if self.mpv is not None:
+            self._async("audio-add", path, "auto")
+
+    def external_audio_id(self, path):
+        """mpv's id of the track add_audio_file(path) added, once it's in."""
+        want = os.path.normcase(os.path.abspath(path))
+        for t in self.state.get("track-list") or []:
+            name = t.get("external-filename")
+            if t.get("type") == "audio" and t.get("external") and name \
+                    and os.path.normcase(os.path.abspath(name)) == want:
+                return t.get("id")
+        return None
 
     @property
     def audio_track(self):
@@ -1857,11 +1925,13 @@ class VideoPlayer:
             self.set_audio_mix(None)
             self.mpv.aid = track_id
 
-    def set_audio_mix(self, track_ids, volumes=None):
+    def set_audio_mix(self, track_ids, volumes=None, filters=None):
         """Plays the audio tracks track_ids (mpv's ids) at once, summed as
         the Audio tab's mix does; None (or a single track) for one track
         the usual way. volumes: each track's gain (1.0 = as it is); with
         volumes, one track goes through the mix too, and none is silence.
+        filters: with volumes, a filter chain for each track to go through
+        before its volume ("" for none).
         mpv's lavfi-complex does the mixing; it can be set and cleared
         while a file plays (mpv restarts its audio for that, so it is only
         set when it changes)."""
@@ -1869,7 +1939,8 @@ class VideoPlayer:
             return
         ids = list(track_ids or ())
         if volumes is not None and ids:
-            chains = [f"[aid{i}]volume={g:.4f}" for i, g in zip(ids, volumes)]
+            chains = [f"[aid{i}]{f + ',' if f else ''}volume={g:.4f}"
+                      for i, g, f in zip(ids, volumes, filters or [""] * len(ids))]
             if len(ids) == 1:
                 graph = chains[0] + "[ao]"
             else:
@@ -2595,6 +2666,20 @@ class LosslessVideoApp(_BaseTk):
         self._audio_player_on = False     # the player shows the video (else still frames + ffplay)
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
         self._audio_note = None           # shown instead of the open prompt (_audio_show_no_audio)
+        # Noise reduction (DENOISE_LEVELS). The DeepFilterNet levels are
+        # jobs run one at a time in the background, for the loaded video.
+        self._denoise_files = None        # RNNOISE_MODEL / DEEP_FILTER_EXE -> path or None
+        self._dfn_session_dir = None      # this run's temp folder for the cleaned WAVs
+        self._dfn_video_dir = None        # the loaded video's folder in it
+        self._dfn_done = {}               # (a_index, level) -> the cleaned WAV
+        self._dfn_failed = {}             # (a_index, level) -> why it failed
+        self._dfn_queue = []              # (a_index, level) waiting their turn
+        self._dfn_job = None              # the running job (dict, _dfn_start_next)
+        self._dfn_jobs_started = 0
+        self._dfn_waiters = []            # (keys, callback, on_fail) for Finalize / Auto Balance
+        self._dfn_rate = 1.0              # last run's time against its estimate
+        self._dfn_tick_id = None
+        self._audio_added_wavs = set()    # cleaned WAVs given to the player for this file
 
         # Thumbnails for the Combine and Bulk Cut lists, which share them.
         self.thumb_cache = {}            # path -> PhotoImage, or "" when it couldn't be made
@@ -2755,6 +2840,7 @@ class LosslessVideoApp(_BaseTk):
             self.cut_player.terminate()
         for _tab, player in self._tab_players():
             player.terminate()
+        self._dfn_shutdown()     # after the player has let go of the cleaned WAVs
         self.destroy()
 
     # ====================================================================
@@ -8042,6 +8128,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_duration = 0.0
         self.audio_frame_img = None
         self.audio_tracks = []
+        self._dfn_reset()
         self._audio_rebuild_track_rows()
         for btn in (self.audio_balance_btn, self.audio_enable_all_btn,
                     self.audio_disable_all_btn, self.audio_finalize_btn):
@@ -8140,6 +8227,7 @@ class LosslessVideoApp(_BaseTk):
 
         self._share_video(4, path)
         self._audio_stop_playback_state()
+        self._dfn_reset()
         self._audio_note = None
         self.audio_input_path = path
         self.audio_duration = duration
@@ -8158,7 +8246,9 @@ class LosslessVideoApp(_BaseTk):
             self.audio_tracks.append({
                 "a_index": i,
                 "desc": describe_audio_stream(stream),
+                "channels": int(stream.get("channels") or 2),
                 "enabled_var": tk.BooleanVar(value=True),
+                "denoise_var": tk.StringVar(value="off"),
                 "volume_slider": None,
                 "volume_lbl": None,
                 "name_label": None,
@@ -8247,6 +8337,19 @@ class LosslessVideoApp(_BaseTk):
             track["volume_slider"] = vol_slider
             track["volume_lbl"] = vol_lbl
 
+            denoise_btn = tk.Button(
+                top, width=max(len(name) for _key, name in DENOISE_LEVELS) + 2,
+                command=lambda t=track: self._audio_post_denoise_menu(t))
+            denoise_btn.pack(side="right", padx=(0, px(14)))
+            Tooltip(denoise_btn,
+                    "Noise reduction for this track.\n"
+                    "Light: RNNoise, applied as the video plays.\n"
+                    "Medium / Extreme: DeepFilterNet, worked out in the background "
+                    "first;\nMedium leaves a little of the background in.")
+            track["denoise_btn"] = denoise_btn
+            track["denoise_menu"] = tk.Menu(denoise_btn, tearoff=0)
+            self._audio_show_denoise_level(track)
+
             wave_canvas = tk.Canvas(row, height=px(96), bg="#0a0a0a", highlightthickness=0)
             wave_canvas.pack(fill="x", padx=3, pady=(0, 6))
             wave_canvas.bind("<Configure>", lambda e, t=track: self._audio_redraw_waveform(t))
@@ -8257,6 +8360,7 @@ class LosslessVideoApp(_BaseTk):
             track["waveform_canvas"] = wave_canvas
             track["wave_image_id"] = None
             track["playhead_id"] = None
+            self._audio_show_denoise_status(track)
 
             self._audio_generate_waveform(track)
 
@@ -8440,13 +8544,30 @@ class LosslessVideoApp(_BaseTk):
         self._audio_update_playheads()
 
     def _audio_apply_mix(self):
-        """Gives the player the enabled tracks at their volumes."""
+        """Gives the player the enabled tracks at their volumes, each with
+        its noise reduction: Light as a filter, Medium / Extreme as the
+        cleaned WAV once it's there (added to the player as an extra
+        track; the track plays as it is until then)."""
         if not self._audio_player_ready():
             return
-        enabled = [t for t in self.audio_tracks if t["enabled_var"].get()]
-        self.audio_player.set_audio_mix(
-            [t["a_index"] + 1 for t in enabled],     # mpv counts audio tracks from 1
-            [t["volume_slider"].get() if t["volume_slider"] else 1.0 for t in enabled])
+        player = self.audio_player
+        ids, volumes, filters = [], [], []
+        for t in self.audio_tracks:
+            if not t["enabled_var"].get():
+                continue
+            wav, chain = self._audio_denoise_source(t)
+            track_id = t["a_index"] + 1     # mpv counts audio tracks from 1
+            if wav is not None:
+                added = player.external_audio_id(wav)
+                if added is not None:
+                    track_id = added
+                elif wav not in self._audio_added_wavs:
+                    self._audio_added_wavs.add(wav)
+                    player.add_audio_file(wav)
+            ids.append(track_id)
+            volumes.append(t["volume_slider"].get() if t["volume_slider"] else 1.0)
+            filters.append(chain)
+        player.set_audio_mix(ids, volumes, filters)
 
     def _audio_slider_released(self, value):
         if self._audio_player_ready():
@@ -8535,13 +8656,14 @@ class LosslessVideoApp(_BaseTk):
         self._audio_stop_ffplay()
 
     def _audio_build_filter_complex(self, track_settings):
-        """track_settings: list of (a_index, volume) for the tracks to include.
-        Shared by live playback (ffplay) and Finalize (ffmpeg) so what you
-        hear while scrubbing matches what gets written to the output file."""
+        """track_settings: list of (source, filters, volume) for the tracks
+        to include, as _audio_mix_sources gives them. Shared by live
+        playback (ffplay) and Finalize (ffmpeg) so what you hear while
+        scrubbing matches what gets written to the output file."""
         n = len(track_settings)
         parts = [
-            f"[0:a:{a_index}]volume={vol:.4f}[v{i}]"
-            for i, (a_index, vol) in enumerate(track_settings)
+            f"[{source}]{filters + ',' if filters else ''}volume={vol:.4f}[v{i}]"
+            for i, (source, filters, vol) in enumerate(track_settings)
         ]
         if n == 1:
             return parts[0].replace("[v0]", "[aout]")
@@ -8561,10 +8683,8 @@ class LosslessVideoApp(_BaseTk):
             ffplay = find_exe("ffplay")
         except Exception:
             return  # ffmpeg/ffplay not on PATH -- visual scrubbing still works, just silently
-        track_settings = [
-            (t["a_index"], t["volume_slider"].get() if t["volume_slider"] else 1.0)
-            for t in enabled
-        ]
+        extra_inputs, track_settings = self._audio_mix_sources(
+            [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0) for t in enabled])
         filter_complex = self._audio_build_filter_complex(track_settings)
         # Some ffplay builds don't register -filter_complex at all (it fails
         # with "Option not found" and exits immediately, silently, since
@@ -8574,6 +8694,10 @@ class LosslessVideoApp(_BaseTk):
         ffmpeg_cmd = [
             ffmpeg, "-v", "quiet", "-ss", seconds_to_hms(start_sec),
             "-i", self.audio_input_path,
+        ]
+        for wav in extra_inputs:
+            ffmpeg_cmd += ["-ss", seconds_to_hms(start_sec), "-i", wav]
+        ffmpeg_cmd += [
             "-filter_complex", filter_complex, "-map", "[aout]",
             "-f", "wav", "-",
         ]
@@ -8675,28 +8799,54 @@ class LosslessVideoApp(_BaseTk):
         if not self.audio_input_path or not self.audio_tracks:
             return
         self.audio_balance_btn.config(state="disabled")
-        self.status_lbl.config(text="Analyzing track loudness...")
-        threading.Thread(target=self._audio_run_auto_balance, daemon=True).start()
+        levels = {t["a_index"]: t["denoise_var"].get() for t in self.audio_tracks}
 
-    def _audio_run_auto_balance(self):
+        def start():
+            # Each track is measured as it will sound: with its noise
+            # reduction.
+            plan = self._audio_balance_plan(levels)
+            self.status_lbl.config(text="Analyzing track loudness...")
+            threading.Thread(target=self._audio_run_auto_balance, args=(plan,), daemon=True).start()
+
+        self._dfn_when_ready(
+            self._dfn_keys(levels), start,
+            lambda error: self._audio_auto_balance_done({}, False, error))
+
+    def _audio_balance_plan(self, levels=None):
+        """(a_index, ffmpeg input arguments, filters) to measure each track
+        by: its cleaned WAV, or its own stream with its live filter."""
+        plan = []
+        for track in self.audio_tracks:
+            level = levels.get(track["a_index"]) if levels else None
+            wav, chain = self._audio_denoise_source(track, level)
+            if wav is not None:
+                plan.append((track["a_index"], ["-i", wav], ""))
+            else:
+                plan.append((track["a_index"],
+                             ["-i", self.audio_input_path, "-map", f"0:a:{track['a_index']}"], chain))
+        return plan
+
+    def _audio_run_auto_balance(self, plan=None):
         try:
+            if plan is None:
+                plan = self._audio_balance_plan()
             ffmpeg = find_exe("ffmpeg")
             null_target = "NUL" if os.name == "nt" else "/dev/null"
             mean_re = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
             means = {}
-            n_tracks = len(self.audio_tracks)
+            n_tracks = len(plan)
             report = self._progress_reporter("Analyzing track loudness...", "audio_balance")
-            for i, track in enumerate(self.audio_tracks):
+            for i, (a_index, input_args, chain) in enumerate(plan):
                 cmd = [
-                    ffmpeg, "-i", self.audio_input_path,
-                    "-map", f"0:a:{track['a_index']}",
-                    "-af", "volumedetect", "-f", "null", null_target,
+                    ffmpeg, *input_args,
+                    "-af", f"{chain},volumedetect" if chain else "volumedetect",
+                    "-f", "null", null_target,
                 ]
                 proc = run_ffmpeg(
                     cmd, self.audio_duration, sub_progress(report, i / n_tracks, (i + 1) / n_tracks)
                 )
                 m = mean_re.search(proc.stderr)
-                means[track["a_index"]] = float(m.group(1)) if m else None
+                means[a_index] = float(m.group(1)) if m else None
 
             # A (nearly) silent track has nothing to match: it keeps 100%
             # and doesn't pull the others' target down.
@@ -8775,23 +8925,47 @@ class LosslessVideoApp(_BaseTk):
         if not out_path:
             return
 
-        track_settings = [
-            (t["a_index"], t["volume_slider"].get() if t["volume_slider"] else 1.0)
-            for t in enabled
-        ]
+        mix = [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0, t["denoise_var"].get())
+               for t in enabled]
+
+        def start():
+            extra_inputs, track_settings = self._audio_mix_sources(mix)
+            self.status_lbl.config(text="Mixing audio tracks... 0%")
+            threading.Thread(
+                target=self._audio_run_finalize, args=(out_path, track_settings, extra_inputs),
+                daemon=True
+            ).start()
 
         self.audio_finalize_btn.config(state="disabled")
-        self.status_lbl.config(text="Mixing audio tracks... 0%")
-        threading.Thread(
-            target=self._audio_run_finalize, args=(out_path, track_settings), daemon=True
-        ).start()
+        keys = self._dfn_keys({t["a_index"]: level for t, _vol, level in mix})
+        if any(key not in self._dfn_done for key in keys):
+            self.status_lbl.config(text="Saving once the noise reduction is done...")
+        self._dfn_when_ready(keys, start, lambda error: self._audio_finalize_done(error, False))
 
-    def _audio_run_finalize(self, out_path, track_settings):
+    def _audio_mix_sources(self, mix):
+        """mix: (track, volume) or (track, volume, noise reduction level)
+        for each track to mix. Returns (extra input files, track settings
+        for _audio_build_filter_complex): a track's own stream from input
+        0, with its live filter (Light), or its cleaned WAV (Medium /
+        Extreme) as input 1, 2..., as it is until that's there."""
+        extra_inputs, settings = [], []
+        for track, vol, *level in mix:
+            wav, chain = self._audio_denoise_source(track, *level)
+            if wav is not None:
+                extra_inputs.append(wav)
+                settings.append((f"{len(extra_inputs)}:a:0", "", vol))
+            else:
+                settings.append((f"0:a:{track['a_index']}", chain, vol))
+        return extra_inputs, settings
+
+    def _audio_run_finalize(self, out_path, track_settings, extra_inputs=()):
         try:
             ffmpeg = find_exe("ffmpeg")
             filter_complex = self._audio_build_filter_complex(track_settings)
-            cmd = [
-                ffmpeg, "-y", "-i", self.audio_input_path,
+            cmd = [ffmpeg, "-y", "-i", self.audio_input_path]
+            for wav in extra_inputs:
+                cmd += ["-i", wav]
+            cmd += [
                 "-filter_complex", filter_complex,
                 "-map", "0:v:0", "-map", "[aout]",
                 "-c:v", "copy",
@@ -8818,6 +8992,305 @@ class LosslessVideoApp(_BaseTk):
         else:
             self.status_lbl.config(text="Audio mix failed")
             messagebox.showerror("ffmpeg error", "The audio mix failed.\n\n" + info)
+
+    # ---- noise reduction ------------------------------------------------------
+    def _audio_denoise_files(self, refresh=False):
+        """RNNOISE_MODEL / DEEP_FILTER_EXE -> where it is, or None; looked
+        up once (the mix asks on every player update), again on refresh."""
+        if self._denoise_files is None or refresh:
+            self._denoise_files = {name: find_denoise_file(name)
+                                   for name in (RNNOISE_MODEL, DEEP_FILTER_EXE)}
+        return self._denoise_files
+
+    def _audio_denoise_source(self, track, level=None):
+        """(cleaned WAV or None, filter chain) for playing or saving track
+        at its noise reduction level (or the one given): the RNNoise filter
+        for Light, the DeepFilterNet WAV once it's there for Medium /
+        Extreme; (None, "") for the track as it is."""
+        if level is None:
+            level = track["denoise_var"].get()
+        if level == "light":
+            model = self._audio_denoise_files()[RNNOISE_MODEL]
+            return None, f"arnndn=m={lavfi_value(model)}" if model else ""
+        if level in DFN_ATTEN_LIMIT_DB:
+            return self._dfn_done.get((track["a_index"], level)), ""
+        return None, ""
+
+    def _audio_post_denoise_menu(self, track):
+        files = self._audio_denoise_files(refresh=True)
+        menu = track["denoise_menu"]
+        menu.delete(0, "end")
+        for key, name in DENOISE_LEVELS:
+            missing = (RNNOISE_MODEL if key == "light" else
+                       DEEP_FILTER_EXE if key in DFN_ATTEN_LIMIT_DB else None)
+            if missing and files[missing]:
+                missing = None
+            menu.add_radiobutton(
+                label=name + (f" (needs {missing})" if missing else ""),
+                variable=track["denoise_var"], value=key, state="disabled" if missing else "normal",
+                command=lambda t=track: self._audio_denoise_changed(t))
+        menu.configure(DARK_MENU if self._is_dark() else self._menu_light_colors)
+        b = track["denoise_btn"]
+        x, y = b.winfo_rootx(), b.winfo_rooty() + b.winfo_height()
+        margin = DARK_MENU["background"] if self._is_dark() else None
+        post_with_menu_margin(lambda: menu.tk_popup(x, y), margin)
+
+    def _audio_show_denoise_level(self, track):
+        level = track["denoise_var"].get()
+        name = dict(DENOISE_LEVELS)[level]
+        track["denoise_btn"].config(text=("Noise reduction" if level == "off" else name) + " ▾")
+
+    def _audio_denoise_changed(self, track):
+        level = track["denoise_var"].get()
+        self._dfn_failed.pop((track["a_index"], level), None)   # picked again: try again
+        self._audio_show_denoise_level(track)
+        self._dfn_schedule()
+        self._audio_maybe_restart_playback()
+
+    def _audio_show_denoise_status(self, track):
+        """Writes how track's DeepFilterNet level is coming along over its
+        waveform: waiting, working (with the estimated percentage), or
+        failed; nothing once it's done, or for the other levels."""
+        c = track.get("waveform_canvas")
+        if c is None or not c.winfo_exists():
+            return
+        c.delete("denoise")
+        level = track["denoise_var"].get()
+        key = (track["a_index"], level)
+        if level not in DFN_ATTEN_LIMIT_DB or key in self._dfn_done:
+            return
+        name = dict(DENOISE_LEVELS)[level]
+        job = self._dfn_job
+        if key in self._dfn_failed:
+            reason = self._dfn_failed[key].strip().splitlines() or ["?"]
+            text = f"{name} failed: {reason[-1][:120]}"
+        elif job is not None and job["key"] == key:
+            text = f"{name}: working... {int(job['frac'] * 100)}%   (plays unfiltered until it's done)"
+        else:
+            text = f"{name}: waiting its turn   (plays unfiltered until it's done)"
+        item = c.create_text(px(8), px(6), text=text, anchor="nw", fill="#e8e8e8",
+                             font=("Segoe UI", 9), tags=("denoise",))
+        x0, y0, x1, y1 = c.bbox(item)
+        c.create_rectangle(x0 - px(4), y0 - px(2), x1 + px(4), y1 + px(2), fill="#000000",
+                           outline="#444444", tags=("denoise",))
+        c.tag_raise(item)
+
+    def _audio_show_denoise_states(self):
+        for track in self.audio_tracks:
+            self._audio_show_denoise_status(track)
+
+    # DeepFilterNet jobs: each one cleans one track at one level to a WAV
+    # in a temp folder, one at a time (deep-filter takes ~65 MB of memory
+    # per minute of stereo, and uses one core).
+    def _dfn_keys(self, levels):
+        """The (a_index, level) jobs that levels ({a_index: level}) need."""
+        return {(a, level) for a, level in levels.items() if level in DFN_ATTEN_LIMIT_DB}
+
+    def _dfn_wanted(self):
+        keys = self._dfn_keys({t["a_index"]: t["denoise_var"].get() for t in self.audio_tracks})
+        for waiter_keys, _callback, _on_fail in self._dfn_waiters:
+            keys |= waiter_keys
+        return keys
+
+    def _dfn_when_ready(self, keys, callback, on_fail):
+        """Calls callback() once the jobs keys are all done (right away if
+        they are), or on_fail(why) if one of them fails."""
+        self._dfn_waiters.append((set(keys), callback, on_fail))
+        self._dfn_schedule()
+
+    def _dfn_check_waiters(self):
+        waiters, self._dfn_waiters = self._dfn_waiters, []
+        for waiter in waiters:
+            keys, callback, on_fail = waiter
+            failed = [k for k in keys if k in self._dfn_failed]
+            if failed:
+                a_index, level = failed[0]
+                on_fail(f"Noise reduction ({dict(DENOISE_LEVELS)[level]}) failed on "
+                        f"track {a_index + 1}:\n\n{self._dfn_failed[failed[0]]}")
+            elif all(k in self._dfn_done for k in keys):
+                callback()
+            else:
+                self._dfn_waiters.append(waiter)
+
+    def _dfn_schedule(self):
+        """Brings the jobs in line with what the tracks (and a waiting
+        Finalize or Auto Balance) ask for: drops the waiting jobs no longer
+        wanted, stops the running one if it isn't, and queues the new ones."""
+        self._dfn_check_waiters()
+        wanted = self._dfn_wanted()
+        self._dfn_queue = [k for k in self._dfn_queue if k in wanted]
+        if self._dfn_job is not None and self._dfn_job["key"] not in wanted:
+            self._dfn_stop_job()
+        running = self._dfn_job["key"] if self._dfn_job is not None else None
+        for key in sorted(wanted):
+            if key not in self._dfn_done and key not in self._dfn_failed \
+                    and key not in self._dfn_queue and key != running:
+                self._dfn_queue.append(key)
+        self._dfn_start_next()
+        self._audio_show_denoise_states()
+
+    def _dfn_start_next(self):
+        if self._dfn_job is not None or not self._dfn_queue or not self.audio_input_path:
+            return
+        key = self._dfn_queue.pop(0)
+        if self._dfn_video_dir is None:
+            if self._dfn_session_dir is None:
+                self._dfn_session_dir = self._dfn_make_session_dir()
+            self._dfn_video_dir = tempfile.mkdtemp(dir=self._dfn_session_dir)
+        channels = next((t["channels"] for t in self.audio_tracks if t["a_index"] == key[0]), 2)
+        self._dfn_jobs_started += 1
+        job = {
+            "key": key, "path": self.audio_input_path, "dir": self._dfn_video_dir,
+            "name": f"track{key[0] + 1}_{key[1]}_{self._dfn_jobs_started}",
+            "estimate": max(1.0, self.audio_duration * (DFN_TIME_BASE + DFN_TIME_PER_CHANNEL * channels)),
+            "started": time.monotonic(), "frac": 0.0,
+            "lock": threading.Lock(), "proc": None, "stopped": False,
+        }
+        self._dfn_job = job
+        threading.Thread(target=self._dfn_run, args=(job,), daemon=True).start()
+        self._dfn_tick()
+
+    @staticmethod
+    def _dfn_make_session_dir():
+        """A new temp folder for this run's WAVs. Folders a run left behind
+        (it crashed, say) go once they're a day old."""
+        root = os.path.join(tempfile.gettempdir(), "BBVideoCutter_denoise")
+        os.makedirs(root, exist_ok=True)
+        for name in os.listdir(root):
+            old = os.path.join(root, name)
+            try:
+                if time.time() - os.path.getmtime(old) > 86400:
+                    shutil.rmtree(old, ignore_errors=True)
+            except OSError:
+                pass
+        return tempfile.mkdtemp(dir=root)
+
+    def _dfn_run(self, job):
+        """Worker thread: the track to a 48 kHz WAV, padded with silence to
+        start where the video starts (so it lines up when played or mixed
+        in), then deep-filter on it. Hands the result to _dfn_job_finished."""
+        a_index, level = job["key"]
+        src = os.path.join(job["dir"], job["name"] + ".wav")
+        out_dir = os.path.join(job["dir"], level)
+        try:
+            deep_filter = find_denoise_file(DEEP_FILTER_EXE)
+            if not deep_filter:
+                raise RuntimeError(f"{DEEP_FILTER_EXE} was not found.")
+            self._dfn_step(job, [
+                find_exe("ffmpeg"), "-y", "-v", "error", "-i", job["path"], "-map", f"0:a:{a_index}",
+                "-af", "aresample=48000:async=1:first_pts=0", "-c:a", "pcm_s16le", src])
+            os.makedirs(out_dir, exist_ok=True)
+            cmd = [deep_filter, "-D", "-o", out_dir]   # -D: no delay added at the start
+            if DFN_ATTEN_LIMIT_DB[level] is not None:
+                cmd += ["-a", str(DFN_ATTEN_LIMIT_DB[level])]
+            self._dfn_step(job, cmd + [src])
+            out = os.path.join(out_dir, os.path.basename(src))
+            if not os.path.isfile(out):
+                raise RuntimeError(f"{DEEP_FILTER_EXE} didn't write its output.")
+            ok, result = True, out
+        except Exception as exc:
+            ok, result = False, str(exc)
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+        self.after(0, lambda: self._dfn_job_finished(job, ok, result))
+
+    @staticmethod
+    def _dfn_step(job, cmd):
+        """Runs one program of job, unless the job was stopped."""
+        with job["lock"]:
+            if job["stopped"]:
+                raise RuntimeError("stopped")
+            proc = job["proc"] = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                **SUBPROCESS_KWARGS)
+        err = proc.communicate()[1].decode("utf-8", "replace")
+        if proc.returncode != 0:
+            raise RuntimeError(err.strip()[-2000:] or f"{os.path.basename(cmd[0])} failed "
+                               f"(exit code {proc.returncode}).")
+
+    def _dfn_tick(self):
+        """While a job runs: its estimated progress on the status bar and
+        over its track's waveform (deep-filter reports none of its own)."""
+        self._dfn_tick_id = None
+        job = self._dfn_job
+        if job is None:
+            return
+        elapsed = time.monotonic() - job["started"]
+        job["frac"] = min(0.95, elapsed / (job["estimate"] * self._dfn_rate))
+        a_index, level = job["key"]
+        self._show_progress("denoise", job["frac"],
+                            f"Noise reduction ({dict(DENOISE_LEVELS)[level]}), track {a_index + 1}... "
+                            f"{int(job['frac'] * 100)}%")
+        for track in self.audio_tracks:
+            if track["a_index"] == a_index:
+                self._audio_show_denoise_status(track)
+        self._dfn_tick_id = self.after(250, self._dfn_tick)
+
+    def _dfn_job_finished(self, job, ok, result):
+        if job is not self._dfn_job:
+            return   # stopped: not wanted any more, or another video was loaded
+        self._dfn_job = None
+        self._end_progress("denoise")
+        a_index, level = job["key"]
+        if ok:
+            self._dfn_done[job["key"]] = result
+            self._dfn_rate = max(0.2, min(20.0, (time.monotonic() - job["started"]) / job["estimate"]))
+            self.status_lbl.config(text=f"Noise reduction ({dict(DENOISE_LEVELS)[level]}) "
+                                        f"done on track {a_index + 1}")
+        else:
+            self._dfn_failed[job["key"]] = result
+            self.status_lbl.config(text=f"Noise reduction failed on track {a_index + 1}")
+        self._dfn_schedule()
+        if ok:
+            self._audio_maybe_restart_playback()   # play the cleaned track
+
+    def _dfn_stop_job(self, wait=False):
+        """Stops the running job (kills its program); wait: until it's gone,
+        so its files can be deleted."""
+        job, self._dfn_job = self._dfn_job, None
+        if job is None:
+            return
+        self._end_progress("denoise")
+        with job["lock"]:
+            job["stopped"] = True
+            proc = job["proc"]
+        if proc is not None:
+            try:
+                proc.kill()
+                if wait:
+                    proc.wait(timeout=3)
+            except Exception:
+                pass
+
+    def _dfn_reset(self):
+        """Another video (or none): stops the jobs and deletes the last
+        video's WAVs."""
+        self._dfn_stop_job()
+        self._dfn_queue = []
+        self._dfn_waiters = []
+        self._dfn_done = {}
+        self._dfn_failed = {}
+        self._audio_added_wavs = set()
+        old, self._dfn_video_dir = self._dfn_video_dir, None
+        if old:
+            # In the background: the player may still hold a WAV open for
+            # a moment, until it has loaded the next video.
+            def remove():
+                for _attempt in range(20):
+                    shutil.rmtree(old, ignore_errors=True)
+                    if not os.path.exists(old):
+                        return
+                    time.sleep(0.5)
+
+            threading.Thread(target=remove, daemon=True).start()
+
+    def _dfn_shutdown(self):
+        """App closing: stops the job and deletes this run's WAVs."""
+        self._dfn_stop_job(wait=True)
+        if self._dfn_session_dir:
+            shutil.rmtree(self._dfn_session_dir, ignore_errors=True)
 
     def _on_drop_audio(self, event):
         self._ensure_tab_built(4)

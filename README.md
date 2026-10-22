@@ -37,7 +37,13 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 - **Crop/Rotate** — visual crop editor with widescreen/vertical aspect presets, and
   a 90°/180°/270° rotate done in the same re-encode, or saved on its own
   losslessly (stream copy; only the file's rotation info changes).
-- **Audio** — mute/mix individual audio tracks.
+- **Audio** — mute/mix individual audio tracks, each with its own noise
+  reduction (the button left of its volume): **Light filtering** is RNNoise,
+  applied as the video plays; **Medium filtering** and **Extreme
+  filtering** are DeepFilterNet, worked out in the background first (the
+  track plays unfiltered until then, and Save / Auto Balance wait for it).
+  Medium lowers the noise by at most 12 dB, so a little background stays
+  and voices sound natural; Extreme takes it all.
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; a video's
@@ -76,6 +82,12 @@ x86_64, e.g. shinchiro's `mpv-dev-x86_64-*.7z`) next to
 shows still frames instead (on the Audio tab with the mix played by
 ffplay).
 
+Medium / Extreme noise reduction needs `deep-filter.exe` (DeepFilterNet's
+`deep-filter-*-x86_64-pc-windows-msvc.exe` from its GitHub releases,
+renamed) in the same places; without it those two are greyed out. Light
+uses the RNNoise model in `assets/rnnoise/` (`cb.rnnn`, from
+GregorR/rnnoise-models).
+
 ## Building it yourself
 
 Scripts in `release/build/` (PyInstaller onedir + optional Inno Setup
@@ -87,8 +99,9 @@ installer):
 - `build_portable_and_setup.bat` — both of the above, one after the
   other, from a single app build
 
-Drop `ffmpeg.exe`/`ffprobe.exe` and `libmpv-2.dll` into `release/build/`
-first to bundle them.
+Drop `ffmpeg.exe`/`ffprobe.exe`, `libmpv-2.dll` and `deep-filter.exe`
+into `release/build/` first to bundle them. The RNNoise model is always
+bundled.
 
 ## License
 
