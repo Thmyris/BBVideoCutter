@@ -13,6 +13,9 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 
 ## Features
 
+The tabs are the boxes with icons in the middle of the menu bar (icons
+only when the window is too narrow for their names).
+
 - **Cut** — trim a clip, keeping every audio track, three modes: Lossless
   (fastest), Re-encode edges (frame-exact), Edit-list trim (experimental).
   The mode is set in the **Cutting Mode** menu, for Bulk Cut too; choosing

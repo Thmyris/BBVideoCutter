@@ -1050,6 +1050,13 @@ THEME_COLORS = {
         "menubar_bg": "#ffffff",
         "menubar_fg": "#000000",
         "menubar_hover": "#e5f3ff",
+        # The tab boxes on the menu bar: border, the one under the mouse,
+        # and the open tab's box (its icon in the accent color).
+        "tabbox_border": "#cccccc",
+        "tabbox_hover": "#e5f3ff",
+        "tabbox_selected": "#cce4f7",
+        "tabbox_selected_border": "#0078d4",
+        "tabbox_selected_icon": "#005a9e",
     },
     "dark": {
         "slider_track": "#505056",
@@ -1066,6 +1073,11 @@ THEME_COLORS = {
         "menubar_bg": DARK["panel"],
         "menubar_fg": DARK["text"],
         "menubar_hover": DARK["button"],
+        "tabbox_border": DARK["border"],
+        "tabbox_hover": DARK["button"],
+        "tabbox_selected": "#28456f",
+        "tabbox_selected_border": DARK["select"],
+        "tabbox_selected_icon": "#8ab4ff",
     },
 }
 
@@ -2720,10 +2732,12 @@ class LosslessVideoApp(_BaseTk):
             value=bool(self.settings.get("save_to_current_folder", True)))
         self._ttk_light_theme = ttk.Style(self).theme_use()
         self._set_treeview_row_height(ttk.Style(self))
+        self._hide_notebook_tabs(ttk.Style(self))
 
         self._build_menu()
 
-        self.notebook = ttk.Notebook(self)
+        # Its tabs are chosen with the boxes on the menu bar (_build_tab_boxes).
+        self.notebook = ttk.Notebook(self, style=self.NOTEBOOK_STYLE)
         self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.cut_tab = tk.Frame(self.notebook, bg="#f0f0f0")
@@ -2769,6 +2783,7 @@ class LosslessVideoApp(_BaseTk):
 
     def _on_notebook_tab_changed(self, event=None):
         idx = self.notebook.index("current")
+        self._style_tab_boxes()
         # No sound from a tab out of sight.
         if idx != 0 and self._cut_player_on:
             self.cut_player.set_paused(True)
@@ -2901,6 +2916,8 @@ class LosslessVideoApp(_BaseTk):
         help_menu = self._add_menu_bar_menu("Help")
         help_menu.add_command(label="About", command=self._show_about)
 
+        self._build_tab_boxes()
+
         # The system menu colors, put back on the dropdowns in light mode.
         self._menu_light_colors = {opt: str(file_menu.cget(opt)) for opt in DARK_MENU}
         self._style_menu_bar()
@@ -2973,6 +2990,122 @@ class LosslessVideoApp(_BaseTk):
                 activebackground=self._theme_color("menubar_hover"),
             )
             menu.configure(dropdown)
+        self._style_tab_boxes()
+
+    # The tabs, as boxes on the menu bar: (box label, the tab's full name,
+    # its icon in Segoe MDL2 Assets, Windows 10's icon font).
+    TAB_BOXES = (
+        ("Cut", "Cut Clip", "\ue8c6"),               # scissors
+        ("Combine", "Combine Videos", "\ue71b"),     # chain links
+        ("Bulk Cut", "Bulk Cut", "\ue8b9"),          # a stack of clips
+        ("Crop/Rotate", "Crop/Rotate", "\ue7a8"),    # crop corners
+        ("Audio", "Audio", "\ue8d6"),                # notes
+    )
+    ICON_FONT_FAMILY = "Segoe MDL2 Assets"
+    NOTEBOOK_STYLE = "Boxed.TNotebook"   # the notebook, its own tabs hidden
+
+    @classmethod
+    def _hide_notebook_tabs(cls, style):
+        """No tab strip on the notebook: the menu bar's boxes choose its
+        tabs. Layouts belong to a theme, so this runs again after a switch."""
+        style.layout(cls.NOTEBOOK_STYLE + ".Tab", [])
+
+    def _build_tab_boxes(self):
+        """The tab boxes, in the middle of the menu bar (_place_tab_boxes).
+        Each is a framed icon + name; a click opens its tab. Where they
+        don't fit next to the menus, only the icons show (the name comes
+        up when the mouse rests on one)."""
+        bar = self.tab_box_bar = tk.Frame(self.menu_bar)
+        has_icons = self.ICON_FONT_FAMILY in tkfont.families(self)
+        self._tab_boxes = []          # (box, icon label or None, name label)
+        for idx, (label, name, glyph) in enumerate(self.TAB_BOXES):
+            box = tk.Frame(bar, highlightthickness=px(1), cursor="hand2")
+            box.pack(side="left", padx=px(3))
+            icon = None
+            if has_icons:
+                icon = tk.Label(box, text=glyph, font=(self.ICON_FONT_FAMILY, 13), cursor="hand2")
+                icon.pack(side="left", padx=(px(8), px(5)), pady=px(3))
+            text = tk.Label(box, text=label, font="TkMenuFont", cursor="hand2")
+            text.pack(side="left", padx=(0 if has_icons else px(10), px(10)), pady=px(3))
+            for w in (box, icon, text):
+                if w is not None:
+                    w.bind("<ButtonPress-1>", lambda e, i=idx: self.notebook.select(i))
+                    w.bind("<Enter>", lambda e: self._style_tab_boxes(), add="+")
+                    w.bind("<Leave>", lambda e: self.after_idle(self._style_tab_boxes), add="+")
+                    if w is not box:   # the labels cover the box
+                        Tooltip(w, name)
+            self._tab_boxes.append((box, icon, text))
+        # Between the boxes the bar still moves the window.
+        self._bind_window_drag(bar, lambda e: True)
+        self._tab_boxes_compact = False
+        self._tab_boxes_full_width = None
+        # Makes the bar tall enough for the boxes (they are placed, which
+        # doesn't size it).
+        self._tab_box_strut = tk.Frame(self.menu_bar, width=1, height=1)
+        self._tab_box_strut.pack(side="left")
+        self.menu_bar.bind("<Configure>", self._place_tab_boxes, add="+")
+        bar.bind("<Configure>", self._place_tab_boxes, add="+")
+
+    def _place_tab_boxes(self, event=None):
+        """Centers the boxes on the window, or as near as the menus on the
+        left allow; only icons when even that doesn't fit."""
+        bar = self.tab_box_bar
+        last = self._menu_bar_items[-1][0]
+        left = last.winfo_x() + last.winfo_width() + px(16)
+        room = self.menu_bar.winfo_width() - left - px(8)
+        has_icons = self._tab_boxes[0][1] is not None
+        if not self._tab_boxes_compact:
+            self._tab_boxes_full_width = bar.winfo_reqwidth()
+        if has_icons and last.winfo_width() > 1:
+            compact = self._tab_boxes_full_width > room
+            if compact != self._tab_boxes_compact:
+                self._tab_boxes_compact = compact
+                for _box, icon, text in self._tab_boxes:
+                    if compact:
+                        text.pack_forget()
+                        icon.pack_configure(padx=px(8))
+                    else:
+                        icon.pack_configure(padx=(px(8), px(5)))
+                        text.pack(side="left", padx=(0, px(10)), pady=px(3))
+                return   # the bar's new size calls this again
+        width = bar.winfo_reqwidth()
+        x = max(left, (self.menu_bar.winfo_width() - width) // 2)
+        info = bar.place_info()
+        if info.get("x") != str(x):
+            bar.place(x=x, rely=0.5, anchor="w")
+        height = bar.winfo_reqheight() + px(6)
+        if int(self._tab_box_strut.cget("height")) != height:
+            self._tab_box_strut.configure(height=height)
+
+    def _style_tab_boxes(self):
+        """Colors the boxes: the open tab's highlighted, the one under the
+        mouse lit up."""
+        boxes = getattr(self, "_tab_boxes", None)
+        if not boxes:
+            return
+        notebook = getattr(self, "notebook", None)
+        current = notebook.index("current") if notebook is not None else 0
+        try:
+            x, y = self.winfo_pointerxy()
+            under = self.winfo_containing(x, y)
+        except (tk.TclError, KeyError):
+            under = None
+        bar_bg = self._theme_color("menubar_bg")
+        fg = self._theme_color("menubar_fg")
+        self.tab_box_bar.configure(background=bar_bg)
+        self._tab_box_strut.configure(background=bar_bg)
+        for idx, (box, icon, text) in enumerate(boxes):
+            parts = [w for w in (box, icon, text) if w is not None]
+            if idx == current:
+                bg, border = self._theme_color("tabbox_selected"), self._theme_color("tabbox_selected_border")
+                icon_fg = self._theme_color("tabbox_selected_icon")
+            else:
+                bg = self._theme_color("tabbox_hover") if under in parts else bar_bg
+                border, icon_fg = self._theme_color("tabbox_border"), fg
+            box.configure(background=bg, highlightbackground=border, highlightcolor=border)
+            text.configure(background=bg, foreground=fg)
+            if icon is not None:
+                icon.configure(background=bg, foreground=icon_fg)
 
     def _show_about(self):
         messagebox.showinfo(
@@ -3148,6 +3281,7 @@ class LosslessVideoApp(_BaseTk):
         if not self._is_dark():
             style.theme_use(self._ttk_light_theme)
             self._set_treeview_row_height(style)
+            self._hide_notebook_tabs(style)
             return
         # The native Windows ttk theme can't be recolored; clam can.
         style.theme_use("clam")
@@ -3173,6 +3307,7 @@ class LosslessVideoApp(_BaseTk):
         style.configure("Treeview.Heading", background=d["button"], foreground=d["text"],
                         bordercolor=d["border"], lightcolor=d["button"])
         style.map("Treeview.Heading", background=[("active", d["button_active"])])
+        self._hide_notebook_tabs(style)
         style.configure("TScrollbar", background=d["button"], troughcolor=d["panel"],
                         bordercolor=d["border"], arrowcolor=d["text"],
                         lightcolor=d["button"], darkcolor=d["button"])
