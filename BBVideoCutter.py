@@ -2619,7 +2619,7 @@ class LosslessVideoApp(_BaseTk):
         self.bulk_table = None           # FileTable, once the tab is built
 
         self.warn_overwrite_var = tk.BooleanVar(value=True)
-        # How the Cut and Bulk Cut tabs cut (Cut menu): "classic" (Lossless),
+        # How the Cut and Bulk Cut tabs cut (Cutting Mode menu): "classic" (Lossless),
         # "reencode" (Re-encode edges) or "editlist" (Edit-list trim).
         self.cut_mode_var = tk.StringVar(value="classic")
         self.cut_search_window = self.DEFAULT_SEARCH_WINDOW
@@ -2786,7 +2786,7 @@ class LosslessVideoApp(_BaseTk):
 
         # For the Cut and Bulk Cut tabs. Choosing Re-encode edges or Edit-list
         # trim opens a box asking for the keyframe search window.
-        self.cut_menu = self._add_menu_bar_menu("Cut")
+        self.cut_menu = self._add_menu_bar_menu("Cutting Mode")
         for label, mode, command in (
                 ("Lossless (recommended — fastest, may be a few ms off)", "classic", None),
                 ("Re-encode edges (slower, frame-accurate)...", "reencode",

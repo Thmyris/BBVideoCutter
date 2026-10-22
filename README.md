@@ -13,10 +13,11 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 
 ## Features
 
-- **Cut** — trim a clip, keeping every audio track, three modes: Lossless (fastest), Re-encode edges
-  (frame-exact), Edit-list trim (experimental). The mode is set in the
-  **Cut** menu, for Bulk Cut too; choosing Re-encode edges or Edit-list
-  trim opens a box for the keyframe search window (default 8 s).
+- **Cut** — trim a clip, keeping every audio track, three modes: Lossless
+  (fastest), Re-encode edges (frame-exact), Edit-list trim (experimental).
+  The mode is set in the **Cutting Mode** menu, for Bulk Cut too; choosing
+  Re-encode edges or Edit-list trim opens a box for the keyframe search
+  window (default 8 s).
   **Mark Cut Start** / **Mark Cut End** (next to Play; keys `I` / `O`)
   set the start / end at the frame on screen, and **Replay selected part**
   (under the volume) plays Start to End once.
