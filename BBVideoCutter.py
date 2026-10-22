@@ -1574,6 +1574,7 @@ class VideoPlayer:
         self.mix_all_audio = False
         self.audio_mix = None
         self._mix_pending = False
+        self._mix_graph = ""   # the lavfi-complex set
 
     # ---- life cycle ----------------------------------------------------
     def _ensure_mpv(self):
@@ -1856,20 +1857,44 @@ class VideoPlayer:
             self.set_audio_mix(None)
             self.mpv.aid = track_id
 
-    def set_audio_mix(self, track_ids):
+    def set_audio_mix(self, track_ids, volumes=None):
         """Plays the audio tracks track_ids (mpv's ids) at once, summed as
         the Audio tab's mix does; None (or a single track) for one track
-        the usual way. mpv's lavfi-complex does the mixing; it can be set
-        and cleared while a file plays."""
+        the usual way. volumes: each track's gain (1.0 = as it is); with
+        volumes, one track goes through the mix too, and none is silence.
+        mpv's lavfi-complex does the mixing; it can be set and cleared
+        while a file plays (mpv restarts its audio for that, so it is only
+        set when it changes)."""
         if self.mpv is None:
             return
         ids = list(track_ids or ())
-        if len(ids) > 1:
+        if volumes is not None and ids:
+            chains = [f"[aid{i}]volume={g:.4f}" for i, g in zip(ids, volumes)]
+            if len(ids) == 1:
+                graph = chains[0] + "[ao]"
+            else:
+                graph = (";".join(f"{c}[m{k}]" for k, c in enumerate(chains)) + ";"
+                         + "".join(f"[m{k}]" for k in range(len(ids)))
+                         + f"amix=inputs={len(ids)}:normalize=0[ao]")
+        elif len(ids) > 1:
             graph = "".join(f"[aid{i}]" for i in ids) + f"amix=inputs={len(ids)}:normalize=0[ao]"
-            self.mpv["lavfi-complex"] = graph
+        else:
+            graph = None
+        if graph is not None:
+            if graph != self._mix_graph:
+                self.mpv["lavfi-complex"] = graph
+                self._mix_graph = graph
             self.audio_mix = ids
+        elif volumes is not None:
+            # Nothing to play: silence.
+            if self._mix_graph or self.audio_mix != []:
+                self.mpv["lavfi-complex"] = ""
+                self._mix_graph = ""
+                self.mpv.aid = "no"
+            self.audio_mix = []
         elif self.audio_mix is not None:
             self.mpv["lavfi-complex"] = ""
+            self._mix_graph = ""
             self.audio_mix = None
             self.mpv.aid = ids[0] if ids else "auto"
 
@@ -2562,6 +2587,8 @@ class LosslessVideoApp(_BaseTk):
         self.audio_ffplay_proc = None      # subprocess.Popen of the audio-only ffplay player
         self.audio_ffmpeg_pipe_proc = None  # subprocess.Popen of the ffmpeg mixer feeding it
         self._audio_restart_after_id = None  # debounce for restarting playback after a volume/track change
+        self.audio_player = None          # VideoPlayer over the preview (None without libmpv)
+        self._audio_player_on = False     # the player shows the video (else still frames + ffplay)
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
 
         # Thumbnails for the Combine and Bulk Cut lists, which share them.
@@ -2658,6 +2685,8 @@ class LosslessVideoApp(_BaseTk):
         for tab, player in self._tab_players():
             if tab != idx:
                 player.set_paused(True)
+        if idx != 4 and self.audio_playing:
+            self._audio_pause()
         self._ensure_tab_built(idx)
 
     def _tab_players(self):
@@ -2670,6 +2699,8 @@ class LosslessVideoApp(_BaseTk):
             found.append((2, self.bulk_preview.player))
         if self.resize_player is not None:
             found.append((3, self.resize_player))
+        if self.audio_player is not None:
+            found.append((4, self.audio_player))
         return found
 
     def _player_audio_settings(self):
@@ -3673,6 +3704,9 @@ class LosslessVideoApp(_BaseTk):
             play, step, seek_by = target.toggle_play, target.frame_step, target.seek_by
         elif tab == 3 and self._resize_player_ready():
             p = self.resize_player
+            play, step, seek_by = p.toggle_pause, p.frame_step, p.seek_relative
+        elif tab == 4 and self._audio_player_ready():
+            p = self.audio_player
             play, step, seek_by = p.toggle_pause, p.frame_step, p.seek_relative
         else:
             return None
@@ -7737,6 +7771,11 @@ class LosslessVideoApp(_BaseTk):
         self._bind_window_drag(self.audio_canvas, lambda e: not self.audio_input_path,
                                on_click=self.open_file_for_audio)
         self._draw_audio_placeholder(self.OPEN_PROMPT)
+        if mpv_available():
+            # Plays the video with the mix of the enabled tracks, as Finalize
+            # writes it (see _audio_apply_mix); clicking it plays / pauses.
+            self.audio_player = VideoPlayer(preview_frame, on_change=self._on_audio_player_changed)
+            self.audio_player.frame.bind("<Button-1>", lambda e: self._audio_toggle_play())
 
         # ---- playback controls
         controls = tk.Frame(root, bg="#f0f0f0")
@@ -7767,7 +7806,8 @@ class LosslessVideoApp(_BaseTk):
             btn_row, text="5s ►►", width=8, command=lambda: self._audio_step(5)
         ).pack(side="left", padx=4)
 
-        self.audio_slider = TimeSlider(controls, command=self._audio_slider_changed)
+        self.audio_slider = TimeSlider(controls, command=self._audio_slider_changed,
+                                       on_release=self._audio_slider_released)
         self.audio_slider.pack(fill="x", padx=8, pady=(0, 4))
 
         # ---- tracks section
@@ -7854,7 +7894,10 @@ class LosslessVideoApp(_BaseTk):
         self.audio_finalize_btn.grid(row=6, column=0, sticky="ew", padx=3, pady=(4, 6))
         self.audio_finalize_btn.config(state="disabled")
 
-        for target in (self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner):
+        targets = [self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner]
+        if self.audio_player is not None:
+            targets.append(self.audio_player.frame)
+        for target in targets:
             target.drop_target_register(DND_FILES)
             target.dnd_bind("<<Drop>>", self._on_drop_audio)
 
@@ -7976,8 +8019,20 @@ class LosslessVideoApp(_BaseTk):
         for btn in (self.audio_balance_btn, self.audio_enable_all_btn, self.audio_disable_all_btn):
             btn.config(state="normal")
         self.audio_finalize_btn.config(state="normal")
-        self._audio_update_preview(0)
-        self.status_lbl.config(text="Ready")
+        status = "Ready"
+        if self.audio_player is not None:
+            try:
+                volume, muted = self._player_audio_settings()
+                self.audio_player.set_volume(volume)
+                self.audio_player.set_muted(muted)
+                self.audio_player.load(path)
+                self._audio_use_player(True)
+            except RuntimeError as exc:
+                self._audio_use_player(False)
+                status = str(exc)
+        if not self._audio_player_on:
+            self._audio_update_preview(0)
+        self.status_lbl.config(text=status)
 
     # ---- track rows / waveforms -----------------------------------------
     def _audio_rebuild_track_rows(self):
@@ -8056,6 +8111,7 @@ class LosslessVideoApp(_BaseTk):
         lbl = track.get("name_label")
         if lbl is not None:
             self._configure_light(lbl, fg="#000000" if track["enabled_var"].get() else "#777777")
+        self._audio_apply_mix()
         self._audio_maybe_restart_playback()
 
     def _audio_set_all_enabled(self, enabled):
@@ -8067,6 +8123,7 @@ class LosslessVideoApp(_BaseTk):
             if lbl is not None:
                 self._configure_light(lbl, fg="#000000" if enabled else "#777777")
         if changed:
+            self._audio_apply_mix()
             self._audio_maybe_restart_playback()
 
     def _audio_volume_changed(self, track, value):
@@ -8184,15 +8241,71 @@ class LosslessVideoApp(_BaseTk):
             self._audio_draw_playhead(track, cw, ch)
 
     # ---- playback ---------------------------------------------------------
-    # The video preview only ever steps to a still frame every ~300ms (like
-    # the rest of this app, there's no real-time video decode/render loop
-    # here) -- deliberately low-fps and that's fine. Audio playback is real,
-    # though: it's handed off to ffplay (bundled with ffmpeg) running with
-    # the same volume/mix filter graph Finalize uses, muted video output
-    # (-nodisp), started at the current scrub position on Play and killed on
-    # Pause/seek/close.
+    # With libmpv the video plays in the player (as on the Cut tab), with
+    # the enabled tracks mixed at their volumes as Finalize mixes them
+    # (_audio_apply_mix); the time, slider and waveform playheads follow
+    # it. Without it, the preview steps to a still frame every ~300ms and
+    # the sound is handed off to ffplay (bundled with ffmpeg) running the
+    # same mix filter graph, with no video output (-nodisp), started at the
+    # current scrub position on Play and killed on Pause/seek/close.
+    def _audio_player_ready(self):
+        return self._audio_player_on and self.audio_player.loaded
+
+    def _audio_use_player(self, on):
+        """Shows the player over the still-frame canvas, or takes it away."""
+        self._audio_player_on = on
+        if on:
+            self.audio_player.frame.place(x=0, y=0, relwidth=1, relheight=1)
+        else:
+            if self.audio_player is not None:
+                self.audio_player.frame.place_forget()
+            self.audio_play_btn.config(text="▶ Play")
+
+    def _on_audio_player_changed(self):
+        """Called (on the Tk thread) when the player's position, play state
+        or file changed."""
+        p = self.audio_player
+        if not self._audio_player_on:
+            return
+        if p.failed:
+            self.status_lbl.config(text="The player can't open this video; showing still frames.")
+            self._audio_use_player(False)
+            self._audio_update_preview(self.audio_time_sec)
+            return
+        if not p.loaded or "track-list" not in p.state:
+            return
+        if self._audio_restart_after_id is None:
+            self._audio_apply_mix()   # the file just opened; else it's already set
+        self.audio_play_btn.config(text="▶ Play" if p.paused else "⏸ Pause")
+        pos = p.position
+        if pos is None:
+            return
+        self.audio_time_sec = max(0.0, min(self.audio_duration, pos))
+        self.audio_time_lbl.config(text=seconds_to_hms(self.audio_time_sec))
+        if not self.audio_slider.dragging:
+            self.audio_slider.set(self.audio_time_sec)
+        self._audio_update_playheads()
+
+    def _audio_apply_mix(self):
+        """Gives the player the enabled tracks at their volumes."""
+        if not self._audio_player_ready():
+            return
+        enabled = [t for t in self.audio_tracks if t["enabled_var"].get()]
+        self.audio_player.set_audio_mix(
+            [t["a_index"] + 1 for t in enabled],     # mpv counts audio tracks from 1
+            [t["volume_slider"].get() if t["volume_slider"] else 1.0 for t in enabled])
+
+    def _audio_slider_released(self, value):
+        if self._audio_player_ready():
+            self.audio_player.seek(float(value))     # the exact frame, after keyframes while dragging
+
     def _audio_slider_changed(self, value):
         if not self.audio_input_path:
+            return
+        if self._audio_player_on:
+            if self._audio_player_ready():
+                self.audio_player.seek(float(value), exact=not self.audio_slider.dragging)
+            self._audio_show_time(float(value))
             return
         was_playing = self.audio_playing
         self._audio_pause()
@@ -8202,6 +8315,10 @@ class LosslessVideoApp(_BaseTk):
 
     def _audio_step(self, delta):
         if not self.audio_input_path:
+            return
+        if self._audio_player_on:
+            if self._audio_player_ready():
+                self.audio_player.seek_relative(delta)
             return
         was_playing = self.audio_playing
         self._audio_pause()
@@ -8216,8 +8333,19 @@ class LosslessVideoApp(_BaseTk):
         self._audio_update_preview(self.audio_time_sec)
         self._audio_update_playheads()
 
+    def _audio_show_time(self, t):
+        """The time label and playheads at t, right away (the player's own
+        position follows once its seek lands)."""
+        self.audio_time_sec = max(0.0, min(self.audio_duration, t))
+        self.audio_time_lbl.config(text=seconds_to_hms(self.audio_time_sec))
+        self._audio_update_playheads()
+
     def _audio_toggle_play(self):
         if not self.audio_input_path:
+            return
+        if self._audio_player_on:
+            if self._audio_player_ready():
+                self.audio_player.toggle_pause()
             return
         if self.audio_playing:
             self._audio_pause()
@@ -8319,14 +8447,23 @@ class LosslessVideoApp(_BaseTk):
 
     def _audio_maybe_restart_playback(self):
         # Debounced so dragging a volume slider or toggling several tracks
-        # doesn't spawn a burst of ffplay processes -- only the settle point
-        # after motion pauses triggers a restart, same pattern as the frame
-        # preview debounce elsewhere in this app.
+        # doesn't spawn a burst of ffplay processes (or mpv audio restarts)
+        # -- only the settle point after motion pauses triggers a restart,
+        # same pattern as the frame preview debounce elsewhere in this app.
+        if self._audio_player_on:
+            if self._audio_restart_after_id is not None:
+                self.after_cancel(self._audio_restart_after_id)
+            self._audio_restart_after_id = self.after(100, self._audio_mix_settled)
+            return
         if not self.audio_playing:
             return
         if self._audio_restart_after_id is not None:
             self.after_cancel(self._audio_restart_after_id)
         self._audio_restart_after_id = self.after(150, self._audio_restart_playback_now)
+
+    def _audio_mix_settled(self):
+        self._audio_restart_after_id = None
+        self._audio_apply_mix()
 
     def _audio_restart_playback_now(self):
         self._audio_restart_after_id = None
@@ -8338,7 +8475,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_time_sec = 0.0
 
     def _audio_update_preview(self, at_seconds):
-        if not self.audio_input_path or not PIL_AVAILABLE:
+        if not self.audio_input_path or not PIL_AVAILABLE or self._audio_player_on:
             return
         if self.audio_after_id is not None:
             self.after_cancel(self.audio_after_id)
@@ -8445,6 +8582,8 @@ class LosslessVideoApp(_BaseTk):
             track["volume_slider"].set(gain)
             if track["volume_lbl"] is not None:
                 track["volume_lbl"].config(text=f"{int(round(gain * 100))}%")
+            self._audio_redraw_waveform(track)
+        self._audio_maybe_restart_playback()   # play the new levels
         self.status_lbl.config(text="Auto balance applied — review levels, then Finalize")
 
     # ---- finalize (mix + save) ---------------------------------------------

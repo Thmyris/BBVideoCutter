@@ -27,8 +27,8 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 - **Combine** — join videos without re-encoding when they share codec,
   resolution, frame rate and audio tracks. Mixed videos are re-encoded to
   match the first one instead (H.264 + AAC, others scaled to fit with black
-  bars; a video with fewer audio tracks gets silence on the others); a note under the list says when and why, and so does the message
-  when it's done.
+  bars; a video with fewer audio tracks gets silence on the others); a note
+  under the list says when and why, and so does the message when it's done.
 - **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
   minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
@@ -40,9 +40,11 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; a video's
-audio tracks play together, or pick one under **Audio** next to the volume; preview
-the joined video on Combine, a row's ranges on Bulk Cut, and the video
-playing under the crop box on Crop/Rotate.
+audio tracks play together, or pick one under **Audio** next to the
+volume; preview the joined video on Combine, a row's ranges on Bulk Cut,
+the video playing under the crop box on Crop/Rotate, and on Audio the
+video with the enabled tracks mixed at their volumes, as Finalize saves
+them.
 
 The Combine and Bulk Cut lists work the same way: a thumbnail per file,
 Ctrl/Shift-click to select several rows, Delete to remove them, and Move
@@ -69,7 +71,8 @@ to start it without a console window.
 The player also needs `libmpv-2.dll` (from an mpv "dev" build for Windows
 x86_64, e.g. shinchiro's `mpv-dev-x86_64-*.7z`) next to
 `BBVideoCutter.py`, in `release/build/`, or on `PATH`. Without it the app
-shows still frames instead.
+shows still frames instead (on the Audio tab with the mix played by
+ffplay).
 
 ## Building it yourself
 
