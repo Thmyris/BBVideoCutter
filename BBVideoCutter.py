@@ -1213,19 +1213,32 @@ def render_waveform(path, a_index, width, height, color="white", span=None, on_s
     where the track has no sound (it starts late, has gaps or ends early),
     so the picture lines up with a time slider.
 
+    a_index can also be a list of tracks: their sound summed, as the
+    player's mix plays it.
+
     on_start(process) gets the ffmpeg process, so it can be killed; a
     killed render raises."""
     align = ""
     if span is not None:
         align = (f"aresample=async=1:first_pts=0,"
                  f"apad=whole_dur={span:.6f},atrim=end={span:.6f},")
+    if isinstance(a_index, (list, tuple)):
+        first = "aresample=async=1:first_pts=0," if span is not None else ""
+        mix = ";".join(f"[0:a:{k}]{first}anull[m{k}]" for k in a_index)
+        mix += ";" + "".join(f"[m{k}]" for k in a_index)
+        mix += f"amix=inputs={len(a_index)}:duration=longest:normalize=0,"
+        filt = (f"{mix}{align}showwavespic=s={width}x{height}:colors={color}:"
+                f"scale=cbrt:draw=full[wv]")
+    else:
+        filt = None
     # draw=full ignores amplitude when deciding pixel brightness (only the
     # height reflects amplitude) -- with draw=scale (the default) quiet
     # passages fade to near-invisible, which is what made the waveform so
     # hard to see. scale=cbrt compresses the dynamic range so quiet parts
     # still show visible height, not just the loudest peaks.
-    filt = (f"[0:a:{a_index}]{align}showwavespic=s={width}x{height}:colors={color}:"
-            f"scale=cbrt:draw=full[wv]")
+    if filt is None:
+        filt = (f"[0:a:{a_index}]{align}showwavespic=s={width}x{height}:colors={color}:"
+                f"scale=cbrt:draw=full[wv]")
     cmd = [find_exe("ffmpeg"), "-v", "error", "-i", path, "-filter_complex", filt,
            "-map", "[wv]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1556,6 +1569,11 @@ class VideoPlayer:
         self.volume = 100.0
         self.muted = False
         self._range = None   # the play_range running: its end and progress
+        # Every audio track played at once on each file loaded (the Cut
+        # tab's player); audio_mix: the track ids being mixed, or None.
+        self.mix_all_audio = False
+        self.audio_mix = None
+        self._mix_pending = False
 
     # ---- life cycle ----------------------------------------------------
     def _ensure_mpv(self):
@@ -1641,7 +1659,13 @@ class VideoPlayer:
         self._poll_id = self.frame.after(33, self._poll)
         self._disable_mpv_windows()
         self._check_range()
-        seen = tuple(self.state.get(name) for name in self.OBSERVED + ("ready", "failed"))
+        if self._mix_pending and self.loaded and "track-list" in self.state:
+            self._mix_pending = False
+            ids = [t["id"] for t in self.audio_tracks]
+            if len(ids) > 1:
+                self.set_audio_mix(ids)
+        seen = tuple(self.state.get(name) for name in self.OBSERVED + ("ready", "failed")) \
+            + (tuple(self.audio_mix or ()),)
         if seen != self._last_seen:
             self._last_seen = seen
             if self.on_change:
@@ -1728,6 +1752,9 @@ class VideoPlayer:
         """Opens path (a file or an edl_url()), paused, at time start."""
         self._ensure_mpv()
         self._clear_range()
+        # The last file's mix names its tracks, which this one may not have.
+        self.set_audio_mix(None)
+        self._mix_pending = self.mix_all_audio
         self.state.pop("time-pos", None)
         self.state.pop("track-list", None)   # the old file's, until the new one's arrive
         self.state.pop("aid", None)
@@ -1826,7 +1853,25 @@ class VideoPlayer:
 
     def set_audio_track(self, track_id):
         if self.mpv is not None:
+            self.set_audio_mix(None)
             self.mpv.aid = track_id
+
+    def set_audio_mix(self, track_ids):
+        """Plays the audio tracks track_ids (mpv's ids) at once, summed as
+        the Audio tab's mix does; None (or a single track) for one track
+        the usual way. mpv's lavfi-complex does the mixing; it can be set
+        and cleared while a file plays."""
+        if self.mpv is None:
+            return
+        ids = list(track_ids or ())
+        if len(ids) > 1:
+            graph = "".join(f"[aid{i}]" for i in ids) + f"amix=inputs={len(ids)}:normalize=0[ao]"
+            self.mpv["lavfi-complex"] = graph
+            self.audio_mix = ids
+        elif self.audio_mix is not None:
+            self.mpv["lavfi-complex"] = ""
+            self.audio_mix = None
+            self.mpv.aid = ids[0] if ids else "auto"
 
     def set_video_crop(self, spec):
         """Shows only part of the video: spec "WxH+X+Y" in the video's own
@@ -3439,9 +3484,11 @@ class LosslessVideoApp(_BaseTk):
 
     def _build_cut_audio_controls(self, parent):
         """Mute, volume and the audio track heard. A cut keeps every audio
-        track; the picker only chooses which one the player plays. Volume
-        and mute are remembered between runs."""
+        track; the picker only chooses what the player plays: every track
+        at once (each video starts that way) or one of them. Volume and
+        mute are remembered between runs."""
         player = self.cut_player
+        player.mix_all_audio = True
         player.set_volume(self.settings.get("player_volume", 100.0))
         player.set_muted(self.settings.get("player_muted", False))
         self._cut_audio_save_id = None
@@ -3484,7 +3531,8 @@ class LosslessVideoApp(_BaseTk):
         player = self.cut_player
         tracks = player.audio_tracks
         key = [(t.get("id"), t.get("title"), t.get("lang"), t.get("codec")) for t in tracks]
-        shown = (key, player.audio_track, player.muted, player.volume)
+        mixing = player.audio_mix is not None
+        shown = (key, player.audio_track, mixing, player.muted, player.volume)
         if shown == getattr(self, "_cut_audio_shown", None):
             return   # called on every player change, ~30 times a second in playback
         self._cut_audio_shown = shown
@@ -3493,18 +3541,28 @@ class LosslessVideoApp(_BaseTk):
         if key != self._cut_track_list:
             self._cut_track_list = key
             self.cut_track_menu.delete(0, "end")
+            if len(tracks) > 1:
+                self.cut_track_menu.add_radiobutton(
+                    label="All tracks together", variable=self.cut_track_var, value=-1,
+                    command=lambda: self.cut_player.set_audio_mix(
+                        [t["id"] for t in self.cut_player.audio_tracks]))
+                self.cut_track_menu.add_separator()
             for t in tracks:
                 self.cut_track_menu.add_radiobutton(
                     label=describe_audio_track(t), variable=self.cut_track_var, value=t["id"],
                     command=lambda tid=t["id"]: self.cut_player.set_audio_track(tid))
         current = player.audio_track
-        self.cut_track_var.set(current if current is not None else 0)
+        self.cut_track_var.set(-1 if mixing else current if current is not None else 0)
         ids = [t["id"] for t in tracks]
-        if current in ids and ids.index(current) != self._wave_track:
-            self._start_waveform(ids.index(current))   # the waveform shows the track heard
+        # The waveform shows what is heard.
+        if mixing and len(ids) > 1 and self._wave_track != "all":
+            self._start_waveform("all")
+        elif not mixing and current in ids and ids.index(current) != self._wave_track:
+            self._start_waveform(ids.index(current))
         if len(tracks) > 1:
             n = ids.index(current) + 1 if current in ids else 0
-            text = f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾"
+            text = (f"Audio: all {len(tracks)} ▾" if mixing else
+                    f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾")
             self.cut_track_btn.config(text=text)
             if not self.cut_track_btn.winfo_manager():
                 self.cut_track_btn.pack(side="left", padx=(px(8), 0))
@@ -4131,9 +4189,9 @@ class LosslessVideoApp(_BaseTk):
 
     # ---- waveform strip -----------------------------------------------
     def _start_waveform(self, track):
-        """Draws audio track `track` (0-based) under the slider, on the
-        slider's time axis: the track the player plays, so it follows the
-        audio-track picker. ffmpeg draws it in the background
+        """Draws audio track `track` (0-based; "all": every track summed)
+        under the slider, on the slider's time axis: what the player plays,
+        so it follows the audio-track picker. ffmpeg draws it in the background
         (render_waveform: about 0.2 s for 2 GB of MP4, 0.7 s of MPEG-TS)
         and it is kept for the session."""
         if self.wave_canvas is None or not self.input_path:
@@ -4152,6 +4210,9 @@ class LosslessVideoApp(_BaseTk):
         self._wave_note = "Drawing the waveform…"
         self._redraw_waveform()
         gen, path, span = self._wave_gen, self.input_path, self.duration
+        which = track
+        if track == "all":
+            which = list(range(len(self.cut_player.audio_tracks)))
 
         def started(proc):
             self._wave_proc = proc
@@ -4161,7 +4222,7 @@ class LosslessVideoApp(_BaseTk):
         def worker():
             mask, note = None, ""
             try:
-                mask = render_waveform(path, track, 2400, 64, span=span,
+                mask = render_waveform(path, which, 2400, 64, span=span,
                                        on_start=started).convert("L")
             except Exception as exc:
                 # No audio stream: the strip stays empty, without a note.

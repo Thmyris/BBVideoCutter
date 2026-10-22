@@ -39,7 +39,8 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 - **Audio** — mute/mix individual audio tracks.
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
-tab, with keyframe ticks and the audio waveform under the slider; preview
+tab, with keyframe ticks and the audio waveform under the slider; a video's
+audio tracks play together, or pick one under **Audio** next to the volume; preview
 the joined video on Combine, a row's ranges on Bulk Cut, and the video
 playing under the crop box on Crop/Rotate.
 
