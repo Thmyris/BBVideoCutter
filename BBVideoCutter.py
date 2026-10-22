@@ -3283,6 +3283,7 @@ class LosslessVideoApp(_BaseTk):
         controls.grid(row=2, column=0, sticky="ew", padx=3, pady=2)
 
         self.cut_transport_buttons = []  # need a loaded video
+        self.cut_transport_row = None
         if self.cut_player is not None:
             self._build_cut_transport(controls)
 
@@ -3328,6 +3329,8 @@ class LosslessVideoApp(_BaseTk):
             b2 = tk.Button(step_row, text=">", width=7, command=lambda s=secs: self._nudge(s))
             b2.pack(side="left", padx=(0, 4))
             self.step_buttons += [b1, b2]
+        self.cut_step_row = step_row
+        self._init_cut_button_fit()
 
         # ---- slider
         self.slider_canvas = tk.Canvas(controls, height=px(24), bg="#f0f0f0", highlightthickness=0)
@@ -3488,6 +3491,7 @@ class LosslessVideoApp(_BaseTk):
                                      font=("Segoe UI", 9))
         self.cut_time_lbl.pack(side="left", padx=(px(4), 0))
         self._build_cut_audio_controls(row.right)
+        self.cut_transport_row = row
         for b in self.cut_transport_buttons:
             b.config(state="disabled")
 
@@ -3536,8 +3540,82 @@ class LosslessVideoApp(_BaseTk):
             else:
                 back.pack_forget()
                 fwd.pack_forget()
+            self._fit_cut_buttons()
         if save:
             self._save_option("show_frame_buttons", self.show_frame_buttons_var)
+
+    # The Cut tab's play / step / jump buttons and the 1 sec ... 3 min ones
+    # are made wider than their text by the same share: 45%, or less in 5%
+    # steps until both rows fit the window. The Play / Pause button always
+    # keeps room for "Pause".
+    CUT_BUTTON_EXTRA = (0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.0)
+
+    def _init_cut_button_fit(self):
+        """Notes each button's own width and padding, and refits on resize."""
+        self._cut_fit_base = {}   # button -> (its width without extra, its padx)
+        self._cut_fit_extra = None
+        row = self.cut_transport_row
+        buttons = list(self.step_buttons)
+        if row is not None:
+            buttons += [w for w in row.center.winfo_children() if isinstance(w, tk.Button)]
+        for b in buttons:
+            self._cut_fit_base[b] = (b.winfo_reqwidth(), b.winfo_pixels(b.cget("padx")))
+        self._cut_pause_min = 0
+        if row is not None:
+            # "Pause" needs more room than the 8 characters Play gets on some
+            # systems, where its symbol comes from a wider fallback font.
+            play = self.cut_play_btn
+            play.config(width=10)
+            self._cut_pause_min = play.winfo_reqwidth()
+            play.config(width=8)
+            for w in (row, row.left, row.right):
+                w.bind("<Configure>", lambda e: self._fit_cut_buttons(), add="+")
+        self.cut_step_row.master.bind("<Configure>", lambda e: self._fit_cut_buttons(), add="+")
+
+    def _fit_cut_buttons(self):
+        if not getattr(self, "_cut_fit_base", None):
+            return
+        row, steps = self.cut_transport_row, self.cut_step_row
+        room = steps.master.winfo_width()
+        if room < 2:
+            return   # not laid out yet
+
+        def pad(b, extra):
+            """b's extra padding each side, for the share extra."""
+            width = self._cut_fit_base[b][0]
+            add = int(round(width * extra / 2))
+            if b is getattr(self, "cut_play_btn", None):
+                add = max(add, (self._cut_pause_min - width + 1) // 2)
+            return add
+
+        def pack_padx(w):
+            padx = w.pack_info().get("padx", 0)
+            parts = padx if isinstance(padx, (tuple, list)) else str(padx).split()
+            return sum(w.winfo_pixels(str(p)) for p in parts) * (2 if len(parts) == 1 else 1)
+
+        def needed(extra):
+            """The widest the two rows get with the share extra."""
+            step_w = sum(self._cut_fit_base[w][0] + 2 * pad(w, extra) if w in self._cut_fit_base
+                         else w.winfo_reqwidth()
+                         for w in steps.winfo_children()) \
+                + sum(pack_padx(w) for w in steps.winfo_children())
+            if row is None:
+                return step_w, 0
+            shown = [w for w in row.center.winfo_children() if w.winfo_manager()]
+            center = sum(self._cut_fit_base[w][0] + 2 * pad(w, extra) + pack_padx(w)
+                         for w in shown)
+            row_w = (row.left.winfo_reqwidth() + center + row.right.winfo_reqwidth()
+                     + 2 * px(CenteredRow.GAP))
+            return step_w, row_w
+
+        row_room = row.winfo_width() if row is not None else room
+        extra = next((x for x in self.CUT_BUTTON_EXTRA
+                      if all(w <= r for w, r in zip(needed(x), (room, row_room)))), 0.0)
+        if extra == self._cut_fit_extra:
+            return
+        self._cut_fit_extra = extra
+        for b, (width, padx) in self._cut_fit_base.items():
+            b.config(padx=padx + pad(b, extra))
 
     def _build_cut_audio_controls(self, parent):
         """Mute, volume and the audio track heard. A cut keeps every audio
