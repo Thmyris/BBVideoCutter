@@ -2512,6 +2512,10 @@ class LosslessVideoApp(_BaseTk):
         self.input_path = None
         self.duration = 0.0
         self.cut_video_start = 0.0      # first video frame's time (_load_video_for_cut)
+        # The video last opened on Cut, Crop/Rotate or Audio, which the other
+        # two open when shown; tab index -> the shared video it last tried.
+        self.shared_video = None
+        self._shared_tried = {}
         self.file_size = 0
         self.start_sec = 0.0
         self.end_sec = 0.0
@@ -2590,6 +2594,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_player = None          # VideoPlayer over the preview (None without libmpv)
         self._audio_player_on = False     # the player shows the video (else still frames + ffplay)
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
+        self._audio_note = None           # shown instead of the open prompt (_audio_show_no_audio)
 
         # Thumbnails for the Combine and Bulk Cut lists, which share them.
         self.thumb_cache = {}            # path -> PhotoImage, or "" when it couldn't be made
@@ -2688,6 +2693,27 @@ class LosslessVideoApp(_BaseTk):
         if idx != 4 and self.audio_playing:
             self._audio_pause()
         self._ensure_tab_built(idx)
+        self._show_shared_video(idx)
+
+    def _share_video(self, tab, path):
+        """path was opened on tab (Cut, Crop/Rotate or Audio): the other two
+        open it too, each when it is next shown."""
+        self.shared_video = path
+        self._shared_tried[tab] = path
+
+    def _show_shared_video(self, tab):
+        """Opens the shared video on tab, once: a tab that couldn't open it,
+        or has since opened another one, isn't made to again."""
+        path = self.shared_video
+        if tab not in (0, 3, 4) or path is None or self._shared_tried.get(tab) == path:
+            return
+        self._shared_tried[tab] = path
+        if not os.path.isfile(path):
+            return
+        load = {0: self._load_video_for_cut, 3: self._load_video_for_resize,
+                4: self._load_video_for_audio}[tab]
+        # After the tab is drawn, so its player gets its real size.
+        self.after_idle(lambda: load(path, quiet=True))
 
     def _tab_players(self):
         """(tab index, VideoPlayer) of the started players on tabs other
@@ -3892,7 +3918,9 @@ class LosslessVideoApp(_BaseTk):
         if path:
             self._load_video_for_cut(path)
 
-    def _load_video_for_cut(self, path):
+    def _load_video_for_cut(self, path, quiet=False):
+        """quiet: opened from another tab (_show_shared_video), so a failure
+        only shows in the status bar."""
         try:
             self.status_lbl.config(text="Reading video info...")
             self.update_idletasks()
@@ -3906,9 +3934,13 @@ class LosslessVideoApp(_BaseTk):
             info = json.loads(result.stdout or "{}")
             duration = float(info["format"]["duration"])
         except Exception as exc:
+            if quiet:
+                self.status_lbl.config(text=f"Couldn't open {os.path.basename(path)} on the Cut tab")
+                return
             messagebox.showerror("Error loading video", str(exc))
             self.status_lbl.config(text="Ready")
             return
+        self._share_video(0, path)
         # Where the video's frames start on the cut's clock (ffmpeg -ss's,
         # from the file's start time): the frame buttons step Start / End
         # on that grid (_cut_frame_step).
@@ -6655,7 +6687,8 @@ class LosslessVideoApp(_BaseTk):
         if path:
             self._load_video_for_resize(path)
 
-    def _load_video_for_resize(self, path):
+    def _load_video_for_resize(self, path, quiet=False):
+        """quiet: as in _load_video_for_cut."""
         try:
             self.status_lbl.config(text="Reading video info...")
             self.update_idletasks()
@@ -6669,9 +6702,14 @@ class LosslessVideoApp(_BaseTk):
             duration = float(duration_result.stdout.strip())
             src_w, src_h, rotation = probe_shown_video_size(ffprobe, path)
         except Exception as exc:
+            if quiet:
+                self.status_lbl.config(
+                    text=f"Couldn't open {os.path.basename(path)} on the Crop/Rotate tab")
+                return
             messagebox.showerror("Error loading video", str(exc))
             self.status_lbl.config(text="Ready")
             return
+        self._share_video(3, path)
 
         self.resize_input_path = path
         self.resize_duration = duration
@@ -7912,13 +7950,40 @@ class LosslessVideoApp(_BaseTk):
         if text == self.OPEN_PROMPT:
             self._draw_open_prompt(c, w, h)
         else:
-            c.create_text(w / 2, h / 2, text=text, fill="#888888", font=("Segoe UI", 12))
+            c.create_text(w / 2, h / 2, text=text, fill="#888888", font=("Segoe UI", 12),
+                          justify="center")
+
+    def _audio_show_no_audio(self, path):
+        """The tab empties, saying the video (shared from another tab) has
+        no audio to mix."""
+        self._audio_stop_playback_state()
+        if self.audio_player is not None:
+            self.audio_player.set_paused(True)
+            self._audio_use_player(False)
+        self.audio_input_path = None
+        self.audio_duration = 0.0
+        self.audio_frame_img = None
+        self.audio_tracks = []
+        self._audio_rebuild_track_rows()
+        for btn in (self.audio_balance_btn, self.audio_enable_all_btn,
+                    self.audio_disable_all_btn, self.audio_finalize_btn):
+            btn.config(state="disabled")
+        self.audio_filename_lbl.config(text=os.path.basename(path))
+        self.audio_info_lbl.config(text="no audio tracks")
+        self.audio_slider.set(0)
+        self.audio_time_lbl.config(text=seconds_to_hms(0))
+        self.audio_duration_lbl.config(text=f"/ {seconds_to_hms(0)}")
+        self._audio_note = ("This video has no audio tracks to mix.\n\n"
+                            "Click here or drop another video.")
+        self._redraw_audio_canvas()
+        self.status_lbl.config(text="Ready")
 
     def _redraw_audio_canvas(self):
         c = self.audio_canvas
         if not self.audio_frame_img:
             self._draw_audio_placeholder(
-                self.OPEN_PROMPT if not self.audio_input_path else "Loading frame..."
+                (self._audio_note or self.OPEN_PROMPT) if not self.audio_input_path
+                else "Loading frame..."
             )
             return
         cw = c.winfo_width()
@@ -7953,7 +8018,9 @@ class LosslessVideoApp(_BaseTk):
         if path:
             self._load_video_for_audio(path)
 
-    def _load_video_for_audio(self, path):
+    def _load_video_for_audio(self, path, quiet=False):
+        """quiet: as in _load_video_for_cut; a video without audio then
+        empties the tab, saying so (_audio_show_no_audio)."""
         try:
             self.status_lbl.config(text="Reading video info...")
             self.update_idletasks()
@@ -7975,10 +8042,16 @@ class LosslessVideoApp(_BaseTk):
             )
             audio_streams = json.loads(audio_result.stdout or "{}").get("streams") or []
         except Exception as exc:
+            if quiet:
+                self.status_lbl.config(text=f"Couldn't open {os.path.basename(path)} on the Audio tab")
+                return
             messagebox.showerror("Error loading video", str(exc))
             self.status_lbl.config(text="Ready")
             return
 
+        if not audio_streams and quiet:
+            self._audio_show_no_audio(path)
+            return
         if not audio_streams:
             messagebox.showerror(
                 "No audio tracks",
@@ -7987,7 +8060,9 @@ class LosslessVideoApp(_BaseTk):
             self.status_lbl.config(text="Ready")
             return
 
+        self._share_video(4, path)
         self._audio_stop_playback_state()
+        self._audio_note = None
         self.audio_input_path = path
         self.audio_duration = duration
 
