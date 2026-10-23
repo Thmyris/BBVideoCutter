@@ -2098,6 +2098,151 @@ class CenteredRow(tk.Frame):
             self.center.place_configure(x=x)
 
 
+class PlayerAudioControls:
+    """Mute (a speaker icon), volume and the audio track heard, for a
+    VideoPlayer, packed left to right into parent: the Cut tab's and the
+    Crop/Rotate tab's. The player plays every audio track at once (each
+    video starts that way) or the one picked in the track menu, which is
+    shown only for a video with more than one. on_change() follows a change
+    of volume or mute made here; on_refresh(mixing, current track id, track
+    ids), each time the controls show something new."""
+
+    def __init__(self, app, parent, player, on_change, on_refresh=None):
+        self.app, self.player = app, player
+        self.on_change, self.on_refresh = on_change, on_refresh
+        player.mix_all_audio = True
+
+        # A speaker icon, clicked to mute / unmute.
+        self.mute_btn = tk.Canvas(parent, width=px(26), height=px(22), bg="#f0f0f0",
+                                  highlightthickness=0, cursor="hand2")
+        self.mute_btn.pack(side="left", padx=(0, 2))
+        self.mute_btn.bind("<Button-1>", lambda e: self.toggle_mute())
+        self.hover = False
+        self.icon = None    # what it shows: "muted", or "waves N"
+
+        def hover(on):
+            self.hover = on
+            self.draw_speaker()
+
+        self.mute_btn.bind("<Enter>", lambda e: hover(True), add="+")
+        self.mute_btn.bind("<Leave>", lambda e: hover(False), add="+")
+        Tooltip(self.mute_btn,
+                lambda: f"{'Unmute' if self.player.muted else 'Mute'} (shortcut: M)")
+        self.volume_slider = TimeSlider(parent, command=self.volume_changed, width=100, height=22)
+        self.volume_slider.config_range(to=100.0)
+        self.volume_slider.set(player.volume)
+        self.volume_slider.pack(side="left")
+        self.volume_slider.bind(
+            "<MouseWheel>", lambda e: self.volume_step(5 if e.delta > 0 else -5))
+        Tooltip(self.volume_slider, "Shortcuts: Up / Down, or the mouse wheel")
+        self.volume_lbl = tk.Label(parent, bg="#f0f0f0", width=4, anchor="w")
+        self.volume_lbl.pack(side="left")
+
+        # Packed only while the video has more than one audio track.
+        self.track_btn = tk.Button(parent, text="", command=self.post_track_menu)
+        self.track_menu = tk.Menu(self.track_btn, tearoff=0)
+        self.track_var = tk.IntVar(value=0)
+        self._track_list = None       # the tracks the menu was built for
+        self._shown = None
+        self.refresh()
+
+    def refresh(self):
+        player = self.player
+        tracks = player.audio_tracks
+        key = [(t.get("id"), t.get("title"), t.get("lang"), t.get("codec")) for t in tracks]
+        mixing = player.audio_mix is not None
+        shown = (key, player.audio_track, mixing, player.muted, player.volume)
+        if shown == self._shown:
+            return   # called on every player change, ~30 times a second in playback
+        self._shown = shown
+        self.draw_speaker()
+        self.volume_lbl.config(text=f"{int(round(player.volume))}%")
+        if key != self._track_list:
+            self._track_list = key
+            self.track_menu.delete(0, "end")
+            if len(tracks) > 1:
+                self.track_menu.add_radiobutton(
+                    label="All tracks together", variable=self.track_var, value=-1,
+                    command=lambda: self.player.set_audio_mix(
+                        [t["id"] for t in self.player.audio_tracks]))
+                self.track_menu.add_separator()
+            for t in tracks:
+                self.track_menu.add_radiobutton(
+                    label=describe_audio_track(t), variable=self.track_var, value=t["id"],
+                    command=lambda tid=t["id"]: self.player.set_audio_track(tid))
+        current = player.audio_track
+        self.track_var.set(-1 if mixing else current if current is not None else 0)
+        ids = [t["id"] for t in tracks]
+        if self.on_refresh is not None:
+            self.on_refresh(mixing, current, ids)
+        if len(tracks) > 1:
+            n = ids.index(current) + 1 if current in ids else 0
+            text = (f"Audio: all {len(tracks)} ▾" if mixing else
+                    f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾")
+            self.track_btn.config(text=text)
+            if not self.track_btn.winfo_manager():
+                self.track_btn.pack(side="left", padx=(px(8), 0))
+        elif self.track_btn.winfo_manager():
+            self.track_btn.pack_forget()
+
+    def draw_speaker(self):
+        player, c = self.player, self.mute_btn
+        if player.muted:
+            icon = "muted"
+        else:
+            icon = f"waves {0 if player.volume <= 0 else 1 if player.volume < 50 else 2}"
+        self.icon = icon
+        c.delete("all")
+        k = px(100) / 100              # the drawing is laid out on a 26 x 22 grid
+        color = self.app._theme_color("icon")
+        if self.hover:
+            c.create_rectangle(0, 0, 26 * k, 22 * k, fill=self.app._theme_color("icon_hover"),
+                               width=0)
+        c.create_polygon(*[v * k for v in (3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5)],
+                         fill=color, outline=color)
+        line = max(1.0, 1.6 * k)
+        if icon == "muted":
+            c.create_line(15 * k, 8 * k, 21 * k, 14 * k, fill=color, width=line, capstyle="round")
+            c.create_line(15 * k, 14 * k, 21 * k, 8 * k, fill=color, width=line, capstyle="round")
+        else:
+            for r in (4, 7.5)[:int(icon[-1])]:
+                c.create_arc((12 - r) * k, (11 - r) * k, (12 + r) * k, (11 + r) * k,
+                             start=-50, extent=100, style="arc", outline=color, width=line)
+
+    def post_track_menu(self):
+        menu = self.track_menu
+        if menu.index("end") is None:
+            return
+        dark = self.app._is_dark()
+        menu.configure(DARK_MENU if dark else self.app._menu_light_colors)
+        b = self.track_btn
+        x, y = b.winfo_rootx(), b.winfo_rooty() + b.winfo_height()
+        post_with_menu_margin(lambda: menu.tk_popup(x, y), DARK_MENU["background"] if dark else None)
+
+    def toggle_mute(self):
+        self.player.set_muted(not self.player.muted)
+        self.on_change()
+
+    def volume_changed(self, value):
+        player = self.player
+        player.set_volume(value)
+        if player.muted and value > 0:
+            player.set_muted(False)   # turning the volume up means wanting to hear it
+        self.on_change()
+
+    def volume_step(self, delta):
+        self.player.set_volume(self.player.volume + delta)
+        self.volume_slider.set(self.player.volume)
+        self.volume_changed(self.player.volume)
+
+    def set_from(self, volume, muted):
+        """Gives the player (and shows) a volume and mute set elsewhere."""
+        self.player.set_volume(volume)
+        self.player.set_muted(muted)
+        self.volume_slider.set(self.player.volume)
+        self.refresh()
+
+
 class Tooltip:
     """A hint shown under a widget once the mouse has rested on it for a
     moment, gone when the mouse leaves or clicks. It is a label placed in
@@ -3875,139 +4020,36 @@ class LosslessVideoApp(_BaseTk):
         at once (each video starts that way) or one of them. Volume and
         mute are remembered between runs."""
         player = self.cut_player
-        player.mix_all_audio = True
         player.set_volume(self.settings.get("player_volume", 100.0))
         player.set_muted(self.settings.get("player_muted", False))
         self._cut_audio_save_id = None
+        a = self.cut_audio = PlayerAudioControls(self, parent, player, self._cut_audio_settings_changed,
+                                                 on_refresh=self._cut_waveform_follows)
+        self.cut_mute_btn, self.cut_volume_slider, self.cut_volume_lbl = (
+            a.mute_btn, a.volume_slider, a.volume_lbl)
+        self.cut_track_btn, self.cut_track_menu, self.cut_track_var = (
+            a.track_btn, a.track_menu, a.track_var)
 
-        # A speaker icon, clicked to mute / unmute.
-        self.cut_mute_btn = tk.Canvas(parent, width=px(26), height=px(22), bg="#f0f0f0",
-                                      highlightthickness=0, cursor="hand2")
-        self.cut_mute_btn.pack(side="left", padx=(0, 2))
-        self.cut_mute_btn.bind("<Button-1>", lambda e: self._cut_toggle_mute())
-        self._cut_speaker_hover = False
-        self._cut_speaker_icon = None    # what it shows: "muted", or "waves N"
-
-        def hover(on):
-            self._cut_speaker_hover = on
-            self._draw_cut_speaker()
-
-        self.cut_mute_btn.bind("<Enter>", lambda e: hover(True), add="+")
-        self.cut_mute_btn.bind("<Leave>", lambda e: hover(False), add="+")
-        Tooltip(self.cut_mute_btn,
-                lambda: f"{'Unmute' if self.cut_player.muted else 'Mute'} (shortcut: M)")
-        self.cut_volume_slider = TimeSlider(parent, command=self._cut_volume_changed,
-                                            width=100, height=22)
-        self.cut_volume_slider.config_range(to=100.0)
-        self.cut_volume_slider.set(player.volume)
-        self.cut_volume_slider.pack(side="left")
-        self.cut_volume_slider.bind(
-            "<MouseWheel>", lambda e: self._cut_volume_step(5 if e.delta > 0 else -5))
-        Tooltip(self.cut_volume_slider, "Shortcuts: Up / Down, or the mouse wheel")
-        self.cut_volume_lbl = tk.Label(parent, bg="#f0f0f0", width=4, anchor="w")
-        self.cut_volume_lbl.pack(side="left")
-
-        # Packed only while the video has more than one audio track.
-        self.cut_track_btn = tk.Button(parent, text="", command=self._cut_post_track_menu)
-        self.cut_track_menu = tk.Menu(self.cut_track_btn, tearoff=0)
-        self.cut_track_var = tk.IntVar(value=0)
-        self._cut_track_list = None       # the tracks the menu was built for
-        self._update_cut_audio_controls()
-
-    def _update_cut_audio_controls(self):
-        player = self.cut_player
-        tracks = player.audio_tracks
-        key = [(t.get("id"), t.get("title"), t.get("lang"), t.get("codec")) for t in tracks]
-        mixing = player.audio_mix is not None
-        shown = (key, player.audio_track, mixing, player.muted, player.volume)
-        if shown == getattr(self, "_cut_audio_shown", None):
-            return   # called on every player change, ~30 times a second in playback
-        self._cut_audio_shown = shown
-        self._draw_cut_speaker()
-        self.cut_volume_lbl.config(text=f"{int(round(player.volume))}%")
-        if key != self._cut_track_list:
-            self._cut_track_list = key
-            self.cut_track_menu.delete(0, "end")
-            if len(tracks) > 1:
-                self.cut_track_menu.add_radiobutton(
-                    label="All tracks together", variable=self.cut_track_var, value=-1,
-                    command=lambda: self.cut_player.set_audio_mix(
-                        [t["id"] for t in self.cut_player.audio_tracks]))
-                self.cut_track_menu.add_separator()
-            for t in tracks:
-                self.cut_track_menu.add_radiobutton(
-                    label=describe_audio_track(t), variable=self.cut_track_var, value=t["id"],
-                    command=lambda tid=t["id"]: self.cut_player.set_audio_track(tid))
-        current = player.audio_track
-        self.cut_track_var.set(-1 if mixing else current if current is not None else 0)
-        ids = [t["id"] for t in tracks]
-        # The waveform shows what is heard.
+    def _cut_waveform_follows(self, mixing, current, ids):
+        """The waveform shows what is heard."""
         if mixing and len(ids) > 1 and self._wave_track != "all":
             self._start_waveform("all")
         elif not mixing and current in ids and ids.index(current) != self._wave_track:
             self._start_waveform(ids.index(current))
-        if len(tracks) > 1:
-            n = ids.index(current) + 1 if current in ids else 0
-            text = (f"Audio: all {len(tracks)} ▾" if mixing else
-                    f"Audio {n}/{len(tracks)} ▾" if n else f"Audio off/{len(tracks)} ▾")
-            self.cut_track_btn.config(text=text)
-            if not self.cut_track_btn.winfo_manager():
-                self.cut_track_btn.pack(side="left", padx=(px(8), 0))
-        elif self.cut_track_btn.winfo_manager():
-            self.cut_track_btn.pack_forget()
+
+    def _update_cut_audio_controls(self):
+        self.cut_audio.refresh()
 
     def _draw_cut_speaker(self):
-        player, c = self.cut_player, self.cut_mute_btn
-        if player.muted:
-            icon = "muted"
-        else:
-            icon = f"waves {0 if player.volume <= 0 else 1 if player.volume < 50 else 2}"
-        self._cut_speaker_icon = icon
-        c.delete("all")
-        k = px(100) / 100              # the drawing is laid out on a 26 x 22 grid
-        color = self._theme_color("icon")
-        if self._cut_speaker_hover:
-            c.create_rectangle(0, 0, 26 * k, 22 * k, fill=self._theme_color("icon_hover"), width=0)
-        c.create_polygon(*[v * k for v in (3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5)],
-                         fill=color, outline=color)
-        line = max(1.0, 1.6 * k)
-        if icon == "muted":
-            c.create_line(15 * k, 8 * k, 21 * k, 14 * k, fill=color, width=line, capstyle="round")
-            c.create_line(15 * k, 14 * k, 21 * k, 8 * k, fill=color, width=line, capstyle="round")
-        else:
-            for r in (4, 7.5)[:int(icon[-1])]:
-                c.create_arc((12 - r) * k, (11 - r) * k, (12 + r) * k, (11 + r) * k,
-                             start=-50, extent=100, style="arc", outline=color, width=line)
-
-    def _cut_post_track_menu(self):
-        menu = self.cut_track_menu
-        if menu.index("end") is None:
-            return
-        menu.configure(DARK_MENU if self._is_dark() else self._menu_light_colors)
-        b = self.cut_track_btn
-        x, y = b.winfo_rootx(), b.winfo_rooty() + b.winfo_height()
-        margin = DARK_MENU["background"] if self._is_dark() else None
-        post_with_menu_margin(lambda: menu.tk_popup(x, y), margin)
+        self.cut_audio.draw_speaker()
 
     def _cut_toggle_mute(self):
-        if self.cut_player is None:
-            return
-        self.cut_player.set_muted(not self.cut_player.muted)
-        self._cut_audio_settings_changed()
-
-    def _cut_volume_changed(self, value):
-        player = self.cut_player
-        player.set_volume(value)
-        if player.muted and value > 0:
-            player.set_muted(False)   # turning the volume up means wanting to hear it
-        self._cut_audio_settings_changed()
+        if self.cut_player is not None:
+            self.cut_audio.toggle_mute()
 
     def _cut_volume_step(self, delta):
-        if self.cut_player is None:
-            return
-        self.cut_player.set_volume(self.cut_player.volume + delta)
-        self.cut_volume_slider.set(self.cut_player.volume)
-        self._cut_volume_changed(self.cut_player.volume)
+        if self.cut_player is not None:
+            self.cut_audio.volume_step(delta)
 
     def _cut_audio_settings_changed(self):
         self._update_cut_audio_controls()
