@@ -8211,18 +8211,10 @@ class LosslessVideoApp(_BaseTk):
 
         side = tk.Frame(tracks_body, bg="#f0f0f0")
         side.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        self.audio_enable_all_btn = tk.Button(
-            side, text="Enable All", width=16, state="disabled",
-            command=lambda: self._audio_set_all_enabled(True))
-        self.audio_enable_all_btn.pack(pady=2)
-        self.audio_disable_all_btn = tk.Button(
-            side, text="Disable All", width=16, state="disabled",
-            command=lambda: self._audio_set_all_enabled(False))
-        self.audio_disable_all_btn.pack(pady=2)
         self.audio_balance_btn = tk.Button(
             side, text="Auto Balance Audio", width=16, state="disabled",
             command=self._audio_auto_balance_clicked)
-        self.audio_balance_btn.pack(pady=(10, 2))
+        self.audio_balance_btn.pack(pady=2)
 
         self.audio_tracks_inner = tk.Frame(self.audio_tracks_canvas, bg="SystemWindow")
         self._audio_tracks_inner_window = self.audio_tracks_canvas.create_window(
@@ -8296,8 +8288,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_tracks = []
         self._dfn_reset()
         self._audio_rebuild_track_rows()
-        for btn in (self.audio_balance_btn, self.audio_enable_all_btn,
-                    self.audio_disable_all_btn, self.audio_finalize_btn):
+        for btn in (self.audio_balance_btn, self.audio_finalize_btn):
             btn.config(state="disabled")
         self.audio_filename_lbl.config(text=os.path.basename(path))
         self.audio_info_lbl.config(text="no audio tracks")
@@ -8426,9 +8417,8 @@ class LosslessVideoApp(_BaseTk):
             })
 
         self._audio_rebuild_track_rows()
-        for btn in (self.audio_balance_btn, self.audio_enable_all_btn, self.audio_disable_all_btn):
+        for btn in (self.audio_balance_btn, self.audio_finalize_btn):
             btn.config(state="normal")
-        self.audio_finalize_btn.config(state="normal")
         status = "Ready"
         if self.audio_player is not None:
             try:
@@ -8556,18 +8546,6 @@ class LosslessVideoApp(_BaseTk):
             self._configure_light(lbl, fg="#000000" if track["enabled_var"].get() else "#777777")
         self._audio_apply_mix()
         self._audio_maybe_restart_playback()
-
-    def _audio_set_all_enabled(self, enabled):
-        """Enable All / Disable All."""
-        changed = [t for t in self.audio_tracks if t["enabled_var"].get() != enabled]
-        for track in changed:
-            track["enabled_var"].set(enabled)
-            lbl = track.get("name_label")
-            if lbl is not None:
-                self._configure_light(lbl, fg="#000000" if enabled else "#777777")
-        if changed:
-            self._audio_apply_mix()
-            self._audio_maybe_restart_playback()
 
     def _audio_volume_changed(self, track, value):
         lbl = track.get("volume_lbl")
