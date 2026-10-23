@@ -70,8 +70,8 @@ Up/Down or drag to reorder (the dragged rows follow the cursor, and a line
 shows where they will land). Bulk Cut cuts the files in the list's order.
 
 Drag & drop supported throughout. A video opened on Cut, Crop/Rotate or
-Audio opens on the other two as well when you switch to them. Dark mode
-under **View**. Under **Options**: save to the source video's folder (on)
+Audio opens on the other two as well when you switch to them. Under
+**Options**: dark mode; save to the source video's folder (on)
 or ask where to save, for every tab; warn before overwriting; show the
 frame by frame movement buttons in the video player on the Cut tab: they
 move the selected Start or End one frame, to the millisecond (the `,` and

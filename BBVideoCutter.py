@@ -87,7 +87,7 @@ that file already exists, the app asks whether to overwrite it or keep
 both (turn this off under Options). Long jobs show a percentage, a
 progress bar and a time-left estimate on the status bar. Dragging an empty drop area (a preview with no video loaded,
 the blank part of the Combine or Bulk Cut list) moves the whole window.
-View > Dark mode switches the whole app (title bar included on Windows)
+Options > Dark mode switches the whole app (title bar included on Windows)
 to a dark theme; the choice is remembered in
 %APPDATA%\\BBVideoCutter\\settings.json.
 
@@ -3059,11 +3059,6 @@ class LosslessVideoApp(_BaseTk):
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_app_close)
 
-        view_menu = self._add_menu_bar_menu("View")
-        view_menu.add_checkbutton(
-            label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
-        )
-
         # For the Cut and Bulk Cut tabs. Choosing Re-encode edges or Edit-list
         # trim opens a box asking for the keyframe search window.
         self.cut_menu = self._add_menu_bar_menu("Cutting Mode")
@@ -3077,6 +3072,10 @@ class LosslessVideoApp(_BaseTk):
                                           command=command)
 
         options_menu = self._add_menu_bar_menu("Options")
+        options_menu.add_checkbutton(
+            label="Dark mode", variable=self.dark_mode_var, command=self._on_dark_mode_toggled,
+        )
+        options_menu.add_separator()
         options_menu.add_checkbutton(
             label="Save to current folder",
             variable=self.save_to_source_var,
@@ -3358,7 +3357,7 @@ class LosslessVideoApp(_BaseTk):
             on_click()
 
     # ====================================================================
-    # Shared: light / dark theme (View menu)
+    # Shared: light / dark theme (Options menu)
     # ====================================================================
     def _is_dark(self):
         return self.dark_mode_var.get()
