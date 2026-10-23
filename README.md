@@ -49,7 +49,10 @@ only when the window is too narrow for their names).
   so at full strength the background cuts in and out. Light (at most 6 dB
   less noise) and Medium (at most 9 dB) keep some of it, which keeps that
   gentle; Extreme takes it all. Click or drag on a
-  track's waveform to move the playback there.
+  track's waveform to move the playback there. **Stereo / Mono** (under
+  Auto Balance) sets the mix's channels, for playback and the saved file;
+  Mono is the same sound in both ears, e.g. for a voice recorded on one
+  side only.
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; a video's
