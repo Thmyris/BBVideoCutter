@@ -544,6 +544,11 @@ RNNOISE_TRIM = f"atrim=start={RNNOISE_DELAY},asetpts=PTS-{RNNOISE_DELAY}/TB"
 DEEP_FILTER_EXE = "deep-filter.exe"
 # The Audio tab's Mono: the mix down to one channel (the channels averaged).
 MONO_DOWNMIX = "aformat=channel_layouts=mono"
+# A track's Mono: each ear gets the average of its channels, (L+R)/2 for
+# stereo; a sound in the middle keeps its level, one on one side is 6 dB
+# quieter. Float first: from an integer format the downmix is scaled to fit
+# and comes out 3 dB quieter.
+TRACK_MONO = "aformat=sample_fmts=fltp:channel_layouts=mono,aformat=channel_layouts=stereo"
 # deep-filter's run time, as a fraction of the track's length: a base plus
 # a part per channel (measured on a Ryzen 7 7800X3D; each run corrects
 # the next estimate by how the last one went).
@@ -8426,6 +8431,7 @@ class LosslessVideoApp(_BaseTk):
                 "channels": int(stream.get("channels") or 2),
                 "enabled_var": tk.BooleanVar(value=True),
                 "denoise_var": tk.StringVar(value="off"),
+                "mono_var": tk.BooleanVar(value=False),
                 "volume_slider": None,
                 "volume_lbl": None,
                 "name_label": None,
@@ -8512,6 +8518,20 @@ class LosslessVideoApp(_BaseTk):
             vol_slider.pack(side="right", padx=(6, 6))
             track["volume_slider"] = vol_slider
             track["volume_lbl"] = vol_lbl
+
+            mono_box = tk.Checkbutton(
+                top, text="Mono", variable=track["mono_var"], bg="#f0f0f0",
+                activebackground="#f0f0f0", selectcolor="SystemWindow",
+                state="disabled" if track["channels"] < 2 else "normal",
+                command=self._audio_maybe_restart_playback,
+            )
+            mono_box.pack(side="right", padx=(0, px(10)))
+            Tooltip(mono_box,
+                    "The same in both ears: this track's channels averaged\n"
+                    "(e.g. a mic recorded on one side only). A sound on one\n"
+                    "side comes out 6 dB quieter, one in the middle as loud."
+                    if track["channels"] >= 2 else "This track has one channel: it already\n"
+                    "sounds the same in both ears.")
 
             denoise_btn = tk.Button(
                 top, width=max(len(name) for _key, name in DENOISE_LEVELS) + 2,
@@ -8764,12 +8784,13 @@ class LosslessVideoApp(_BaseTk):
         if not self._audio_player_ready():
             return
         player = self.audio_player
-        ids, volumes, filters = [], [], []
+        ids, volumes, chains, folds = [], [], [], []
         for t in self.audio_tracks:
             if not t["enabled_var"].get():
                 continue
             wav, chain = self._audio_denoise_source(t)
-            filters.append(chain)
+            chains.append(chain)
+            folds.append(self._audio_track_fold(t))
             track_id = t["a_index"] + 1     # mpv counts audio tracks from 1
             if wav is not None:
                 added = player.external_audio_id(wav)
@@ -8782,10 +8803,11 @@ class LosslessVideoApp(_BaseTk):
             volumes.append(t["volume_slider"].get() if t["volume_slider"] else 1.0)
         # Light comes RNNOISE_DELAY late: the other tracks wait as long, and
         # the mix plays that much earlier.
-        late = any(filters)
+        late = any(chains)
         if late:
             wait = f"adelay=delays={RNNOISE_DELAY * 1000:g}:all=1"
-            filters = [f or wait for f in filters]
+            chains = [c or wait for c in chains]
+        filters = [",".join(f for f in pair if f) for pair in zip(chains, folds)]
         player.set_audio_delay(-RNNOISE_DELAY if late else 0.0)
         player.set_audio_mix(ids, volumes, filters, mono=self._audio_mono())
 
@@ -9025,11 +9047,12 @@ class LosslessVideoApp(_BaseTk):
             return
         self.audio_balance_btn.config(state="disabled")
         levels = {t["a_index"]: t["denoise_var"].get() for t in self.audio_tracks}
+        monos = {t["a_index"]: t["mono_var"].get() for t in self.audio_tracks}
 
         def start():
             # Each track is measured as it will sound: with its noise
-            # reduction.
-            plan = self._audio_balance_plan(levels)
+            # reduction and its Mono.
+            plan = self._audio_balance_plan(levels, monos)
             self.status_lbl.config(text="Analyzing track loudness...")
             threading.Thread(target=self._audio_run_auto_balance, args=(plan,), daemon=True).start()
 
@@ -9037,18 +9060,20 @@ class LosslessVideoApp(_BaseTk):
             self._dfn_keys(levels), start,
             lambda error: self._audio_auto_balance_done({}, False, error))
 
-    def _audio_balance_plan(self, levels=None):
+    def _audio_balance_plan(self, levels=None, monos=None):
         """(a_index, ffmpeg input arguments, filters) to measure each track
-        by: its cleaned WAV, or its own stream with its live filter."""
+        by: its cleaned WAV, or its own stream with its live filter; then
+        its Mono."""
         plan = []
         for track in self.audio_tracks:
             level = levels.get(track["a_index"]) if levels else None
             wav, chain = self._audio_denoise_source(track, level)
+            fold = self._audio_track_fold(track, monos.get(track["a_index"]) if monos else None)
             if wav is not None:
-                plan.append((track["a_index"], ["-i", wav], ""))
+                input_args, chain = ["-i", wav], ""
             else:
-                plan.append((track["a_index"],
-                             ["-i", self.audio_input_path, "-map", f"0:a:{track['a_index']}"], chain))
+                input_args = ["-i", self.audio_input_path, "-map", f"0:a:{track['a_index']}"]
+            plan.append((track["a_index"], input_args, ",".join(f for f in (chain, fold) if f)))
         return plan
 
     def _audio_run_auto_balance(self, plan=None):
@@ -9150,8 +9175,8 @@ class LosslessVideoApp(_BaseTk):
         if not out_path:
             return
 
-        mix = [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0, t["denoise_var"].get())
-               for t in enabled]
+        mix = [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0, t["denoise_var"].get(),
+                t["mono_var"].get()) for t in enabled]
         mono = self._audio_mono()
 
         def start():
@@ -9163,27 +9188,31 @@ class LosslessVideoApp(_BaseTk):
             ).start()
 
         self.audio_finalize_btn.config(state="disabled")
-        keys = self._dfn_keys({t["a_index"]: level for t, _vol, level in mix})
+        keys = self._dfn_keys({t["a_index"]: level for t, _vol, level, _mono in mix})
         if any(key not in self._dfn_done for key in keys):
             self.status_lbl.config(text="Saving once the noise reduction is done...")
         self._dfn_when_ready(keys, start, lambda error: self._audio_finalize_done(error, False))
 
     def _audio_mix_sources(self, mix):
-        """mix: (track, volume) or (track, volume, noise reduction level)
-        for each track to mix. Returns (extra input files, track settings
-        for _audio_build_filter_complex): a track's own stream from input
-        0, with its live filter (Light), or its cleaned WAV (Medium /
-        Extreme) as input 1, 2..., as it is until that's there."""
+        """mix: (track, volume), (track, volume, noise reduction level) or
+        (track, volume, level, mono) for each track to mix. Returns (extra
+        input files, track settings for _audio_build_filter_complex): a
+        track's own stream from input 0, with its live filter (Light), or
+        its cleaned WAV (Medium / Extreme) as input 1, 2..., as it is until
+        that's there; then its Mono."""
         extra_inputs, settings = [], []
-        for track, vol, *level in mix:
-            wav, chain = self._audio_denoise_source(track, *level)
+        for track, vol, *how in mix:
+            level, mono = (how + [None, None])[:2]
+            wav, chain = self._audio_denoise_source(track, level)
             if chain:
                 chain += "," + RNNOISE_TRIM   # Light, back in place
             if wav is not None:
                 extra_inputs.append(wav)
-                settings.append((f"{len(extra_inputs)}:a:0", "", vol))
+                source, chain = f"{len(extra_inputs)}:a:0", ""
             else:
-                settings.append((f"0:a:{track['a_index']}", chain, vol))
+                source = f"0:a:{track['a_index']}"
+            fold = self._audio_track_fold(track, mono)
+            settings.append((source, ",".join(f for f in (chain, fold) if f), vol))
         return extra_inputs, settings
 
     def _audio_run_finalize(self, out_path, track_settings, extra_inputs=(), mono=False):
@@ -9243,6 +9272,14 @@ class LosslessVideoApp(_BaseTk):
         if level in DFN_ATTEN_LIMIT_DB:
             return self._dfn_done.get((track["a_index"], level)), ""
         return None, ""
+
+    @staticmethod
+    def _audio_track_fold(track, mono=None):
+        """The filter for track's Mono (or the one given): TRACK_MONO, or
+        "" when off or the track has one channel."""
+        if mono is None:
+            mono = track["mono_var"].get()
+        return TRACK_MONO if mono and track["channels"] >= 2 else ""
 
     def _audio_post_denoise_menu(self, track):
         files = self._audio_denoise_files(refresh=True)
