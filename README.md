@@ -51,9 +51,8 @@ only when the window is too narrow for their names).
   gentle; Extreme takes it all. Click or drag on a
   track's waveform to move the playback there. A track's **Mono** box puts
   it in both ears alike (its channels averaged, e.g. a mic recorded on one
-  side only) while the other tracks keep their stereo. **Stereo / Mono**
-  (under Auto Balance) sets the whole mix's channels: Mono saves a
-  1-channel track. Both apply to playback and the saved file.
+  side only) while the other tracks keep their stereo, in playback and the
+  saved file.
 
 Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; a video's

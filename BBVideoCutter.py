@@ -542,8 +542,6 @@ RNNOISE_MIX = 0.5
 RNNOISE_DELAY = 0.01
 RNNOISE_TRIM = f"atrim=start={RNNOISE_DELAY},asetpts=PTS-{RNNOISE_DELAY}/TB"
 DEEP_FILTER_EXE = "deep-filter.exe"
-# The Audio tab's Mono: the mix down to one channel (the channels averaged).
-MONO_DOWNMIX = "aformat=channel_layouts=mono"
 # A track's Mono: each ear gets the average of its channels, (L+R)/2 for
 # stereo; a sound in the middle keeps its level, one on one side is 6 dB
 # quieter. Float first: from an integer format the downmix is scaled to fit
@@ -1967,14 +1965,13 @@ class VideoPlayer:
             self.mpv["audio-delay"] = seconds
             self._audio_delay = seconds
 
-    def set_audio_mix(self, track_ids, volumes=None, filters=None, mono=False):
+    def set_audio_mix(self, track_ids, volumes=None, filters=None):
         """Plays the audio tracks track_ids (mpv's ids) at once, summed as
         the Audio tab's mix does; None (or a single track) for one track
         the usual way. volumes: each track's gain (1.0 = as it is); with
         volumes, one track goes through the mix too, and none is silence.
         filters: with volumes, a filter chain for each track to go through
-        before its volume ("" for none). mono: with volumes, the mix down
-        to one channel.
+        before its volume ("" for none).
         mpv's lavfi-complex does the mixing; it can be set and cleared
         while a file plays (mpv restarts its audio for that, so it is only
         set when it changes)."""
@@ -1984,13 +1981,12 @@ class VideoPlayer:
         if volumes is not None and ids:
             chains = [f"[aid{i}]{f + ',' if f else ''}volume={g:.4f}"
                       for i, g, f in zip(ids, volumes, filters or [""] * len(ids))]
-            out = f",{MONO_DOWNMIX}[ao]" if mono else "[ao]"
             if len(ids) == 1:
-                graph = chains[0] + out
+                graph = chains[0] + "[ao]"
             else:
                 graph = (";".join(f"{c}[m{k}]" for k, c in enumerate(chains)) + ";"
                          + "".join(f"[m{k}]" for k in range(len(ids)))
-                         + f"amix=inputs={len(ids)}:normalize=0" + out)
+                         + f"amix=inputs={len(ids)}:normalize=0[ao]")
         elif len(ids) > 1:
             graph = "".join(f"[aid{i}]" for i in ids) + f"amix=inputs={len(ids)}:normalize=0[ao]"
         else:
@@ -2709,7 +2705,6 @@ class LosslessVideoApp(_BaseTk):
         self.audio_player = None          # VideoPlayer over the preview (None without libmpv)
         self._audio_player_on = False     # the player shows the video (else still frames + ffplay)
         self._audio_wave_scrubbing = False  # the mouse is moving the playback on a waveform
-        self.audio_channels_var = tk.StringVar(value="stereo")   # the mix: "stereo" or "mono"
         self.audio_tracks = []            # list of dicts, see _load_video_for_audio
         self._audio_note = None           # shown instead of the open prompt (_audio_show_no_audio)
         # Noise reduction (DENOISE_LEVELS). The DeepFilterNet levels are
@@ -8226,19 +8221,6 @@ class LosslessVideoApp(_BaseTk):
             side, text="Auto Balance Audio", width=16, state="disabled",
             command=self._audio_auto_balance_clicked)
         self.audio_balance_btn.pack(pady=(10, 2))
-        channels = tk.Frame(side, bg="#f0f0f0")
-        channels.pack(fill="x", pady=(10, 2))
-        for value, text in (("stereo", "Stereo"), ("mono", "Mono")):
-            tk.Radiobutton(
-                channels, text=text, value=value, variable=self.audio_channels_var,
-                bg="#f0f0f0", activebackground="#f0f0f0", selectcolor="SystemWindow",
-                command=self._audio_maybe_restart_playback,
-            ).pack(side="left", expand=True)
-        Tooltip(channels,
-                "Stereo: each track's channels as they are.\n"
-                "Mono: the mix down to one channel, the same in both ears\n"
-                "(e.g. a voice recorded on one side only).\n"
-                "Applies to playback and the saved video.")
 
         self.audio_tracks_inner = tk.Frame(self.audio_tracks_canvas, bg="SystemWindow")
         self._audio_tracks_inner_window = self.audio_tracks_canvas.create_window(
@@ -8809,7 +8791,7 @@ class LosslessVideoApp(_BaseTk):
             chains = [c or wait for c in chains]
         filters = [",".join(f for f in pair if f) for pair in zip(chains, folds)]
         player.set_audio_delay(-RNNOISE_DELAY if late else 0.0)
-        player.set_audio_mix(ids, volumes, filters, mono=self._audio_mono())
+        player.set_audio_mix(ids, volumes, filters)
 
     def _audio_slider_released(self, value):
         if self._audio_player_ready():
@@ -8897,27 +8879,22 @@ class LosslessVideoApp(_BaseTk):
             self.audio_play_after_id = None
         self._audio_stop_ffplay()
 
-    def _audio_mono(self):
-        return self.audio_channels_var.get() == "mono"
-
-    def _audio_build_filter_complex(self, track_settings, mono=False):
+    def _audio_build_filter_complex(self, track_settings):
         """track_settings: list of (source, filters, volume) for the tracks
-        to include, as _audio_mix_sources gives them; mono: the mix down to
-        one channel. Shared by live playback (ffplay) and Finalize (ffmpeg)
-        so what you hear while scrubbing matches what gets written to the
-        output file."""
+        to include, as _audio_mix_sources gives them. Shared by live
+        playback (ffplay) and Finalize (ffmpeg) so what you hear while
+        scrubbing matches what gets written to the output file."""
         n = len(track_settings)
-        out = f",{MONO_DOWNMIX}[aout]" if mono else "[aout]"
         parts = [
-            f"[{source}]{filters + ',' if filters else ''}volume={vol:.4f}"
-            for source, filters, vol in track_settings
+            f"[{source}]{filters + ',' if filters else ''}volume={vol:.4f}[v{i}]"
+            for i, (source, filters, vol) in enumerate(track_settings)
         ]
         if n == 1:
-            return parts[0] + out
+            return parts[0].replace("[v0]", "[aout]")
         mix_inputs = "".join(f"[v{i}]" for i in range(n))
         return (
-            ";".join(f"{p}[v{i}]" for i, p in enumerate(parts)) + ";" + mix_inputs
-            + f"amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0" + out
+            ";".join(parts) + ";" + mix_inputs
+            + f"amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[aout]"
         )
 
     def _audio_start_ffplay(self, start_sec):
@@ -8932,7 +8909,7 @@ class LosslessVideoApp(_BaseTk):
             return  # ffmpeg/ffplay not on PATH -- visual scrubbing still works, just silently
         extra_inputs, track_settings = self._audio_mix_sources(
             [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0) for t in enabled])
-        filter_complex = self._audio_build_filter_complex(track_settings, self._audio_mono())
+        filter_complex = self._audio_build_filter_complex(track_settings)
         # Some ffplay builds don't register -filter_complex at all (it fails
         # with "Option not found" and exits immediately, silently, since
         # stderr is suppressed) -- ffmpeg reliably supports it, so the mix is
@@ -9177,13 +9154,12 @@ class LosslessVideoApp(_BaseTk):
 
         mix = [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0, t["denoise_var"].get(),
                 t["mono_var"].get()) for t in enabled]
-        mono = self._audio_mono()
 
         def start():
             extra_inputs, track_settings = self._audio_mix_sources(mix)
             self.status_lbl.config(text="Mixing audio tracks... 0%")
             threading.Thread(
-                target=self._audio_run_finalize, args=(out_path, track_settings, extra_inputs, mono),
+                target=self._audio_run_finalize, args=(out_path, track_settings, extra_inputs),
                 daemon=True
             ).start()
 
@@ -9215,10 +9191,10 @@ class LosslessVideoApp(_BaseTk):
             settings.append((source, ",".join(f for f in (chain, fold) if f), vol))
         return extra_inputs, settings
 
-    def _audio_run_finalize(self, out_path, track_settings, extra_inputs=(), mono=False):
+    def _audio_run_finalize(self, out_path, track_settings, extra_inputs=()):
         try:
             ffmpeg = find_exe("ffmpeg")
-            filter_complex = self._audio_build_filter_complex(track_settings, mono)
+            filter_complex = self._audio_build_filter_complex(track_settings)
             cmd = [ffmpeg, "-y", "-i", self.audio_input_path]
             for wav in extra_inputs:
                 cmd += ["-i", wav]
