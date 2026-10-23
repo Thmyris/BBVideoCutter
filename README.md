@@ -37,8 +37,9 @@ only when the window is too narrow for their names).
   `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
   minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
   second 27 of the last minute that has it to the end: 19:27–20:10.
-- **Crop/Rotate** — visual crop editor with widescreen/vertical aspect presets, and
-  a 90°/180°/270° rotate done in the same re-encode, or saved on its own
+- **Crop/Rotate** — visual crop editor, freeform by default, with the
+  common shapes (Original, 1:1, 16:9, 9:16, 4:3, 21:9...) under one
+  **Aspect** menu, and a 90°/180°/270° rotate done in the same re-encode, or saved on its own
   losslessly (stream copy; only the file's rotation info changes).
 - **Audio** — mute/mix individual audio tracks, each with its own noise
   reduction (the button left of its volume): **Light filtering** is RNNoise,
@@ -58,7 +59,8 @@ Built-in video player (libmpv): play and frame-step the video on the Cut
 tab, with keyframe ticks and the audio waveform under the slider; a video's
 audio tracks play together, or pick one under **Audio** next to the
 volume; preview the joined video on Combine, a row's ranges on Bulk Cut,
-the video playing under the crop box on Crop/Rotate, and on Audio the
+the video playing under the crop box on Crop/Rotate (with Cut's buttons,
+keys, volume and track picker), and on Audio the
 video with the enabled tracks mixed at their volumes, as Finalize saves
 them.
 

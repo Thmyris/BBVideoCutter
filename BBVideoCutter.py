@@ -2823,14 +2823,14 @@ class LosslessVideoApp(_BaseTk):
         self.resize_zoom = 1.0            # 1.0 = fit-to-canvas; higher = zoomed in
         self.resize_entry_vars = {}       # "x0"/"y0"/"x1"/"y1" -> tk.StringVar
         self.resize_aspect_lock = None    # (w, h) ratio corner drags keep, or None = Freeform
-        self.resize_aspect_key = None     # which ratio button is active: "16:9", "original", "freeform"...
-        self.resize_aspect_buttons = {}
+        self.resize_aspect_key = None     # the Aspect menu's pick: "freeform", "original", "16:9"...
         self._resize_bg_image_id = None   # cached canvas image item (perf)
         self._resize_bg_cache_key = None  # (frame id, dw, dh) the cached photo was built for
         # With libmpv, the video plays under the crop box: a player placed
         # over the picture's area of the canvas (_resize_place_player),
         # which draws the box too (_resize_draw_player_overlay).
         self.resize_player = None
+        self.resize_audio = None          # its sound's controls (PlayerAudioControls)
         self._resize_player_on = False    # the player (not a still frame) shows the video
         self._resize_view = None          # where the player is placed, and its video-crop
 
@@ -2968,6 +2968,9 @@ class LosslessVideoApp(_BaseTk):
                 player.set_paused(True)
         if idx != 4 and self.audio_playing:
             self._audio_pause()
+        if idx == 3 and getattr(self, "resize_audio", None) is not None:
+            # The volume and mute the Cut tab keeps, maybe changed there.
+            self.resize_audio.set_from(*self._player_audio_settings())
         self._ensure_tab_built(idx)
         self._show_shared_video(idx)
 
@@ -3378,6 +3381,8 @@ class LosslessVideoApp(_BaseTk):
         self._redraw_slider()  # canvas items drawn with theme colors
         if getattr(self, "cut_mute_btn", None) is not None:
             self._draw_cut_speaker()
+        if getattr(self, "resize_audio", None) is not None:
+            self.resize_audio.draw_speaker()
 
     def _configure_light(self, w, **options):
         """Configure w using light-theme colors, as code always does; in dark
@@ -3938,6 +3943,15 @@ class LosslessVideoApp(_BaseTk):
                 back.pack_forget()
                 fwd.pack_forget()
             self._fit_cut_buttons()
+        if getattr(self, "resize_frame_buttons", None):
+            back, fwd = self.resize_frame_buttons
+            if self.show_frame_buttons_var.get():
+                back.pack(side="left", padx=1, before=self.resize_play_btn)
+                fwd.pack(side="left", padx=1, after=self.resize_play_btn)
+            else:
+                back.pack_forget()
+                fwd.pack_forget()
+            self._fit_resize_buttons()
         if save:
             self._save_option("show_frame_buttons", self.show_frame_buttons_var)
 
@@ -4108,7 +4122,7 @@ class LosslessVideoApp(_BaseTk):
             play, step, seek_by = p.toggle_pause, p.frame_step, p.seek_relative
         else:
             return None
-        return {
+        keys = {
             "<KeyPress-space>": play,
             "<KeyPress-comma>": lambda: step(False),
             "<KeyPress-period>": lambda: step(True),
@@ -4116,7 +4130,17 @@ class LosslessVideoApp(_BaseTk):
             "<KeyPress-Right>": lambda: seek_by(5),
             "<Shift-KeyPress-Left>": lambda: seek_by(-1),
             "<Shift-KeyPress-Right>": lambda: seek_by(1),
-        }.get(sequence)
+        }
+        if tab == 3:
+            # Crop/Rotate has the Cut tab's sound controls, and their keys.
+            a = self.resize_audio
+            keys.update({
+                "<KeyPress-m>": a.toggle_mute,
+                "<KeyPress-M>": a.toggle_mute,
+                "<KeyPress-Up>": lambda: a.volume_step(5),
+                "<KeyPress-Down>": lambda: a.volume_step(-5),
+            })
+        return keys.get(sequence)
 
     def _cut_use_player(self, on):
         """Shows the player over the still-frame canvas, or takes it away."""
@@ -6855,67 +6879,88 @@ class LosslessVideoApp(_BaseTk):
         controls = tk.Frame(root, bg="#f0f0f0")
         controls.grid(row=2, column=0, sticky="ew", padx=3, pady=(2, 4))
 
-        time_row = tk.Frame(controls, bg="#f0f0f0")
-        time_row.pack(pady=(2, 2))
-
+        # The player's row, as on the Cut tab: the time at the left, the
+        # play / step / jump buttons in the middle, the sound at the right
+        # (its controls come with the player, in _resize_start_player).
+        transport = CenteredRow(controls, bg="#f0f0f0")
+        transport.pack(fill="x", pady=(2, 1))
+        self.resize_transport_row = transport
+        self.resize_time_lbl = tk.Label(transport.left, text="", bg="#f0f0f0", anchor="w",
+                                        font=("Segoe UI", 9))
+        self.resize_time_lbl.pack(side="left", padx=(px(4), 0))
         self.resize_play_btn = None
+        self.resize_transport_buttons = []   # need a video in the player
+        self.resize_frame_buttons = ()
         if mpv_available():
-            self.resize_play_btn = tk.Button(time_row, text="▶ Play", width=8, state="disabled",
-                                             command=self._resize_toggle_play)
-            self.resize_play_btn.pack(side="left", padx=(0, 12))
-            Tooltip(self.resize_play_btn, "Shortcut: Space")
-        tk.Label(time_row, text="Frame:", bg="#f0f0f0").pack(side="left")
-        self.resize_time_lbl = tk.Label(
-            time_row, text="00:00:00", width=12, bg="#f0f0f0", font=("Consolas", 10)
-        )
-        self.resize_time_lbl.pack(side="left", padx=(4, 12))
+            def button(text, command, **kw):
+                b = tk.Button(transport.center, text=text, command=command, state="disabled", **kw)
+                b.pack(side="left", padx=1)
+                self.resize_transport_buttons.append(b)
+                return b
 
-        self.resize_size_lbl = tk.Label(
-            time_row, text="Crop: —", bg="#f0f0f0", font=("Consolas", 10)
-        )
-        self.resize_size_lbl.pack(side="left")
+            button("|◀ Start", lambda: self._resize_go_to(end=False))
+            frame_back = button("◀ Frame", lambda: self._resize_frame_step(False))
+            self.resize_play_btn = button("▶ Play", self._resize_toggle_play, width=8)
+            transport.center_on(self.resize_play_btn)
+            frame_fwd = button("Frame ▶", lambda: self._resize_frame_step(True))
+            button("End ▶|", lambda: self._resize_go_to(end=True))
+            Tooltip(self.resize_play_btn, "Shortcut: Space")
+            Tooltip(frame_back, "One frame back. Shortcut: ,")
+            Tooltip(frame_fwd, "One frame forward. Shortcut: .")
+            # Shown with Options > Show frame by frame movement buttons, as
+            # on the Cut tab.
+            self.resize_frame_buttons = (frame_back, frame_fwd)
+            self._init_resize_button_fit()
+            self._on_show_frame_buttons_toggled(save=False)
 
         self.resize_slider = TimeSlider(controls, command=self._resize_slider_changed,
                                         on_release=self._resize_slider_released)
-        self.resize_slider.pack(fill="x", padx=8, pady=(0, 4))
+        self.resize_slider.pack(fill="x", padx=8, pady=(2, 4))
 
-        button_row = tk.Frame(controls, bg="#f0f0f0")
-        button_row.pack(pady=(0, 2))
+        # The crop box: its shape, a reset; then the turn and the zoom.
+        edit_row = tk.Frame(controls, bg="#f0f0f0")
+        edit_row.pack(pady=(0, 2))
+        self.resize_aspect_var = tk.StringVar(value="freeform")
+        self.resize_aspect_btn = tk.Button(edit_row, width=len("Aspect: Freeform ▾") + 2,
+                                           command=self._resize_post_aspect_menu)
+        self.resize_aspect_btn.pack(side="left", padx=(4, 2))
+        self.resize_aspect_menu = tk.Menu(self.resize_aspect_btn, tearoff=0)
+        Tooltip(self.resize_aspect_btn,
+                "The crop box's shape, which dragging a corner keeps.\n"
+                "Freeform: any shape; hold Shift, Ctrl or Alt while\n"
+                "dragging a corner to keep the box's shape anyway.")
+        tk.Button(edit_row, text="Reset Crop", command=self._resize_reset_crop).pack(
+            side="left", padx=(2, 2))
 
-        tk.Button(button_row, text="Reset Crop", command=self._resize_reset_crop).pack(
-            side="left", padx=4
-        )
-
-        # All widescreen ratios first, then their vertical/portrait mirrors
-        # (for Shorts/Reels/TikTok-style crops) in the same relative order
-        # -- so 16:9/21:9 sit side by side, and 9:16/9:21 do too further
-        # down the row, rather than interleaving landscape and portrait.
-        # The highlighted button is the ratio corner drags keep; Freeform
-        # lets corners distort the box (hold Shift/Ctrl/Alt to keep its
-        # shape anyway).
-        self.resize_aspect_buttons = {}
-        for w, h in (
-            (1, 1), (4, 3), (16, 9), (16, 10), (21, 9),   # widescreen
-            (3, 4), (9, 16), (10, 16), (9, 21),           # vertical
-        ):
-            btn = tk.Button(
-                button_row, text=f"{w}:{h}", width=4,
-                command=lambda w=w, h=h: self._resize_set_aspect(w, h),
-            )
+        # Turn the picture clockwise, on top of however the file already
+        # shows it. The saved video comes out turned the same way.
+        tk.Label(edit_row, text="Rotate ↻:", bg="#f0f0f0").pack(side="left", padx=(18, 2))
+        self.resize_rotate_buttons = {}
+        for turn in (0, 90, 180, 270):
+            btn = tk.Button(edit_row, text=f"{turn}°", width=4,
+                            command=lambda t=turn: self._resize_set_rotation(t))
             btn.pack(side="left", padx=1)
-            self.resize_aspect_buttons[f"{w}:{h}"] = btn
-        btn = tk.Button(button_row, text="Original", command=self._resize_set_original_aspect)
-        btn.pack(side="left", padx=(4, 2))
-        self.resize_aspect_buttons["original"] = btn
-        btn = tk.Button(button_row, text="Freeform", command=self._resize_set_freeform)
-        btn.pack(side="left", padx=(2, 2))
-        self.resize_aspect_buttons["freeform"] = btn
+            self.resize_rotate_buttons[turn] = btn
         self._resize_button_default_bg = btn.cget("bg")
-        self._resize_highlight_aspect_button()
+        self._resize_highlight_rotate_button()
+
+        # Zoom, for fine-tuning the crop edges precisely.
+        zoom_lbl = tk.Label(edit_row, text="Zoom:", bg="#f0f0f0")
+        zoom_lbl.pack(side="left", padx=(18, 2))
+        Tooltip(zoom_lbl, "The mouse wheel over the video zooms too")
+        tk.Button(edit_row, text="−", width=3, command=self._resize_zoom_out).pack(side="left")
+        self.resize_zoom_lbl = tk.Label(
+            edit_row, text="100%", width=6, bg="#f0f0f0", font=("Consolas", 10)
+        )
+        self.resize_zoom_lbl.pack(side="left", padx=2)
+        tk.Button(edit_row, text="+", width=3, command=self._resize_zoom_in).pack(side="left")
+        tk.Button(edit_row, text="Fit", command=self._resize_zoom_reset).pack(
+            side="left", padx=(6, 2)
+        )
 
         # Precise crop entry: type the four corner coordinates directly.
         # These are overwritten automatically whenever the crop changes via
-        # dragging, the aspect buttons, or Reset Crop, so they always mirror
+        # dragging, the Aspect menu, or Reset Crop, so they always mirror
         # whatever is currently selected.
         coords_row = tk.Frame(controls, bg="#f0f0f0")
         coords_row.pack(pady=(0, 2))
@@ -6937,37 +6982,11 @@ class LosslessVideoApp(_BaseTk):
         tk.Button(
             coords_row, text="Apply", command=self._resize_apply_crop_entries
         ).pack(side="left", padx=(8, 2))
-
-        # Turn the picture clockwise, on top of however the file already
-        # shows it. The saved video comes out turned the same way.
-        tk.Label(coords_row, text="Rotate ↻:", bg="#f0f0f0").pack(side="left", padx=(16, 2))
-        self.resize_rotate_buttons = {}
-        for turn in (0, 90, 180, 270):
-            btn = tk.Button(coords_row, text=f"{turn}°", width=4,
-                            command=lambda t=turn: self._resize_set_rotation(t))
-            btn.pack(side="left", padx=1)
-            self.resize_rotate_buttons[turn] = btn
-        self._resize_highlight_rotate_button()
-
-        # Zoom controls for fine-tuning the crop edges precisely.
-        zoom_row = tk.Frame(controls, bg="#f0f0f0")
-        zoom_row.pack(pady=(0, 2))
-
-        tk.Label(zoom_row, text="Zoom:", bg="#f0f0f0").pack(side="left", padx=(4, 2))
-        tk.Button(zoom_row, text="−", width=3, command=self._resize_zoom_out).pack(side="left")
-        self.resize_zoom_lbl = tk.Label(
-            zoom_row, text="100%", width=6, bg="#f0f0f0", font=("Consolas", 10)
+        self.resize_size_lbl = tk.Label(
+            coords_row, text="Crop: —", bg="#f0f0f0", font=("Consolas", 10)
         )
-        self.resize_zoom_lbl.pack(side="left", padx=2)
-        tk.Button(zoom_row, text="+", width=3, command=self._resize_zoom_in).pack(side="left")
-        tk.Button(zoom_row, text="Fit", command=self._resize_zoom_reset).pack(
-            side="left", padx=(6, 2)
-        )
-        tk.Label(
-            zoom_row, text="(scroll wheel zooms · in Freeform, hold Shift/Ctrl/Alt "
-            "while dragging to keep the box's shape)",
-            bg="#f0f0f0", fg="#777777"
-        ).pack(side="left", padx=(8, 2))
+        self.resize_size_lbl.pack(side="left", padx=(18, 4))
+        self._resize_highlight_aspect_button()
 
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", padx=2, pady=(4, 2))
@@ -7094,8 +7113,8 @@ class LosslessVideoApp(_BaseTk):
         self.resize_frame_raw = None
         self.resize_time_sec = 0.0
         self.resize_crop = (0, 0, src_w, src_h)
-        self.resize_aspect_lock = (src_w, src_h)
-        self.resize_aspect_key = "original"
+        self.resize_aspect_lock = None
+        self.resize_aspect_key = "freeform"
         self._resize_highlight_aspect_button()
         self.resize_zoom = 1.0
         self._resize_update_zoom_label()
@@ -7107,7 +7126,7 @@ class LosslessVideoApp(_BaseTk):
 
         self.resize_save_btn.config(state="normal")
         self._resize_update_labels()
-        self.resize_time_lbl.config(text=seconds_to_hms(0))
+        self._resize_show_time(0.0)
         if not self._resize_start_player(path):
             self._resize_update_preview(0)
         self.status_lbl.config(text="Ready")
@@ -7135,9 +7154,9 @@ class LosslessVideoApp(_BaseTk):
                     player.frame.bind(sequence, lambda e, h=handler: h(self._resize_player_event(e)))
                 player.frame.bind("<MouseWheel>", self._resize_mouse_wheel)
                 self.resize_player = player
-            volume, muted = self._player_audio_settings()
-            self.resize_player.set_volume(volume)
-            self.resize_player.set_muted(muted)
+                self.resize_audio = PlayerAudioControls(
+                    self, self.resize_transport_row.right, player, self._resize_audio_changed)
+            self.resize_audio.set_from(*self._player_audio_settings())
             self.resize_player.set_video_rotate(self.resize_user_rotation)
             self.resize_player.load(path)
         except RuntimeError as exc:
@@ -7165,7 +7184,9 @@ class LosslessVideoApp(_BaseTk):
         if not on:
             self.resize_player.frame.place_forget()
             self.resize_player.hide_overlay()
-            self.resize_play_btn.config(state="disabled", text="▶ Play")
+            self.resize_play_btn.config(text="▶ Play")
+            for b in self.resize_transport_buttons:
+                b.config(state="disabled")
             self._resize_update_preview(self.resize_time_sec)
         self._redraw_resize_canvas()
 
@@ -7179,12 +7200,16 @@ class LosslessVideoApp(_BaseTk):
             return
         if not p.loaded:
             return
-        self.resize_play_btn.config(state="normal", text="▶ Play" if p.paused else "❚❚ Pause")
+        if str(self.resize_play_btn.cget("state")) == "disabled":
+            for b in self.resize_transport_buttons:
+                b.config(state="normal")
+        self.resize_play_btn.config(text="▶ Play" if p.paused else "❚❚ Pause")
+        self.resize_audio.refresh()
         pos = p.position
         if pos is None:
             return
         self.resize_time_sec = pos
-        self.resize_time_lbl.config(text=seconds_to_ffmpeg_time(pos))
+        self._resize_show_time(pos)
         if not self.resize_slider.dragging:
             self.resize_slider.set(pos)
 
@@ -7194,6 +7219,74 @@ class LosslessVideoApp(_BaseTk):
     def _resize_toggle_play(self):
         if self._resize_player_ready():
             self.resize_player.toggle_pause()
+
+    def _resize_frame_step(self, forward):
+        if self._resize_player_ready():
+            self.resize_player.frame_step(forward)
+
+    def _resize_go_to(self, end):
+        """The first frame (end=False) or the last one, paused."""
+        if self._resize_player_ready():
+            p = self.resize_player
+            p.set_paused(True)
+            if end:
+                p.show_last_frame_before(self.resize_duration)
+            else:
+                p.show_first_frame_from(0.0)
+
+    def _resize_show_time(self, t):
+        self.resize_time_lbl.config(text=f"{seconds_to_ffmpeg_time(t)} / "
+                                         f"{seconds_to_ffmpeg_time(self.resize_duration)}")
+
+    def _resize_audio_changed(self):
+        """The volume or mute changed here: the Cut tab's player, which
+        keeps them for every tab (and saves them), takes them too."""
+        self.resize_audio.refresh()
+        p = self.resize_player
+        if getattr(self, "cut_audio", None) is not None:
+            self.cut_audio.set_from(p.volume, p.muted)
+            self._cut_audio_settings_changed()
+
+    def _init_resize_button_fit(self):
+        """The player row's buttons get the Cut tab's extra width
+        (_fit_cut_buttons), as much of it as the row has room for."""
+        self._resize_fit_base = {b: (b.winfo_reqwidth(), b.winfo_pixels(b.cget("padx")))
+                                 for b in self.resize_transport_buttons}
+        self._resize_fit_extra = None
+        play = self.resize_play_btn
+        play.config(width=10)
+        self._resize_pause_min = play.winfo_reqwidth()
+        play.config(width=8)
+        row = self.resize_transport_row
+        for w in (row, row.left, row.right):
+            w.bind("<Configure>", lambda e: self._fit_resize_buttons(), add="+")
+
+    def _fit_resize_buttons(self):
+        if not getattr(self, "_resize_fit_base", None):
+            return
+        row = self.resize_transport_row
+        room = row.winfo_width()
+        if room < 2:
+            return   # not laid out yet
+
+        def pad(b, extra):
+            width = self._resize_fit_base[b][0]
+            add = int(round(width * extra / 2))
+            if b is self.resize_play_btn:
+                add = max(add, (self._resize_pause_min - width + 1) // 2)
+            return add
+
+        def needed(extra):
+            shown = [b for b in self._resize_fit_base if b.winfo_manager()]
+            return (row.left.winfo_reqwidth() + row.right.winfo_reqwidth() + 2 * px(CenteredRow.GAP)
+                    + sum(self._resize_fit_base[b][0] + 2 * pad(b, extra) + 2 for b in shown))
+
+        extra = next((x for x in self.CUT_BUTTON_EXTRA if needed(x) <= room), 0.0)
+        if extra == self._resize_fit_extra:
+            return
+        self._resize_fit_extra = extra
+        for b, (width, padx) in self._resize_fit_base.items():
+            b.config(padx=padx + pad(b, extra))
 
     def _resize_slider_released(self, value):
         if self._resize_player_ready():
@@ -7372,7 +7465,7 @@ class LosslessVideoApp(_BaseTk):
                 self.resize_player.seek(float(value), exact=False)   # keyframes while dragging: fast
             return
         self.resize_time_sec = float(value)
-        self.resize_time_lbl.config(text=seconds_to_hms(self.resize_time_sec))
+        self._resize_show_time(self.resize_time_sec)
         self._resize_update_preview(self.resize_time_sec)
 
     def _resize_update_preview(self, at_seconds):
@@ -7837,14 +7930,54 @@ class LosslessVideoApp(_BaseTk):
         if self.resize_player is not None:
             self.resize_player.frame.config(cursor=cursors.get(hit, ""))
 
+    # The Aspect menu's shapes past Freeform and Original: (heading, ((ratio,
+    # what it's for), ...)); the tall ones mirror the wide ones.
+    RESIZE_ASPECTS = (
+        (None, (("1:1", "Square"),)),
+        ("Wide", (("4:3", "Classic TV"), ("16:9", "Widescreen, YouTube"),
+                  ("16:10", "Laptop screen"), ("21:9", "Cinema, ultrawide"))),
+        ("Tall", (("3:4", "Portrait photo"), ("9:16", "Shorts, Reels, TikTok"),
+                  ("10:16", "Tablet, upright"), ("9:21", "Tall phone"))),
+    )
+
     def _resize_highlight_aspect_button(self):
-        for key, btn in self.resize_aspect_buttons.items():
-            active = key == self.resize_aspect_key
-            self._configure_light(
-                btn,
-                relief="sunken" if active else "raised",
-                bg="#cfe2ff" if active else self._resize_button_default_bg,
-            )
+        """Shows the shape picked on the Aspect button (and in its menu)."""
+        key = self.resize_aspect_key or "freeform"
+        self.resize_aspect_var.set(key)
+        name = {"freeform": "Freeform", "original": "Original"}.get(key, key)
+        self.resize_aspect_btn.config(text=f"Aspect: {name} ▾")
+
+    def _resize_post_aspect_menu(self):
+        menu = self.resize_aspect_menu
+        menu.delete(0, "end")
+        no_video = "disabled" if not self.resize_input_path else "normal"
+        if self.resize_input_path:
+            w, h = self.resize_src_w, self.resize_src_h
+            g = math.gcd(w, h) or 1
+            own = f"{w // g}:{h // g}" if max(w, h) // g <= 64 else f"{w}×{h}"
+        else:
+            own = ""
+        menu.add_radiobutton(label="Freeform", accelerator="any shape",
+                             variable=self.resize_aspect_var, value="freeform",
+                             command=self._resize_set_freeform)
+        menu.add_radiobutton(label="Original", accelerator=own, state=no_video,
+                             variable=self.resize_aspect_var, value="original",
+                             command=self._resize_set_original_aspect)
+        for heading, shapes in self.RESIZE_ASPECTS:
+            menu.add_separator()
+            if heading:
+                menu.add_command(label=heading, state="disabled")
+            for ratio, use in shapes:
+                aw, ah = (int(v) for v in ratio.split(":"))
+                menu.add_radiobutton(label=f"{ratio}   {use}", state=no_video,
+                                     variable=self.resize_aspect_var, value=ratio,
+                                     command=lambda aw=aw, ah=ah: self._resize_set_aspect(aw, ah))
+        dark = self._is_dark()
+        menu.configure(DARK_MENU if dark else self._menu_light_colors)
+        self.resize_aspect_var.set(self.resize_aspect_key or "freeform")
+        b = self.resize_aspect_btn
+        x, y = b.winfo_rootx(), b.winfo_rooty() + b.winfo_height()
+        post_with_menu_margin(lambda: menu.tk_popup(x, y), DARK_MENU["background"] if dark else None)
 
     def _resize_reset_crop(self):
         if not self.resize_input_path:
