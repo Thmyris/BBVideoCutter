@@ -8491,7 +8491,6 @@ class LosslessVideoApp(_BaseTk):
                 top, text=label_text, bg="#f0f0f0", font=("Segoe UI", 10), anchor="w",
                 fg="#000000" if track["enabled_var"].get() else "#777777",
             )
-            name_lbl.pack(side="left", padx=(2, 12))
             track["name_label"] = name_lbl
 
             vol_frame = tk.Frame(top, bg="#f0f0f0")
@@ -8527,6 +8526,8 @@ class LosslessVideoApp(_BaseTk):
             track["denoise_btn"] = denoise_btn
             track["denoise_menu"] = tk.Menu(denoise_btn, tearoff=0)
             self._audio_show_denoise_level(track)
+            # Packed last: in a narrow window the name is cut, not the controls.
+            name_lbl.pack(side="left", padx=(2, 12))
 
             wave_canvas = tk.Canvas(row, height=px(96), bg="#0a0a0a", highlightthickness=0)
             wave_canvas.pack(fill="x", padx=3, pady=(0, 6))
