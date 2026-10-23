@@ -2618,7 +2618,9 @@ class LosslessVideoApp(_BaseTk):
         win_w = min(px(900), int(screen_w * 0.95))
         win_h = min(px(700 + 20), int(screen_h * 0.9))
         self.geometry(f"{win_w}x{win_h}")
-        self.minsize(min(px(720), win_w), min(px(560 + 20), win_h))   # <-- real minimum window size, enforced
+        # The real minimum window size, enforced. 860 wide: the Audio tab's
+        # footer text (wrapped at 850) needs 840-851 at 100-200% scaling.
+        self.minsize(min(px(860), win_w), min(px(560 + 20), win_h))
 
         self.input_path = None
         self.duration = 0.0
