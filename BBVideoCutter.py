@@ -145,6 +145,10 @@ except ImportError as e:
 
 _BaseTk = TkinterDnD.Tk
 
+# The app's version. The installer gets it from here (via
+# release\build\app_version.py), and a GitHub release of it is tagged "v" + this.
+APP_VERSION = "1.0"
+
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -3288,7 +3292,7 @@ class LosslessVideoApp(_BaseTk):
     def _show_about(self):
         messagebox.showinfo(
             "About",
-            "BarkBark Lossless Video Cutter\n\n"
+            f"BarkBark Lossless Video Cutter\nVersion {APP_VERSION}\n\n"
             "Cutting and joining both use ffmpeg stream-copy (-c copy) for the "
             "bulk of the video, so almost nothing is re-encoded: it's fast and "
             "lossless. Cutting only re-encodes a fraction of a second right at "

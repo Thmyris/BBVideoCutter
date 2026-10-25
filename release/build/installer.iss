@@ -10,7 +10,11 @@
 ; compiles this with Inno Setup's ISCC.exe.
 
 #define MyAppName "BarkBark Lossless Video Cutter"
-#define MyAppVersion "1.0"
+; The version is APP_VERSION in BBVideoCutter.py, passed in by the build
+; scripts (ISCC /DMyAppVersion=...).
+#ifndef MyAppVersion
+  #error MyAppVersion is not set: build with build_setup.bat or build_portable_and_setup.bat
+#endif
 #define MyAppPublisher "Thmyris"
 #define MyAppExeName "BBVideoCutter.exe"
 

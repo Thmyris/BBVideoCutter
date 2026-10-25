@@ -100,7 +100,10 @@ if errorlevel 1 goto :error
 
 echo.
 echo [3/4] Compiling the installer with Inno Setup...
-%ISCC% installer.iss
+for /f "delims=" %%v in ('python app_version.py') do set APP_VERSION=%%v
+if not defined APP_VERSION goto :error
+echo       version %APP_VERSION%
+%ISCC% /DMyAppVersion=%APP_VERSION% installer.iss
 if errorlevel 1 goto :error
 
 copy /y "installer_output\BBVideoCutter-Setup.exe" "..\BBVideoCutter-Setup.exe" >nul
