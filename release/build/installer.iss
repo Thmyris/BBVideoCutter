@@ -51,7 +51,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
-Source: "dist\BBVideoCutter\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\BBVideoCutter\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
