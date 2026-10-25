@@ -124,6 +124,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, filedialog, messagebox, font as tkfont
@@ -1028,6 +1029,175 @@ def save_settings(settings):
         os.replace(tmp, path)
     except OSError:
         pass  # a preference that can't be saved just won't survive a restart
+
+
+# --------------------------------------------------------------------------
+# Updates -- the app's latest release on GitHub. The built app (installer or
+# portable) looks once a day, in the background; Help > Check for updates
+# looks any time. A newer release is installed only when asked to.
+# --------------------------------------------------------------------------
+UPDATE_REPO = "Thmyris/BBVideoCutter"
+UPDATE_API_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_PAGE_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
+UPDATE_CHECK_INTERVAL = 24 * 3600     # seconds between the automatic checks
+UPDATE_SETUP_ASSET = "BBVideoCutter-Setup.exe"        # what an installed copy downloads
+UPDATE_PORTABLE_ASSET = "BBVideoCutter-Portable.zip"  # what a portable copy downloads
+# The repository is private for now, and GitHub tells an app without a
+# login nothing about a private repository's releases. Until it's public,
+# this stands in for GitHub's answer: a version 1.1 with nothing to
+# download. Set it to None then.
+FAKE_LATEST_RELEASE = {
+    "tag_name": "v1.1",
+    "html_url": UPDATE_PAGE_URL,
+    "body": "A stand-in release: the repository is private for now, so the app can't ask "
+            "GitHub about its releases yet and pretends version 1.1 is out. It has nothing "
+            "to download.",
+    "assets": [],
+}
+
+
+def version_tuple(text):
+    """(1, 10) for "v1.10" or "1.10", trailing zeros dropped (1.0 is 1);
+    None when text has no version number."""
+    m = re.match(r"\s*[vV]?(\d+(?:\.\d+)*)", str(text or ""))
+    if not m:
+        return None
+    parts = [int(p) for p in m.group(1).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def fetch_latest_release(timeout=15):
+    """The latest release, as GitHub's API describes it: a dict with
+    tag_name, html_url, body (the release notes) and assets (name,
+    browser_download_url, size). Raises OSError or ValueError when it
+    can't be had."""
+    if FAKE_LATEST_RELEASE is not None:
+        return dict(FAKE_LATEST_RELEASE)
+    import urllib.request
+    request = urllib.request.Request(UPDATE_API_URL, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"BBVideoCutter/{APP_VERSION}",
+    })
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        release = json.loads(response.read().decode("utf-8"))
+    if not isinstance(release, dict) or version_tuple(release.get("tag_name")) is None:
+        raise ValueError("GitHub's answer names no release version.")
+    return release
+
+
+def is_newer_release(release, current=APP_VERSION):
+    new = version_tuple(release.get("tag_name"))
+    return new is not None and new > version_tuple(current)
+
+
+def release_asset(release, name):
+    """The release's downloadable file called name, or None."""
+    for asset in release.get("assets") or []:
+        if isinstance(asset, dict) and asset.get("name") == name and asset.get("browser_download_url"):
+            return asset
+    return None
+
+
+def download_file(url, dest, report=None, timeout=30):
+    """Saves url to dest, calling report(fraction done) as it comes in.
+    Returns the number of bytes written."""
+    import urllib.request
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/octet-stream",
+        "User-Agent": f"BBVideoCutter/{APP_VERSION}",
+    })
+    done = 0
+    with urllib.request.urlopen(request, timeout=timeout) as response, open(dest, "wb") as f:
+        total = int(response.headers.get("Content-Length") or 0)
+        while True:
+            chunk = response.read(1 << 18)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if report is not None and total:
+                report(done / total)
+    return done
+
+
+def running_built_app():
+    """True in the PyInstaller build (installer or portable), which can
+    update itself; False run from source (BBVideoCutter.py)."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_is_installed():
+    """True for the installer's copy: Inno Setup's uninstaller is next to
+    it. A portable copy has none."""
+    return os.path.isfile(os.path.join(_app_dir(), "unins000.exe"))
+
+
+def folder_is_writable(folder):
+    try:
+        with tempfile.TemporaryFile(dir=folder):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _ps_quote(text):
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def update_helper_script(pid, app_dir, setup=None, new_build=None, relaunch=True):
+    """PowerShell that waits for the app (process pid) to exit, then
+    installs the update: runs the installer setup silently over the
+    installed copy, or copies the unpacked portable build new_build over
+    app_dir (its _internal folder put back as it was if that fails). Then
+    the app starts again (relaunch=False only in tests)."""
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        f"Wait-Process -Id {int(pid)} -ErrorAction SilentlyContinue",
+    ]
+    if setup is not None:
+        args = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] + (["/RELAUNCH=1"] if relaunch else [])
+        lines.append(f"Start-Process -FilePath {_ps_quote(setup)} -ArgumentList "
+                     + ",".join(_ps_quote(a) for a in args))
+        return "\n".join(lines) + "\n"
+    app, new = _ps_quote(app_dir), _ps_quote(new_build)
+    lines += [
+        f"$app = {app}",
+        f"$new = {new}",
+        "$internal = Join-Path $app '_internal'",
+        "$old = Join-Path $app '_internal.old'",
+        "if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }",
+        "if (Test-Path -LiteralPath $internal) { Rename-Item -LiteralPath $internal -NewName '_internal.old' }",
+        "try {",
+        "    Copy-Item -Path (Join-Path $new '*') -Destination $app -Recurse -Force",
+        "    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }",
+        "} catch {",
+        "    if (Test-Path -LiteralPath $old) {",
+        "        if (Test-Path -LiteralPath $internal) { Remove-Item -LiteralPath $internal -Recurse -Force }",
+        "        Rename-Item -LiteralPath $old -NewName '_internal'",
+        "    }",
+        "}",
+        "Remove-Item -LiteralPath (Split-Path -Parent $new) -Recurse -Force -ErrorAction SilentlyContinue",
+    ]
+    if relaunch:
+        lines.append("Start-Process -FilePath (Join-Path $app 'BBVideoCutter.exe')")
+    return "\n".join(lines) + "\n"
+
+
+def launch_detached(cmd):
+    """Starts cmd with no window, to live on after the app has closed."""
+    flags = 0
+    if os.name == "nt":
+        flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+        try:
+            # Out of any job the app runs in, which could end it with the app.
+            return subprocess.Popen(cmd, creationflags=flags | 0x01000000,   # CREATE_BREAKAWAY_FROM_JOB
+                                    close_fds=True)
+        except OSError:
+            pass
+    return subprocess.Popen(cmd, creationflags=flags, close_fds=True)
 
 
 # --------------------------------------------------------------------------
@@ -2961,6 +3131,11 @@ class LosslessVideoApp(_BaseTk):
         if self.dark_mode_var.get():
             self._apply_theme()
 
+        # A newer release, looked for once the window is up.
+        self._update_busy = False         # checking or downloading
+        self._update_dialog = None
+        self.after(3000, self._auto_check_for_update)
+
     def _on_notebook_tab_changed(self, event=None):
         idx = self.notebook.index("current")
         self._style_tab_boxes()
@@ -3096,6 +3271,8 @@ class LosslessVideoApp(_BaseTk):
         )
 
         help_menu = self._add_menu_bar_menu("Help")
+        help_menu.add_command(label="Check for updates...", command=self._check_for_update)
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
         self._build_tab_boxes()
@@ -3288,6 +3465,231 @@ class LosslessVideoApp(_BaseTk):
             text.configure(background=bg, foreground=fg)
             if icon is not None:
                 icon.configure(background=bg, foreground=icon_fg)
+
+    # ====================================================================
+    # Updates (the module's "Updates" section has the GitHub side)
+    # ====================================================================
+    def _auto_check_for_update(self):
+        """A little after the built app starts, at most once a day: a
+        newer release (not one skipped) is offered. Silent when there's
+        none or GitHub can't be reached."""
+        if not running_built_app():
+            return    # run from source: updated with git, not by itself
+        last = self.settings.get("update_checked_at")
+        if isinstance(last, (int, float)) and 0 <= time.time() - last < UPDATE_CHECK_INTERVAL:
+            return
+        self._check_for_update(manual=False)
+
+    def _check_for_update(self, manual=True):
+        """Asks GitHub for the latest release in the background. manual
+        (Help > Check for updates): also says when there's no newer one,
+        or why it couldn't look, and offers a skipped version again."""
+        if self._update_busy:
+            if manual:
+                messagebox.showinfo("Check for updates", "Already checking for or downloading an update.")
+            return
+        self._update_busy = True
+        if manual:
+            self.status_lbl.config(text="Checking for updates...")
+
+        def work():
+            try:
+                release, error = fetch_latest_release(), None
+            except Exception as exc:
+                release, error = None, exc
+            self.after(0, lambda: self._update_check_done(release, error, manual))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_check_done(self, release, error, manual):
+        self._update_busy = False
+        if manual:
+            self.status_lbl.config(text="Ready")
+        if error is not None:
+            if manual:
+                messagebox.showwarning("Check for updates",
+                                       f"Couldn't find out about updates from GitHub:\n{error}")
+            return
+        self.settings["update_checked_at"] = time.time()
+        save_settings(self.settings)
+        tag = str(release.get("tag_name"))
+        if not is_newer_release(release):
+            if manual:
+                messagebox.showinfo("Check for updates",
+                                    f"You have the latest version ({APP_VERSION}).")
+            return
+        if not manual and self.settings.get("update_skipped") == tag:
+            return
+        if self._update_dialog is not None:
+            return    # already asking
+        choice = self._ask_update(release)
+        if choice == "skip":
+            self.settings["update_skipped"] = tag
+            save_settings(self.settings)
+        elif choice == "update":
+            self._start_update(release)
+
+    def _ask_update(self, release):
+        """The newer release's version and notes, with Update now, Later and
+        Skip this version (which the daily check then stays quiet about).
+        Returns "update", "later" or "skip". Waits until it is closed."""
+        version = str(release.get("tag_name")).lstrip("vV")
+        dlg = tk.Toplevel(self, bg="#f0f0f0")
+        dlg.withdraw()
+        dlg.title("Update available")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        self._update_dialog = dlg     # for the tests
+        answer = {"choice": "later"}
+        body = tk.Frame(dlg, bg="#f0f0f0", padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, bg="#f0f0f0", anchor="w", font=("Segoe UI", 11, "bold"),
+                 text=f"Version {version} is available").pack(fill="x")
+        tk.Label(body, bg="#f0f0f0", anchor="w",
+                 text=f"You have version {APP_VERSION}.").pack(fill="x", pady=(px(2), 0))
+        notes = str(release.get("body") or "").strip()
+        if notes:
+            tk.Label(body, bg="#f0f0f0", anchor="w", font=("Segoe UI", 9, "bold"),
+                     text="What's new").pack(fill="x", pady=(px(10), px(2)))
+            box = tk.Frame(body, bg="#f0f0f0")
+            box.pack(fill="both", expand=True)
+            lines = sum(len(line) // 60 + 1 for line in notes.splitlines()) or 1
+            text = tk.Text(box, width=62, height=min(lines, 12), wrap="word", relief="solid",
+                           borderwidth=1, padx=px(6), pady=px(4), font=("Segoe UI", 9))
+            text.insert("1.0", notes)
+            text.config(state="disabled")
+            text.pack(side="left", fill="both", expand=True)
+            if lines > 12:
+                bar = tk.Scrollbar(box, command=text.yview)
+                text.config(yscrollcommand=bar.set)
+                bar.pack(side="right", fill="y")
+            self._update_notes = text     # for the tests
+
+        def choose(choice):
+            answer["choice"] = choice
+            dlg.destroy()
+
+        buttons = tk.Frame(body, bg="#f0f0f0")
+        buttons.pack(fill="x", pady=(px(12), 0))
+        tk.Button(buttons, text="Later", width=10, command=lambda: choose("later")).pack(side="right")
+        update_btn = tk.Button(buttons, text="Update now", width=12, default="active",
+                               command=lambda: choose("update"))
+        update_btn.pack(side="right", padx=(0, px(6)))
+        tk.Button(buttons, text="Skip this version",
+                  command=lambda: choose("skip")).pack(side="left")
+        dlg.bind("<Return>", lambda e: choose("update"))
+        dlg.bind("<Escape>", lambda e: choose("later"))
+        dlg.protocol("WM_DELETE_WINDOW", lambda: choose("later"))
+
+        self._theme_tree(dlg)
+        dlg.update_idletasks()
+        self._set_title_bar_dark(self._is_dark(), dlg)
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - h) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.deiconify()
+        update_btn.focus_set()
+        dlg.grab_set()
+        self.wait_window(dlg)
+        self._update_dialog = None
+        return answer["choice"]
+
+    def _update_offer_page(self, release, why):
+        """The update can't be installed from here (why): offers the
+        release's page in the browser instead."""
+        page = release.get("html_url") or UPDATE_PAGE_URL
+        if messagebox.askyesno("Update", f"{why}\n\nOpen the release's page in the browser?"):
+            import webbrowser
+            webbrowser.open(page)
+
+    def _start_update(self, release):
+        """Downloads the release's installer (installed copy) or portable
+        zip (portable copy, unpacked next to it) in the background, then
+        hands over to _install_update."""
+        version = str(release.get("tag_name")).lstrip("vV")
+        if not running_built_app():
+            self._update_offer_page(
+                release, "This copy runs from source (BBVideoCutter.py), so it can't update "
+                         "itself: update the source with git pull.")
+            return
+        installed = app_is_installed()
+        name = UPDATE_SETUP_ASSET if installed else UPDATE_PORTABLE_ASSET
+        asset = release_asset(release, name)
+        if asset is None:
+            self._update_offer_page(release, f"Version {version}'s release has no {name} to download.")
+            return
+        app_dir = _app_dir()
+        if not installed and not folder_is_writable(app_dir):
+            self._update_offer_page(
+                release, f"The app can't write to its own folder ({app_dir}), so it can't "
+                         f"replace itself there.")
+            return
+        self._update_busy = True
+        report = self._progress_reporter(f"Downloading version {version}...", "update")
+        report(0.0)
+        folder = os.path.join(tempfile.gettempdir(), "BBVideoCutter-update")
+
+        def work():
+            try:
+                shutil.rmtree(folder, ignore_errors=True)
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, name)
+                size = download_file(asset["browser_download_url"], path, report)
+                if asset.get("size") and size != asset["size"]:
+                    raise OSError(f"The download is incomplete ({size} of {asset['size']} bytes).")
+                new_build = None
+                if not installed:
+                    staging = os.path.join(folder, "new")
+                    with zipfile.ZipFile(path) as z:
+                        z.extractall(staging)
+                    new_build = os.path.join(staging, "BBVideoCutter")
+                    if not os.path.isfile(os.path.join(new_build, "BBVideoCutter.exe")):
+                        raise OSError(f"{name} has no BBVideoCutter\\BBVideoCutter.exe in it.")
+                    os.remove(path)
+                done = lambda: self._install_update(release, folder, path if installed else None,
+                                                    new_build)
+            except Exception as exc:
+                error = exc
+                done = lambda: self._update_failed(version, error)
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, version, error):
+        self._update_busy = False
+        self._end_progress("update")
+        self.status_lbl.config(text="Ready")
+        messagebox.showerror("Update", f"Couldn't download version {version}:\n{error}")
+
+    def _install_update(self, release, folder, setup, new_build):
+        """The update is downloaded: once agreed to, the app closes and a
+        helper with no window installs it and starts the app again."""
+        self._update_busy = False
+        self._end_progress("update")
+        version = str(release.get("tag_name")).lstrip("vV")
+        running = [job for job in self._progress_jobs if job != "update"]
+        stop = "\n\nWhat's still running (" + ", ".join(running) + ") will be stopped." if running else ""
+        if not messagebox.askokcancel(
+                "Update",
+                f"Version {version} is downloaded.\n\nThe app will close, update itself and "
+                f"start again.{stop}"):
+            self.status_lbl.config(text="Update cancelled.")
+            shutil.rmtree(folder, ignore_errors=True)
+            return
+        script = os.path.join(folder, "update.ps1")
+        try:
+            with open(script, "w", encoding="utf-8-sig") as f:
+                f.write(update_helper_script(os.getpid(), _app_dir(), setup=setup, new_build=new_build))
+            self._launch_update_helper(script)
+        except OSError as exc:
+            messagebox.showerror("Update", f"Couldn't start the update:\n{exc}")
+            return
+        self._on_app_close()
+
+    def _launch_update_helper(self, script):
+        launch_detached(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                         "Bypass", "-WindowStyle", "Hidden", "-File", script])
 
     def _show_about(self):
         messagebox.showinfo(
