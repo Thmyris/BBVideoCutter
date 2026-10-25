@@ -3074,7 +3074,7 @@ class LosslessVideoApp(_BaseTk):
         self._progress_jobs = {}         # running job name -> time.monotonic() it started
 
         self.settings = load_settings()
-        self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", False)))
+        self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", True)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
         # Every tab saves next to the source video, or asks where to save.
