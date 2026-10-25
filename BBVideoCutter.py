@@ -3153,6 +3153,19 @@ class LosslessVideoApp(_BaseTk):
         self._ensure_tab_built(idx)
         self._show_shared_video(idx)
 
+    def open_video_from_menu(self):
+        """File > Open Video: opens on the Crop/Rotate or Audio tab when that
+        is showing, otherwise on the Cut tab. The other two get it too
+        (_share_video)."""
+        idx = self.notebook.index("current")
+        if idx == 3:
+            self.open_file_for_resize()
+        elif idx == 4:
+            self.open_file_for_audio()
+        else:
+            self.notebook.select(self.cut_tab)
+            self.open_file_for_cut()
+
     def _share_video(self, tab, path):
         """path was opened on tab (Cut, Crop/Rotate or Audio): the other two
         open it too, each when it is next shown."""
@@ -3231,9 +3244,7 @@ class LosslessVideoApp(_BaseTk):
         self._menu_bar_items = []        # (menubutton, its dropdown menu)
 
         file_menu = self._add_menu_bar_menu("File")
-        file_menu.add_command(label="Open Video (Cut tab)...", command=self.open_file_for_cut)
-        file_menu.add_command(label="Open Video (Crop/Rotate tab)...", command=self.open_file_for_resize)
-        file_menu.add_command(label="Open Video (Audio tab)...", command=self.open_file_for_audio)
+        file_menu.add_command(label="Open Video...", command=self.open_video_from_menu)
         file_menu.add_command(label="Add Videos (Combine tab)...", command=self.add_files_for_combine)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_app_close)
