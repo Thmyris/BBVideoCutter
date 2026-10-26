@@ -4110,7 +4110,7 @@ class LosslessVideoApp(_BaseTk):
         time_box.pack(fill="x", pady=(1, 2))
         time_row = time_box.center
         if self.cut_player is not None:
-            replay = tk.Button(time_box.right, text="Replay selected part", command=self._cut_replay,
+            replay = tk.Button(time_box.right, text="Replay selected scene", command=self._cut_replay,
                                state="disabled")
             replay.pack(side="right")
             Tooltip(replay, "Plays from Start to End once, then stops")
