@@ -34,6 +34,10 @@ app's update box shows as "What's new").
 - **Cut tab:** the Start and End time fields accept only digits, `:` and
   `.` (the milliseconds). A typed or pasted letter is refused as it is
   entered, instead of an "Invalid time" error afterwards.
+- **Cut tab:** clicking a slider handle (the ball) only selects it, for
+  the step buttons. It no longer jumps the video and the playhead to it,
+  or rounds an exact time like `00:00:01.250` to the nearest second.
+  Dragging the handle still moves it and shows its frame.
 
 ### Project and docs
 

@@ -4316,6 +4316,7 @@ class LosslessVideoApp(_BaseTk):
         self.slider_canvas.bind("<ButtonRelease-1>", self._slider_release)
         self.slider_canvas.bind("<Button-3>", self._cut_ranges_menu)
         self._drag_target = None
+        self._grab_x = None   # where a handle was pressed, until it is dragged
 
         # ---- waveform of the audio heard, on the slider's time axis
         self.wave_canvas = None
@@ -5440,22 +5441,36 @@ class LosslessVideoApp(_BaseTk):
     def _slider_click(self, event):
         """Without the player, a click moves the nearer handle there. With
         it, only a press on a handle drags the handle; anywhere else moves
-        the playhead (scrubbing), and I / O then set the range."""
+        the playhead (scrubbing), and I / O then set the range.
+        A press on a handle only grabs it, and makes it the one the step
+        buttons move: the handle and the video only move once it is
+        dragged, so a click on it leaves both (and its exact time) alone."""
         if not self.input_path:
             return
         sx = self._time_to_x(self.start_sec)
         ex = self._time_to_x(self.end_sec)
         self._drag_target = "start" if abs(event.x - sx) <= abs(event.x - ex) else "end"
+        on_handle = min(abs(event.x - sx), abs(event.x - ex)) <= px(9)
+        self._grab_x = None
         if self._cut_player_on:
             self.cut_tab.focus_set()   # off a time field, so the keys work
-            if min(abs(event.x - sx), abs(event.x - ex)) > px(9):
+            if not on_handle:
                 self._drag_target = "playhead"
                 self._cut_scrubbing = True
+        if on_handle:
+            self._grab_x = event.x
+            self.handle_var.set(self._drag_target)
+            self.active_handle = self._drag_target
+            return
         self._slider_drag(event)
 
     def _slider_drag(self, event):
         if not self.input_path or not self._drag_target:
             return
+        if self._grab_x is not None:
+            if abs(event.x - self._grab_x) <= px(3):
+                return   # a wobble while clicking: still a click
+            self._grab_x = None
         if self._drag_target == "playhead":
             # Keyframe seeks while dragging (fast); the exact frame on release.
             t = self._x_to_exact_time(event.x)
@@ -5481,7 +5496,8 @@ class LosslessVideoApp(_BaseTk):
 
     def _slider_release(self, event):
         target, self._drag_target = self._drag_target, None
-        if not self._cut_player_on or target is None:
+        clicked, self._grab_x = self._grab_x is not None, None
+        if not self._cut_player_on or target is None or clicked:
             return
         if target == "playhead":
             self._cut_scrubbing = False
