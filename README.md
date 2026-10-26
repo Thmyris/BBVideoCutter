@@ -1,6 +1,16 @@
-# BarkBark Lossless Video Cutter
+<div align="center">
+
+<h1>BarkBark Lossless Video Cutter</h1>
 
 The fastest and the most stable video editor for your simple video editing needs. Built with ffmpeg and mpv.
+
+[![Latest release](https://img.shields.io/github/v/release/Thmyris/BBVideoCutter?style=for-the-badge&color=2ea043)](https://github.com/Thmyris/BBVideoCutter/releases/latest)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Thmyris/BBVideoCutter/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+
+<img src="docs/screenshots/cut.png" width="860" alt="Cut tab: scenes marked on a long recording">
+
+</div>
 
 ## Download
 
@@ -22,6 +32,15 @@ Two builds in `release/`
 
 **Audio:** Mix multiple tracks together while auto-balancing the dB levels with one click. Mute, adjust volume of a voice track. Has a simple noise cancellation filter with 3 strength levels.
 
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/screenshots/bulk-cut.png" alt="Bulk Cut tab"><br><b>Bulk Cut</b></td>
+    <td align="center" width="50%"><img src="docs/screenshots/crop.png" alt="Crop/Rotate tab: vertical 9:16 crop"><br><b>Crop/Rotate</b></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/screenshots/audio.png" width="78%" alt="Audio tab: two tracks"><br><b>Audio</b></td>
+  </tr>
+</table>
 
 
 ## Running from source
