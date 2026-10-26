@@ -149,6 +149,15 @@ def _wrap_player(cls):
     def _ensure_mpv(self):
         if self.mpv is not None:
             return
+        # winfo_id() has Tk make the frame's X window, but Tk only queues
+        # that request. mpv, on its own X connection, could then look for
+        # the window before the X server has it: it fails to make its video
+        # window inside, and destroying that window later (the switch to
+        # x11, say) takes the whole app down, as mpv has just put Xlib's
+        # exiting error handler back. XQueryPointer is a round trip: once it
+        # answers, the server has made the window.
+        self.frame.winfo_id()
+        self.frame.winfo_pointerxy()
         if _software_gl:
             self.platform_options = dict(MPV_OPTIONS, vo="x11")
         else:
