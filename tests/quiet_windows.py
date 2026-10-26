@@ -13,7 +13,10 @@ nothing is ever seen or felt:
 - every Tk root and Toplevel is made fully transparent before it is
   mapped, and parked on the second monitor when there is one, so a window
   the first rule did not reach still lands off the working screen, and a
-  click there falls through it.
+  click there falls through it;
+- every native dialog this thread opens (a messagebox, a file dialog: no
+  Tk window, so the rule above misses it) is made fully transparent and
+  click-through as it is about to be shown (WM_SHOWWINDOW).
 
 The windows are mapped all the same: they have their real size and get
 their <Configure> events, so drawing and layout checks behave exactly as
@@ -49,6 +52,12 @@ _GWL_STYLE = -16
 _GWL_EXSTYLE = -20
 _WS_CHILD = 0x40000000
 _WS_EX_NOACTIVATE = 0x08000000
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_LWA_ALPHA = 0x2
+_WH_CALLWNDPROC = 4
+_WM_SHOWWINDOW = 0x0018
+_DIALOG_CLASS = "#32770"      # Windows' own dialogs: MessageBox, the file dialogs
 
 
 class Quiet:
@@ -60,8 +69,11 @@ class Quiet:
         self.park = None          # (x, y) on the second monitor, or None
         self.styled = 0           # top-level windows given WS_EX_NOACTIVATE
         self.refused = 0          # activations the hook turned down
+        self.dialogs = 0          # native dialogs made transparent
         self._hook = None
         self._proc = None         # the callback, kept alive for the hook
+        self._dialog_hook = None
+        self._dialog_proc = None
         self._inits = {}          # class -> its __init__ as it was
         self._user32 = None       # the hook's own user32 handle
 
@@ -91,6 +103,9 @@ class Quiet:
         if self._hook:
             self._user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
+        if self._dialog_hook:
+            self._user32.UnhookWindowsHookEx(self._dialog_hook)
+            self._dialog_hook = None
         self.hooked = False
 
 
@@ -102,6 +117,8 @@ def install(show=None):
         return q
     q.park = _second_monitor_corner()
     _hook_activation(q)
+    if not q.show:
+        _hook_dialogs(q)
     _patch_init(q, tk.Tk)
     _patch_init(q, tk.Toplevel)
     return q
@@ -190,6 +207,45 @@ def _hook_activation(q):
     q._proc = hookproc_t(cbt)
     q._hook = user32.SetWindowsHookExW(_WH_CBT, q._proc, None, kernel32.GetCurrentThreadId())
     q.hooked = bool(q._hook)
+
+
+def _hook_dialogs(q):
+    """A thread WH_CALLWNDPROC hook: a native dialog about to be shown is
+    made layered at alpha 0 (nothing drawn) and click-through. Styles set
+    when it is created don't hold: CreateWindowEx applies its own after the
+    CBT hook has run."""
+    from ctypes import wintypes
+    user32 = q._user32
+
+    class CWPSTRUCT(ctypes.Structure):
+        _fields_ = [("lParam", wintypes.LPARAM), ("wParam", wintypes.WPARAM),
+                    ("message", wintypes.UINT), ("hwnd", wintypes.HWND)]
+
+    hookproc_t = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                    wintypes.WPARAM, wintypes.LPARAM)
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.COLORREF,
+                                                  wintypes.BYTE, wintypes.DWORD]
+    class_name = ctypes.create_unicode_buffer(64)
+
+    def on_message(code, wparam, lparam):
+        try:
+            msg = ctypes.cast(lparam, ctypes.POINTER(CWPSTRUCT)).contents
+            if msg.message == _WM_SHOWWINDOW and msg.wParam:
+                user32.GetClassNameW(msg.hwnd, class_name, 64)
+                if class_name.value == _DIALOG_CLASS:
+                    ex = user32.GetWindowLongW(msg.hwnd, _GWL_EXSTYLE)
+                    user32.SetWindowLongW(msg.hwnd, _GWL_EXSTYLE,
+                                          ex | _WS_EX_LAYERED | _WS_EX_TRANSPARENT)
+                    user32.SetLayeredWindowAttributes(msg.hwnd, 0, 0, _LWA_ALPHA)
+                    q.dialogs += 1
+        except Exception:                                 # pragma: no cover
+            pass
+        return user32.CallNextHookEx(None, code, wparam, lparam)
+
+    q._dialog_proc = hookproc_t(on_message)
+    q._dialog_hook = user32.SetWindowsHookExW(_WH_CALLWNDPROC, q._dialog_proc, None,
+                                              ctypes.windll.kernel32.GetCurrentThreadId())
 
 
 def _patch_init(q, cls):
