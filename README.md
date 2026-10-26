@@ -1,11 +1,10 @@
 # BarkBark Lossless Video Cutter
 
-A Windows desktop app for cutting, combining, cropping, and audio-mixing
-video, keeping edits lossless wherever possible.
+The fastest and the most stable video editor for your simple video editing needs. Built with ffmpeg and mpv.
 
 ## Download
 
-Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
+Two builds in `release/`
 
 - **`release/BBVideoCutter-Setup.exe`** — Windows installer.
 - **`release/BBVideoCutter-Portable.zip`** — extract and run
@@ -13,69 +12,17 @@ Two builds in `release/` (ffmpeg/ffprobe bundled, nothing else to install):
 
 ## Features
 
-The tabs are the boxes with icons in the middle of the menu bar (icons
-only when the window is too narrow for their names).
+**Cut:** Losslessly cut any video down to the milisecond easily. Cuts are <u>instant</u>, the only bottleneck is the disk write speed.
 
-- **Cut** — trim a clip, keeping every audio track, three modes: Lossless
-  (fastest), Re-encode edges (frame-exact), Edit-list trim (experimental).
-  The mode is set in the **Cutting Mode** menu, for Bulk Cut too; choosing
-  Re-encode edges or Edit-list trim opens a box for the keyframe search
-  window (default 8 s).
-  **Mark Cut Start** / **Mark Cut End** (next to Play; keys `I` / `O`)
-  set the start / end at the frame on screen, and **Replay selected part**
-  (under the volume) plays Start to End once.
-  **Add selected scene to the bulk cutting list** (key `A`) puts the
-  Start–End on the Bulk Cut list, on the video's own row, and marks it
-  green on the slider; **Cut selected scenes** goes to the Bulk Cut tab and
-  starts the bulk cut there, each scene into its own clip.
-- **Combine** — join videos without re-encoding when they share codec,
-  resolution, frame rate and audio tracks. Mixed videos are re-encoded to
-  match the first one instead (H.264 + AAC, others scaled to fit with black
-  bars; a video with fewer audio tracks gets silence on the others); a note
-  under the list says when and why, and so does the message when it's done.
-- **Bulk Cut** — batch-cut files by cut ranges in their filenames, e.g.
-  `clip [01.10-01.25].mp4`. `[-43.-51]` cuts seconds 43–51 of the last
-  minute that has them: 19:43–19:51 in a 20:10 video. `[-27]` cuts from
-  second 27 of the last minute that has it to the end: 19:27–20:10.
-- **Crop/Rotate** — visual crop editor, freeform by default, with the
-  common shapes (Original, 1:1, 16:9, 9:16, 4:3, 21:9...) under one
-  **Aspect** menu, and a 90°/180°/270° rotate done in the same re-encode, or saved on its own
-  losslessly (stream copy; only the file's rotation info changes).
-- **Audio** — mute/mix individual audio tracks, each with its own noise
-  reduction (the button left of its volume): **Light filtering** is RNNoise,
-  applied as the video plays; **Medium filtering** and **Extreme
-  filtering** are DeepFilterNet, worked out in the background first (the
-  track plays unfiltered until then, and Save / Auto Balance wait for it).
-  Both silence the noise between words and let it through with the voice,
-  so at full strength the background cuts in and out. Light (at most 6 dB
-  less noise) and Medium (at most 9 dB) keep some of it, which keeps that
-  gentle; Extreme takes it all. Click or drag on a
-  track's waveform to move the playback there. A track's **Mono** box puts
-  it in both ears alike (its channels averaged, e.g. a mic recorded on one
-  side only) while the other tracks keep their stereo, in playback and the
-  saved file.
+**Combine:** Join the cut videos together losslessly.
 
-Built-in video player (libmpv): play and frame-step the video on the Cut
-tab, with keyframe ticks and the audio waveform under the slider; a video's
-audio tracks play together, or pick one under **Audio** next to the
-volume; preview the joined video on Combine, a row's ranges on Bulk Cut,
-the video playing under the crop box on Crop/Rotate (with Cut's buttons,
-keys, volume and track picker), and on Audio the
-video with the enabled tracks mixed at their volumes, as Finalize saves
-them.
+**Bulk Cut:** Batch cut hundreds of files with one click.
 
-The Combine and Bulk Cut lists work the same way: a thumbnail per file,
-Ctrl/Shift-click to select several rows, Delete to remove them, and Move
-Up/Down or drag to reorder (the dragged rows follow the cursor, and a line
-shows where they will land). Bulk Cut cuts the files in the list's order.
+**Crop/Rotate:** Self explanatory.
 
-Drag & drop supported throughout. A video opened on Cut, Crop/Rotate or
-Audio opens on the other two as well when you switch to them. Under
-**Options**: dark mode; save to the source video's folder (on)
-or ask where to save, for every tab; warn before overwriting; show the
-frame by frame movement buttons in the video player on the Cut tab: they
-move the selected Start or End one frame, to the millisecond (the `,` and
-`.` keys do it either way).
+**Audio:** Mix multiple tracks together while auto-balancing the dB levels with one click. Mute, adjust volume of a voice track. Has a simple noise cancellation filter with 3 strength levels.
+
+
 
 ## Running from source
 
