@@ -14,10 +14,10 @@ The fastest and the most stable video editor for your simple video editing needs
 
 ## Download
 
-Two builds in `release/`
+Two builds on the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/latest)** page:
 
-- **`release/BBVideoCutter-Setup.exe`** — Windows installer.
-- **`release/BBVideoCutter-Portable.zip`** — extract and run
+- **`BBVideoCutter-Setup.exe`** — Windows installer.
+- **`BBVideoCutter-Portable.zip`** — extract and run
   `BBVideoCutter.exe`, no install.
 
 ## Features
