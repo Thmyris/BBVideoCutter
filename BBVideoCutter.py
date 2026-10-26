@@ -111,6 +111,7 @@ Run:
     python BBVideoCutter.py
 """
 
+import base64
 import ctypes
 import io
 import json
@@ -1198,6 +1199,74 @@ def launch_detached(cmd):
         except OSError:
             pass
     return subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+
+
+def powershell_hidden(script):
+    """powershell.exe command line running script with no window; the
+    script goes in encoded, so any quotes and spaces in it survive."""
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden", "-EncodedCommand", encoded]
+
+
+def restart_script(pid, cmd, cwd):
+    """PowerShell that waits for the app (process pid) to exit, then runs
+    cmd (a list: program and its arguments) in cwd."""
+    args = ""
+    if cmd[1:]:
+        # Start-Process joins the arguments with spaces as they are, so each
+        # one carries its own double quotes.
+        args = " -ArgumentList " + ",".join(_ps_quote('"' + a + '"') for a in cmd[1:])
+    return "\n".join([
+        f"Wait-Process -Id {int(pid)} -ErrorAction SilentlyContinue",
+        f"Start-Process -FilePath {_ps_quote(cmd[0])}{args} -WorkingDirectory {_ps_quote(cwd)}",
+    ]) + "\n"
+
+
+def _git(folder, *args, timeout=30):
+    """git run in folder, never asking for a password (no window, no
+    prompt): a remote that needs one fails instead of hanging."""
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git isn't installed (or isn't on PATH).")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    return subprocess.run([git, "-C", folder, *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout, env=env,
+                          **SUBPROCESS_KWARGS)
+
+
+def git_pull_source(folder, timeout=120):
+    """Run from source: brings the checkout in folder up to date with
+    git pull --ff-only. Returns (commit before, commit after, the branch
+    pulled from); raises RuntimeError saying why it couldn't."""
+    if _git(folder, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+        raise RuntimeError("its folder isn't a git checkout.")
+    upstream = _git(folder, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream.returncode != 0:
+        branch = _git(folder, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "the current branch"
+        raise RuntimeError(f"{branch} has no upstream branch to pull from (no remote set up for it).")
+    upstream = upstream.stdout.strip()
+    before = _git(folder, "rev-parse", "HEAD").stdout.strip()
+    try:
+        pull = _git(folder, "pull", "--ff-only", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git pull from {upstream} took over {timeout // 60} minutes.") from None
+    if pull.returncode != 0:
+        out = (pull.stderr.strip() or pull.stdout.strip())[-1500:]
+        raise RuntimeError(f"git pull from {upstream} failed:\n\n{out}")
+    after = _git(folder, "rev-parse", "HEAD").stdout.strip()
+    return before, after, upstream
+
+
+def source_app_version(path):
+    """APP_VERSION as written in the source file path, or None."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = re.search(r'^APP_VERSION = "([^"]+)"', f.read(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
 
 
 # --------------------------------------------------------------------------
@@ -3645,12 +3714,10 @@ class LosslessVideoApp(_BaseTk):
     def _start_update(self, release):
         """Downloads the release's installer (installed copy) or portable
         zip (portable copy, unpacked next to it) in the background, then
-        hands over to _install_update."""
+        hands over to _install_update. Run from source: _update_source."""
         version = str(release.get("tag_name")).lstrip("vV")
         if not running_built_app():
-            self._update_offer_page(
-                release, "This copy runs from source (BBVideoCutter.py), so it can't update "
-                         "itself: update the source with git pull.")
+            self._update_source(release)
             return
         installed = app_is_installed()
         name = UPDATE_SETUP_ASSET if installed else UPDATE_PORTABLE_ASSET
@@ -3723,6 +3790,61 @@ class LosslessVideoApp(_BaseTk):
             self._launch_update_helper(script)
         except OSError as exc:
             messagebox.showerror("Update", f"Couldn't start the update:\n{exc}")
+            return
+        self._on_app_close()
+
+    def _update_source(self, release):
+        """Run from source: the checkout is brought up to date with git
+        pull (in the background), then the app offers to restart. When git
+        can't (not a checkout, no upstream, local changes in the way...),
+        the release's page is offered instead."""
+        self._update_busy = True
+        self.status_lbl.config(text="Updating the source with git pull...")
+        folder = _app_dir()
+
+        def work():
+            try:
+                result, error = git_pull_source(folder), None
+            except Exception as exc:
+                result, error = None, exc
+            self.after(0, lambda: self._update_source_done(release, folder, result, error))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_source_done(self, release, folder, result, error):
+        self._update_busy = False
+        if error is not None:
+            self.status_lbl.config(text="Ready")
+            self._update_offer_page(
+                release, f"This copy runs from source (BBVideoCutter.py), and git couldn't "
+                         f"update it: {error}")
+            return
+        before, after, upstream = result
+        if before == after:
+            self.status_lbl.config(text="Ready")
+            messagebox.showinfo("Update", f"git pull found nothing new on {upstream}.")
+            return
+        version = source_app_version(os.path.join(folder, "BBVideoCutter.py"))
+        now = f", now version {version}" if version and version != APP_VERSION else ""
+        self.status_lbl.config(text="Updated with git pull: restart the app to use it.")
+        if messagebox.askyesno(
+                "Update",
+                f"The source is updated from {upstream} ({before[:7]} to {after[:7]}{now}).\n\n"
+                f"Restart the app to use it now?"):
+            self._restart_from_source()
+
+    def _restart_from_source(self):
+        """Closes the app; a helper with no window starts it again (the same
+        Python and script) once it is gone."""
+        python = sys.executable
+        windowless = os.path.join(os.path.dirname(python), "pythonw.exe")
+        if os.path.basename(python).lower() == "python.exe" and os.path.isfile(windowless):
+            python = windowless     # no console window popping up with it
+        cmd = [python, os.path.abspath(sys.argv[0])] + sys.argv[1:]
+        try:
+            launch_detached(powershell_hidden(restart_script(os.getpid(), cmd, os.getcwd())))
+        except OSError as exc:
+            messagebox.showerror("Update", f"Couldn't restart the app:\n{exc}")
             return
         self._on_app_close()
 
