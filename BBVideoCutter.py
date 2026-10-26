@@ -7251,17 +7251,6 @@ class LosslessVideoApp(_BaseTk):
         )
         self.resize_info_lbl.pack(side="right")
 
-        tk.Button(
-            header, text="How does crop re-encoding work?",
-            command=self._show_crop_info
-        ).pack(side="right", padx=(4, 8))
-
-        tk.Label(
-            header,
-            text="Crop must be re-encoded; audio is stream-copied when possible.",
-            bg="#f0f0f0", fg="#555555"
-        ).pack(side="right", padx=(10, 8))
-
         body = tk.Frame(root, bg="#f0f0f0")
         body.grid(row=1, column=0, sticky="nsew", padx=3, pady=4)
         body.columnconfigure(0, weight=1)
@@ -7420,56 +7409,7 @@ class LosslessVideoApp(_BaseTk):
         )
         self.resize_save_btn.pack(side="left", fill="x", expand=True)
         self.resize_save_btn.config(state="disabled")
-
-    def _show_crop_info(self):
-        messagebox.showinfo(
-            "How crop re-encoding works",
-            "Why cropping can't be a simple copy, the way Cut and Combine are:\n\n"
-            "Cut and Combine only ever touch whole compressed frames. Ffmpeg's "
-            "stream-copy mode (-c copy) just repackages the existing H.264/H.265 "
-            "bitstream into a new container between keyframes — no pixel in any "
-            "frame is ever decoded or re-drawn, so it's instant and perfectly "
-            "lossless.\n\n"
-            "Cropping is different because it changes the pixels themselves. "
-            "Compressed video stores frames as a grid of macroblocks plus "
-            "motion vectors that reference *other* frames — the data that ends "
-            "up at, say, pixel (400, 300) is smeared across blocks, transforms "
-            "and predictions that only make sense at the video's original "
-            "width/height. There is no way to just \"cut out\" a rectangle from "
-            "that compressed representation; the only way to produce a video "
-            "that is genuinely W×H pixels is to:\n\n"
-            "  1. Decode every frame back to raw pixels.\n"
-            "  2. Apply ffmpeg's crop filter (crop=W:H:X:Y) to keep only the "
-            "pixels inside your selection.\n"
-            "  3. Re-encode those cropped frames into a new H.264 stream.\n\n"
-            "This app re-encodes using your GPU's hardware encoder when one is "
-            "available (NVENC / Quick Sync / AMF, falling back to the CPU's "
-            "libx264 otherwise), at a quality setting widely considered "
-            "indistinguishable from the source at normal viewing distances, "
-            "chosen to keep processing fast rather than maximally compressed. "
-            "It is NOT bit-for-bit lossless the way Cut/Combine are, because "
-            "re-encoding always involves at least some quantization.\n\n"
-            "Rotate turns the frames in that same re-encode (ffmpeg's transpose "
-            "filter, applied before the crop), so a turn adds no second pass "
-            "and no extra quality loss.\n\n"
-            "To only turn a video, without cropping it, use Save Rotation "
-            "Only instead: it copies the video and audio exactly as they are "
-            "(-c copy) and just changes the file's rotation info (the display "
-            "matrix that players read), so it is instant and fully lossless. "
-            "The crop box is ignored there. The result is an MP4 (or a MOV, "
-            "for a MOV source), since those containers carry that info.\n\n"
-            "The pixel format is forced to yuv420p for the widest player/"
-            "device compatibility.\n\n"
-            "The audio track is NOT re-encoded — cropping is purely a video/"
-            "spatial operation, so ffmpeg copies the existing audio stream "
-            "straight into the output (-c:a copy), unchanged and lossless, "
-            "exactly like the Cut tab does.\n\n"
-            "Net effect: crop output is video-lossy (a small, generally "
-            "invisible quality loss from the re-encode) but audio-lossless, "
-            "and it will always take noticeably longer than Cut or Combine "
-            "because every frame has to be fully decoded and re-encoded "
-            "instead of just copied byte-for-byte."
-        )
+        Tooltip(self.resize_save_btn, "Crop must be re-encoded; audio is stream-copied when possible.")
 
     def _draw_resize_placeholder(self, text):
         self.resize_canvas.delete("all")
