@@ -6192,8 +6192,7 @@ class LosslessVideoApp(_BaseTk):
         footer.grid(row=2, column=0, sticky="ew", padx=3, pady=(4, 2))
         tk.Label(footer, text="Note: videos that share the same codec, resolution, frame rate "
                  "and audio format (e.g. all from the same recorder) are joined losslessly. "
-                 "Mixed videos are re-encoded to match the first one instead: slower, and "
-                 "not lossless.",
+                 "Mixed videos are re-encoded to match the first one instead.",
                  bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left"
                  ).pack(fill="x")
         # Says when the current list will be re-encoded, and why.
