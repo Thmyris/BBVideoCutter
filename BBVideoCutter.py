@@ -4268,12 +4268,17 @@ class LosslessVideoApp(_BaseTk):
             self.cut_transport_buttons.append(replay)
             self.cut_replay_btn = replay
         self.handle_var = tk.StringVar(value="end")
+        # The time fields take only what a time is made of: digits, ":" and
+        # "." (the milliseconds); a typed or pasted letter is refused.
+        # %S: the text being inserted (or deleted).
+        time_chars = (self.register(lambda s: all(c in "0123456789:." for c in s)), "%S")
         start_radio = tk.Radiobutton(
             time_row, text="Start:", variable=self.handle_var, value="start",
             bg="#f0f0f0", command=lambda: self._set_active_handle("start"))
         start_radio.pack(side="left")
         Tooltip(start_radio, "Shortcut: I sets the start at the frame on screen")
-        self.start_entry = tk.Entry(time_row, width=13, justify="center")
+        self.start_entry = tk.Entry(time_row, width=13, justify="center",
+                                    validate="key", validatecommand=time_chars)
         self.start_entry.pack(side="left", padx=(2, 20))
         self.start_entry.bind("<Return>", lambda e: self._on_start_entry())
         self.start_entry.bind("<FocusOut>", lambda e: self._on_start_entry())
@@ -4283,7 +4288,8 @@ class LosslessVideoApp(_BaseTk):
             bg="#f0f0f0", command=lambda: self._set_active_handle("end"))
         end_radio.pack(side="left")
         Tooltip(end_radio, "Shortcut: O sets the end at the frame on screen")
-        self.end_entry = tk.Entry(time_row, width=13, justify="center")
+        self.end_entry = tk.Entry(time_row, width=13, justify="center",
+                                  validate="key", validatecommand=time_chars)
         self.end_entry.pack(side="left", padx=2)
         self.end_entry.bind("<Return>", lambda e: self._on_end_entry())
         self.end_entry.bind("<FocusOut>", lambda e: self._on_end_entry())
