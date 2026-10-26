@@ -5,15 +5,16 @@ that is in use, that window would flash up on the primary screen and take
 the keyboard focus. Everything here happens before a window is shown, so
 nothing is ever seen or felt:
 
-- every top-level window this thread creates is given WS_EX_NOACTIVATE the
-  moment it exists (a CBT hook sees the creation), so showing it, zooming
-  it or raising it never takes the focus and puts nothing on the taskbar;
-  an activation asked for outright (focus_force) is refused by the same
-  hook;
+- every activation of a window of this thread is refused (a CBT hook),
+  whether Tk asks for it as it shows a window or a test asks outright
+  (focus_force), so the focus stays where the user has it;
+- every top-level window this thread creates is given WS_EX_NOACTIVATE
+  while it is being created (the same hook), before anything can show it,
+  so a click on it does not activate it either and, as no Tk window here
+  has WS_EX_APPWINDOW, it gets no taskbar button;
 - every Tk root and Toplevel is made fully transparent before it is
-  mapped, and parked on the second monitor when there is one, so a window
-  the first rule did not reach still lands off the working screen, and a
-  click there falls through it;
+  mapped, and parked on the second monitor when there is one, so it lands
+  off the working screen, and a click there falls through it;
 - every native dialog this thread opens (a messagebox, a file dialog: no
   Tk window, so the rule above misses it) is made fully transparent and
   click-through as it is about to be shown (WM_SHOWWINDOW).
@@ -67,7 +68,7 @@ class Quiet:
         self.hooked = False       # the CBT hook is in place
         self.show = False         # windows stay visible (on the second monitor)
         self.park = None          # (x, y) on the second monitor, or None
-        self.styled = 0           # top-level windows given WS_EX_NOACTIVATE
+        self.styled = 0           # top-level windows the hook gave WS_EX_NOACTIVATE
         self.refused = 0          # activations the hook turned down
         self.dialogs = 0          # native dialogs made transparent
         self._hook = None
@@ -170,7 +171,15 @@ def _second_monitor_corner():
 
 def _hook_activation(q):
     """A thread CBT hook: NOACTIVATE on every new top-level window, and no
-    to every activation."""
+    to every activation.
+
+    On HCBT_CREATEWND the window already has the style and ex-style it is
+    being created with, and an ex-style bit added there with SetWindowLongW
+    is kept: CreateWindowEx ORs its own on top. That holds for NOACTIVATE
+    (and TRANSPARENT, TOOLWINDOW), not for LAYERED: SetWindowLongW refuses
+    that one until the window is created, which is why the dialogs are made
+    layered later, on WM_SHOWWINDOW. A bit that is refused reads back
+    unset, so the read-back below is what counts a window as styled."""
     from ctypes import wintypes
     user32 = ctypes.WinDLL("user32")          # private: argtypes set below stay here
     kernel32 = ctypes.windll.kernel32
@@ -196,7 +205,8 @@ def _hook_activation(q):
                     ex = user32.GetWindowLongW(wparam, _GWL_EXSTYLE)
                     if not ex & _WS_EX_NOACTIVATE:
                         user32.SetWindowLongW(wparam, _GWL_EXSTYLE, ex | _WS_EX_NOACTIVATE)
-                    q.styled += 1
+                        if user32.GetWindowLongW(wparam, _GWL_EXSTYLE) & _WS_EX_NOACTIVATE:
+                            q.styled += 1
             elif code == _HCBT_ACTIVATE:
                 q.refused += 1
                 return 1
@@ -211,9 +221,10 @@ def _hook_activation(q):
 
 def _hook_dialogs(q):
     """A thread WH_CALLWNDPROC hook: a native dialog about to be shown is
-    made layered at alpha 0 (nothing drawn) and click-through. Styles set
-    when it is created don't hold: CreateWindowEx applies its own after the
-    CBT hook has run."""
+    made layered at alpha 0 (nothing drawn) and click-through. Not at
+    creation, in the CBT hook: SetWindowLongW refuses WS_EX_LAYERED on a
+    window that is still being created. WM_SHOWWINDOW comes after that and
+    before the dialog is drawn."""
     from ctypes import wintypes
     user32 = q._user32
 
