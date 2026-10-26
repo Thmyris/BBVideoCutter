@@ -3,7 +3,8 @@
 BBVideoCutter.py imports this only on Linux and hands itself to install(),
 which swaps in what differs there:
 - the player: the system's libmpv (Debian/Ubuntu: the libmpv2 package),
-  drawing through X11 OpenGL, or plain X11 where there is no GPU;
+  drawing through X11 OpenGL, or plain X11 where there is no GPU or the
+  OpenGL there runs on the CPU;
 - Xlib told to expect threads, before Tk opens its window;
 - the mouse wheel: X11 sends it as Button-4/5, passed on as <MouseWheel>;
 - a field color Tk only knows on Windows, and deep-filter's file name;
@@ -53,6 +54,7 @@ def install(module):
     module.mpv_available = mpv_available
     module.load_mpv = load_mpv
     module.VideoPlayer.platform_options = MPV_OPTIONS
+    _wrap_player(module.VideoPlayer)
     cls = module.LosslessVideoApp
     cls._restart_from_source = _restart_from_source
     _wrap_start_update(cls)
@@ -107,6 +109,52 @@ def load_mpv():
         return None
     app._mpv_module = mpv
     return mpv
+
+
+# Set once a player has found OpenGL running on the CPU (Mesa's llvmpipe,
+# say: a machine or VM with no GPU driver); the players started after it
+# draw with x11 from the start.
+_software_gl = False
+
+
+def _wrap_player(cls):
+    """mpv's gpu output takes OpenGL on the CPU too, only warning about it,
+    and draws garbage with it (seen: llvmpipe on Xvfb: a sparse grid of dots,
+    or nothing). mpv itself, choosing an output on its own, would skip such
+    a renderer, so a player whose mpv reports one switches to x11, which
+    needs no OpenGL. The switch is made on the Tk thread, in the player's
+    poll, where it can't meet the player being closed."""
+    real_ensure, real_poll = cls._ensure_mpv, cls._poll
+
+    def _ensure_mpv(self):
+        if self.mpv is not None:
+            return
+        if _software_gl:
+            self.platform_options = dict(MPV_OPTIONS, vo="x11")
+        else:
+            self.platform_options = dict(
+                MPV_OPTIONS, loglevel="warn",
+                log_handler=lambda level, prefix, text: _on_mpv_log(self, prefix, text))
+        real_ensure(self)
+
+    def _poll(self):
+        if self.__dict__.pop("_want_x11", False) and self.mpv is not None:
+            try:
+                self.mpv["vo"] = "x11"
+            except Exception:
+                pass
+        real_poll(self)
+
+    cls._ensure_mpv = _ensure_mpv
+    cls._poll = _poll
+
+
+def _on_mpv_log(player, prefix, text):
+    # mpv's event thread: only flags it, for the player's poll.
+    global _software_gl
+    if prefix.startswith("vo/gpu") and "software renderer" in text:
+        _software_gl = True
+        player._want_x11 = True
 
 
 # ---- the mouse wheel --------------------------------------------------------
