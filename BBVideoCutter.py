@@ -3486,6 +3486,8 @@ class LosslessVideoApp(_BaseTk):
         none or GitHub can't be reached."""
         if not running_built_app():
             return    # run from source: updated with git, not by itself
+        if not self.settings.get("update_auto", True):
+            return    # turned off in the update box
         last = self.settings.get("update_checked_at")
         if isinstance(last, (int, float)) and 0 <= time.time() - last < UPDATE_CHECK_INTERVAL:
             return
@@ -3542,8 +3544,8 @@ class LosslessVideoApp(_BaseTk):
 
     def _ask_update(self, release):
         """The newer release's version and notes, with Update now, Later and
-        Skip this version (which the daily check then stays quiet about).
-        Returns "update", "later" or "skip". Waits until it is closed."""
+        Skip this version (which the daily check then stays quiet about),
+        and the "Automatically check for updates" switch. Returns "update", "later" or "skip". Waits until it is closed."""
         version = str(release.get("tag_name")).lstrip("vV")
         dlg = tk.Toplevel(self, bg="#f0f0f0")
         dlg.withdraw()
@@ -3580,8 +3582,20 @@ class LosslessVideoApp(_BaseTk):
             answer["choice"] = choice
             dlg.destroy()
 
+        # The daily check (_auto_check_for_update); saved as soon as it's clicked.
+        auto_var = tk.BooleanVar(dlg, value=bool(self.settings.get("update_auto", True)))
+        self._update_auto_var = auto_var     # for the tests
+
+        def auto_toggled():
+            self.settings["update_auto"] = auto_var.get()
+            save_settings(self.settings)
+
+        tk.Checkbutton(body, text="Automatically check for updates", variable=auto_var,
+                       command=auto_toggled, bg="#f0f0f0", anchor="w"
+                       ).pack(fill="x", pady=(px(8), 0))
+
         buttons = tk.Frame(body, bg="#f0f0f0")
-        buttons.pack(fill="x", pady=(px(12), 0))
+        buttons.pack(fill="x", pady=(px(10), 0))
         tk.Button(buttons, text="Later", width=10, command=lambda: choose("later")).pack(side="right")
         update_btn = tk.Button(buttons, text="Update now", width=12, default="active",
                                command=lambda: choose("update"))
