@@ -54,6 +54,13 @@ app's update box shows as "What's new").
   invisible during test runs too, and counts the windows it changed
   correctly.
 
+### Fixed
+
+- **Cut tab:** the red playhead no longer looks broken in two (the part
+  on the waveform a few pixels off the part on the slider) while it moves
+  fast. The slider and the waveform are now drawn as one, so the playhead
+  through them is a single line.
+
 ## v1.0 (2026-10-26)
 
 First public release: Windows installer (`BBVideoCutter-Setup.exe`) and

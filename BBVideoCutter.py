@@ -4318,8 +4318,14 @@ class LosslessVideoApp(_BaseTk):
         self.cut_step_row = step_row
         self._init_cut_button_fit()
 
-        # ---- slider
-        self.slider_canvas = tk.Canvas(controls, height=px(24), bg="#f0f0f0", highlightthickness=0)
+        # ---- slider, and under it the waveform of the audio heard, on the
+        # slider's time axis. One canvas for both, so the playhead through
+        # them is one line: on two canvases Windows paints each on its own,
+        # and a fast drag showed the needle broken where they meet.
+        self._strip_on = PIL_AVAILABLE
+        self._strip_y0, self._strip_h = px(24) + 1, px(30)
+        height = self._strip_y0 + self._strip_h if self._strip_on else px(24)
+        self.slider_canvas = tk.Canvas(controls, height=height, bg="#f0f0f0", highlightthickness=0)
         self.slider_canvas.pack(fill="x", pady=(1, 1))
         self.slider_canvas.bind("<Configure>", lambda e: self._redraw_slider())
         self.slider_canvas.bind("<Button-1>", self._slider_click)
@@ -4328,18 +4334,6 @@ class LosslessVideoApp(_BaseTk):
         self.slider_canvas.bind("<Button-3>", self._cut_ranges_menu)
         self._drag_target = None
         self._grab_x = None   # where a handle was pressed, until it is dragged
-
-        # ---- waveform of the audio heard, on the slider's time axis
-        self.wave_canvas = None
-        if PIL_AVAILABLE:
-            self.wave_canvas = tk.Canvas(controls, height=px(30), bg="#f0f0f0",
-                                         highlightthickness=0)
-            self.wave_canvas.pack(fill="x", pady=(0, 1))
-            self.wave_canvas.bind("<Configure>", lambda e: self._redraw_waveform())
-            self.wave_canvas.bind("<Button-1>", self._wave_click)
-            self.wave_canvas.bind("<B1-Motion>", self._slider_drag)
-            self.wave_canvas.bind("<ButtonRelease-1>", self._slider_release)
-            self.wave_canvas.bind("<Button-3>", self._cut_ranges_menu)
 
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", pady=(2, 1))
@@ -5241,7 +5235,7 @@ class LosslessVideoApp(_BaseTk):
         so it follows the audio-track picker. ffmpeg draws it in the background
         (render_waveform: about 0.2 s for 2 GB of MP4, 0.7 s of MPEG-TS)
         and it is kept for the session."""
-        if self.wave_canvas is None or not self.input_path:
+        if not self._strip_on or not self.input_path:
             return
         self._stop_waveform()
         self._wave_track = track
@@ -5300,25 +5294,25 @@ class LosslessVideoApp(_BaseTk):
         self._redraw_waveform()
 
     def _redraw_waveform(self):
-        """The strip: the waveform across the same span as the slider's
-        track, blue inside the selection, green in ranges marked for Bulk
-        Cut and gray elsewhere, and the player's playhead."""
-        c = self.wave_canvas
-        if c is None:
+        """The strip, at the slider canvas's bottom: the waveform across the
+        same span as the slider's track, blue inside the selection, green in
+        ranges marked for Bulk Cut and gray elsewhere. The playhead runs
+        down through it from the slider (_redraw_slider)."""
+        if not self._strip_on:
             return
-        c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 2 or h < 2 or not self.input_path or self.duration <= 0:
+        c = self.slider_canvas
+        c.delete("wave")
+        w, y0, h = c.winfo_width(), self._strip_y0, self._strip_h
+        if w < 2 or not self.input_path or self.duration <= 0:
             return
         x0, x1 = px(10), max(px(20), w - px(10))   # as the slider's track
         if self._wave_mask is not None:
-            c.create_image(x0, 0, image=self._waveform_photo(x0, x1, h), anchor="nw")
+            c.create_image(x0, y0, image=self._waveform_photo(x0, x1, h), anchor="nw",
+                           tags=("wave",))
         elif self._wave_note:
-            c.create_text(x0, h / 2, text=self._wave_note, anchor="w", font=("Segoe UI", 8),
-                          fill=self._theme_color("wave"))
-        if self._cut_player_on:
-            c.create_line(0, 0, 0, 0, fill=PLAYHEAD_COLOR, width=px(2), tags=("playhead",))
-            self._move_playhead(self.cut_player.position)
+            c.create_text(x0, y0 + h / 2, text=self._wave_note, anchor="w",
+                          font=("Segoe UI", 8), fill=self._theme_color("wave"), tags=("wave",))
+        c.tag_lower("wave")   # under the playhead
 
     def _waveform_photo(self, x0, x1, h):
         width = x1 - x0
@@ -5326,7 +5320,7 @@ class LosslessVideoApp(_BaseTk):
         sel1 = round((x1 - x0) * self.end_sec / self.duration)
         spans = tuple((round(width * s / self.duration), round(width * e / self.duration))
                       for s, e in self.cut_ranges)
-        bg = self.wave_canvas.cget("bg")
+        bg = self.slider_canvas.cget("bg")
         made_for = (id(self._wave_mask), width, h, sel0, sel1, spans, bg,
                     self._theme_color("wave"), self._theme_color("range"))
         if self._wave_photo[0] == made_for:
@@ -5335,7 +5329,7 @@ class LosslessVideoApp(_BaseTk):
             self._wave_sized = ((id(self._wave_mask), width, h),
                                 self._wave_mask.resize((width, h), Image.BILINEAR))
         mask = self._wave_sized[1]
-        rgb = tuple(v // 257 for v in self.wave_canvas.winfo_rgb(bg))
+        rgb = tuple(v // 257 for v in self.slider_canvas.winfo_rgb(bg))
         img = Image.new("RGB", (width, h), rgb)
         img.paste(self._theme_color("wave"), (0, 0, width, h), mask)
         for a, b in spans:   # ranges marked for Bulk Cut
@@ -5348,13 +5342,8 @@ class LosslessVideoApp(_BaseTk):
         return photo
 
     def _wave_click(self, event):
-        """With the player, the strip moves the playhead (never a handle);
-        without it, it works like the slider."""
-        if not self.input_path:
-            return
-        if not self._cut_player_on:
-            self._slider_click(event)
-            return
+        """With the player, a press on the strip moves the playhead (never a
+        handle); without it, the strip works like the slider."""
         self.cut_tab.focus_set()   # off a time field, so the keys work
         self._drag_target = "playhead"
         self._cut_scrubbing = True
@@ -5411,23 +5400,18 @@ class LosslessVideoApp(_BaseTk):
         c.create_oval(ex - r, y - r, ex + r, y + r, fill="#1a73e8", outline="")
 
     def _move_playhead(self, t):
-        c, wc = self.slider_canvas, self.wave_canvas
+        c = self.slider_canvas
         if t is None or not self.duration:
             c.itemconfigure("playhead", state="hidden")
             c.itemconfigure("playhead_top", state="hidden")
-            if wc is not None:
-                wc.itemconfigure("playhead", state="hidden")
             return
         x = self._time_to_x(min(max(t, 0.0), self.duration))
-        h = c.winfo_height() or px(24)
+        h = c.winfo_height() or int(c.cget("height"))   # down through the strip
         a = px(5)
         c.coords("playhead", x, a, x, h)
         c.coords("playhead_top", x - a, 0, x + a, 0, x, a + px(1))
         c.itemconfigure("playhead", state="normal")
         c.itemconfigure("playhead_top", state="normal")
-        if wc is not None:
-            wc.coords("playhead", x, 0, x, wc.winfo_height())
-            wc.itemconfigure("playhead", state="normal")
 
     def _x_to_time(self, x):
         # Rounds to a whole second (.000) -- a drag is only pixel-precise,
@@ -5457,6 +5441,9 @@ class LosslessVideoApp(_BaseTk):
         buttons move: the handle and the video only move once it is
         dragged, so a click on it leaves both (and its exact time) alone."""
         if not self.input_path:
+            return
+        if self._cut_player_on and self._strip_on and event.y >= self._strip_y0:
+            self._wave_click(event)
             return
         sx = self._time_to_x(self.start_sec)
         ex = self._time_to_x(self.end_sec)
