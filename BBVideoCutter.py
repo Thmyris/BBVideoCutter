@@ -8765,24 +8765,14 @@ class LosslessVideoApp(_BaseTk):
 
         self._audio_rebuild_track_rows()
 
-        # ---- footer / finalize
-        footer = tk.Frame(root, bg="#f0f0f0")
-        footer.grid(row=5, column=0, sticky="ew", padx=3, pady=(4, 2))
-        tk.Label(
-            footer,
-            text="Finalize keeps the video stream untouched (stream-copied, lossless). "
-                 "Because the enabled tracks are mixed together and volume-adjusted, "
-                 "the output audio must be re-encoded (AAC) — mixing separate compressed "
-                 "audio streams into one isn't possible without decoding them.",
-            bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left",
-        ).pack(fill="x")
-
+        # ---- finalize
         self.audio_finalize_btn = tk.Button(
             root, text="Save enabled tracks together!", height=2,
             font=("Segoe UI", 10, "bold"), command=self._audio_finalize_clicked
         )
         self.audio_finalize_btn.grid(row=6, column=0, sticky="ew", padx=3, pady=(4, 6))
         self.audio_finalize_btn.config(state="disabled")
+        Tooltip(self.audio_finalize_btn, "Only the audio part will be re-encoded.")
 
         targets = [self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner]
         if self.audio_player is not None:
