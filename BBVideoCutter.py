@@ -6771,9 +6771,8 @@ class LosslessVideoApp(_BaseTk):
             header,
             text="Drop video files whose name contains one or more cut ranges, e.g. "
                  "\"clip [00.00.00-00.00.17] [01.10-01.25].mp4\". "
-                 "MM.SS and HH.MM.SS are both accepted, and [-43.-51] / [-27] count from the end "
-                 "(see below). Each bracket creates its own lossless clip. "
-                 "Scenes added on the Cut tab are listed here too.",
+                 "MM.SS and HH.MM.SS are both accepted. Each bracket creates its own lossless clip. "
+                 "Scenes added from the Cut tab are listed here too.",
             bg="#f0f0f0", anchor="w", wraplength=px(850), justify="left",
         ).pack(side="left", fill="x", expand=True)
 
