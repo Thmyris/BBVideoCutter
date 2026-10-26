@@ -1,2 +1,4 @@
 # The RNNoise model is read as-is: keep its bytes (no CRLF conversion).
 *.rnnn -text
+# Shell scripts run on Linux, where a CR at a line's end breaks them.
+*.sh text eol=lf

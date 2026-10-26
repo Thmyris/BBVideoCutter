@@ -8,9 +8,10 @@ which swaps in what differs there:
 - Xlib told to expect threads, before Tk opens its window;
 - the mouse wheel: X11 sends it as Button-4/5, passed on as <MouseWheel>;
 - a field color Tk only knows on Windows, and deep-filter's file name;
-- restarting after a git pull (sh instead of PowerShell); a built copy
-  offers the release page instead of updating itself, the release's
-  builds being Windows ones.
+- restarting after a git pull (sh instead of PowerShell); the Linux build
+  (release/build/build_linux.sh) offers the release page instead of
+  updating itself, and gives the programs it runs the system's
+  libraries, not its own.
 The Windows build leaves this file out (--exclude-module bbvc_linux in
 release\\build's build scripts).
 """
@@ -24,6 +25,9 @@ import sys
 import tkinter as tk
 
 app = None   # BBVideoCutter's module, once installed
+
+# The Linux build's file on a release (build_linux.sh makes it).
+LINUX_ASSET = "BBVideoCutter-Linux-x86_64.tar.gz"
 
 # mpv options for every player, over the app's own.
 MPV_OPTIONS = {
@@ -48,6 +52,7 @@ def install(module):
     global app
     app = module
     _init_x11_threads()
+    _restore_library_path()
     module.FIELD_BG = "#ffffff"
     module._CHROME_BG["#ffffff"] = "field"
     module.DEEP_FILTER_EXE = "deep-filter"
@@ -70,6 +75,21 @@ def _init_x11_threads():
         ctypes.CDLL("libX11.so.6").XInitThreads()
     except (OSError, AttributeError):
         pass
+
+
+def _restore_library_path():
+    """The built app (PyInstaller) starts with LD_LIBRARY_PATH pointing at
+    its own bundled libraries, and the programs it runs (the system's
+    ffmpeg, the restart's sh) would load those instead of their own. The
+    app itself is not affected by the change: the loader read the variable
+    when it started."""
+    if not getattr(sys, "frozen", False):
+        return
+    orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig is not None:
+        os.environ["LD_LIBRARY_PATH"] = orig
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
 
 
 # ---- the player -----------------------------------------------------------
@@ -221,7 +241,8 @@ def _wrap_start_update(cls):
         # Run from source, git pull updates it as on Windows.
         if app.running_built_app():
             self._update_offer_page(
-                release, "This copy can't update itself: the release's builds are for Windows.")
+                release, "The Linux build can't update itself yet: the new version is "
+                f"{LINUX_ASSET} on the release's page.")
             return
         real(self, release)
 

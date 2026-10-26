@@ -16,11 +16,15 @@ The fastest and the most stable video editor for your simple video editing needs
 
 ## Download
 
-Two builds on the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/latest)** page:
+On the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/latest)** page:
 
 - **`BBVideoCutter-Setup.exe`** — Windows installer.
 - **`BBVideoCutter-Portable.zip`** — extract and run
   `BBVideoCutter.exe`, no install.
+- **`BBVideoCutter-Linux-x86_64.tar.gz`** — Linux, [beta](#linux-beta):
+  extract and run `BBVideoCutter/BBVideoCutter`. Needs `ffmpeg` and
+  `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and glibc 2.38
+  or newer (Ubuntu 24.04 or later). It doesn't update itself yet.
 
 ## Features
 
@@ -101,6 +105,11 @@ installer):
 Drop `ffmpeg.exe`/`ffprobe.exe`, `libmpv-2.dll` and `deep-filter.exe`
 into `release/build/` first to bundle them. The RNNoise model is always
 bundled.
+
+Linux: `sh release/build/build_linux.sh` (run on Linux; needs
+`python3-tk python3-venv`) → `release/BBVideoCutter-Linux-x86_64.tar.gz`.
+A Linux `deep-filter` (and `ffmpeg`/`ffprobe`) in `release/build/` gets
+bundled; libmpv is always the system's.
 
 ## License
 

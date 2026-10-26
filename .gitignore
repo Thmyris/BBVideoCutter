@@ -14,6 +14,7 @@ release/build/installer_output/
 # as GitHub Releases instead of tracking in git
 release/BBVideoCutter-Setup.exe
 release/BBVideoCutter-Portable.zip
+release/BBVideoCutter-Linux-x86_64.tar.gz
 
 # ffmpeg/ffprobe binaries used only for bundling into the build, not part
 # of the source itself
@@ -23,6 +24,10 @@ release/build/ffprobe.exe
 release/build/libmpv-2.dll
 # DeepFilterNet (the Audio tab's Medium / Extreme noise reduction), likewise
 release/build/deep-filter.exe
+# The same programs for the Linux build (build_linux.sh)
+release/build/ffmpeg
+release/build/ffprobe
+release/build/deep-filter
 
 # Local tooling config
 .claude/
