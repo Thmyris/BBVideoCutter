@@ -4273,7 +4273,7 @@ class LosslessVideoApp(_BaseTk):
         # %S: the text being inserted (or deleted).
         time_chars = (self.register(lambda s: all(c in "0123456789:." for c in s)), "%S")
         start_radio = tk.Radiobutton(
-            time_row, text="Start:", variable=self.handle_var, value="start",
+            time_row, text="Cut Start:", variable=self.handle_var, value="start",
             bg="#f0f0f0", command=lambda: self._set_active_handle("start"))
         start_radio.pack(side="left")
         Tooltip(start_radio, "Shortcut: I sets the start at the frame on screen")
@@ -4284,7 +4284,7 @@ class LosslessVideoApp(_BaseTk):
         self.start_entry.bind("<FocusOut>", lambda e: self._on_start_entry())
 
         end_radio = tk.Radiobutton(
-            time_row, text="End:", variable=self.handle_var, value="end",
+            time_row, text="Cut End:", variable=self.handle_var, value="end",
             bg="#f0f0f0", command=lambda: self._set_active_handle("end"))
         end_radio.pack(side="left")
         Tooltip(end_radio, "Shortcut: O sets the end at the frame on screen")

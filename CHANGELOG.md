@@ -38,6 +38,8 @@ app's update box shows as "What's new").
   the step buttons. It no longer jumps the video and the playhead to it,
   or rounds an exact time like `00:00:01.250` to the nearest second.
   Dragging the handle still moves it and shows its frame.
+- **Cut tab:** the Start / End fields are labelled "Cut Start:" and
+  "Cut End:", so they read as the cut's limits, not the playhead.
 
 ### Project and docs
 
