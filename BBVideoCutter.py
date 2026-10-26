@@ -1043,18 +1043,12 @@ UPDATE_PAGE_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 UPDATE_CHECK_INTERVAL = 24 * 3600     # seconds between the automatic checks
 UPDATE_SETUP_ASSET = "BBVideoCutter-Setup.exe"        # what an installed copy downloads
 UPDATE_PORTABLE_ASSET = "BBVideoCutter-Portable.zip"  # what a portable copy downloads
-# The repository is private for now, and GitHub tells an app without a
-# login nothing about a private repository's releases. Until it's public,
-# this stands in for GitHub's answer: a version 1.1 with nothing to
-# download. Set it to None then.
-FAKE_LATEST_RELEASE = {
-    "tag_name": "v1.1",
-    "html_url": UPDATE_PAGE_URL,
-    "body": "A stand-in release: the repository is private for now, so the app can't ask "
-            "GitHub about its releases yet and pretends version 1.1 is out. It has nothing "
-            "to download.",
-    "assets": [],
-}
+# A stand-in for GitHub's answer, to try the update box without a real
+# release, e.g. {"tag_name": "v1.1", "html_url": UPDATE_PAGE_URL,
+# "body": "What's new...", "assets": []}. None: GitHub is asked. (GitHub
+# tells an app without a login nothing about a private repository's
+# releases, so until the repository is public the check finds nothing.)
+FAKE_LATEST_RELEASE = None
 
 
 def version_tuple(text):
