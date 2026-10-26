@@ -2418,8 +2418,8 @@ class PlayerAudioControls:
 
 
 class Tooltip:
-    """A hint shown under a widget once the mouse has rested on it for a
-    moment, gone when the mouse leaves or clicks. It is a label placed in
+    """A hint shown just under the mouse pointer once it has rested on a
+    widget for a moment, gone when the mouse leaves or clicks. It is a label placed in
     the widget's window rather than a window of its own, so it can never
     take the focus. text is a string or a function returning one (for a
     hint that follows the widget's state). Light colors, themed like any
@@ -2431,14 +2431,22 @@ class Tooltip:
         self.text = text
         self._after_id = None
         self.label = None
+        self._pointer = None    # (x_root, y_root) of the mouse, from its events
         widget.tooltip = self
         widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Motion>", self._track, add="+")
         for sequence in ("<Leave>", "<ButtonPress>", "<Destroy>"):
             widget.bind(sequence, self.hide, add="+")
 
     def _schedule(self, event=None):
         self.hide()
+        self._track(event)
         self._after_id = self.widget.after(self.DELAY_MS, self.show)
+
+    def _track(self, event=None):
+        # Where the mouse rests when the hint comes up; a shown hint stays put.
+        if event is not None and self.label is None:
+            self._pointer = (event.x_root, event.y_root)
 
     def show(self):
         self._after_id = None
@@ -2453,10 +2461,16 @@ class Tooltip:
                               highlightcolor="#828790")
         self.label.update_idletasks()
         w, h = self.label.winfo_reqwidth(), self.label.winfo_reqheight()
-        x = self.widget.winfo_rootx() - root.winfo_rootx()
-        y = self.widget.winfo_rooty() - root.winfo_rooty() + self.widget.winfo_height() + px(3)
-        if y + h > root.winfo_height():          # no room below: above it
-            y = self.widget.winfo_rooty() - root.winfo_rooty() - h - px(3)
+        if self._pointer is not None:
+            # Just below the pointer's arrow; no room below: just above it.
+            x = self._pointer[0] - root.winfo_rootx()
+            top = self._pointer[1] - root.winfo_rooty()
+            below, above = top + px(20), top - h - px(4)
+        else:    # shown without a mouse event: under the widget
+            x = self.widget.winfo_rootx() - root.winfo_rootx()
+            top = self.widget.winfo_rooty() - root.winfo_rooty()
+            below, above = top + self.widget.winfo_height() + px(3), top - h - px(3)
+        y = below if below + h <= root.winfo_height() else above
         x = max(0, min(x, root.winfo_width() - w))
         self.label.place(x=x, y=max(0, y))
 
