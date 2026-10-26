@@ -6815,21 +6815,6 @@ class LosslessVideoApp(_BaseTk):
             self.bulk_preview_btn.pack(pady=(10, 2))
             self.bulk_tree.bind("<Double-Button-1>", self._bulk_tree_double_click)
 
-        footer = tk.Frame(root, bg="#f0f0f0")
-        footer.grid(row=2, column=0, sticky="ew", padx=3, pady=(4, 2))
-        tk.Label(
-            footer,
-            text="Bracket rule: 3 dot-separated numbers = HH.MM.SS, 2 numbers = MM.SS. "
-                 "Multiple brackets create multiple clips. A seconds typo such as 01.25.272 "
-                 "is normalized to 01.25.27. Files without a valid bracket are skipped.\n"
-                 "Last minute: [-43.-51] cuts second 43 to second 51 of the last minute that "
-                 "has them. Example: in a 20:10 long video, 20:51 is past the end, so it cuts "
-                 "19:43 - 19:51. In a 20:55 long video it cuts 20:43 - 20:51.\n"
-                 "To the end: [-27] cuts from second 27 of the last minute that has it to the "
-                 "end of the video. Example: in a 20:10 long video it cuts 19:27 - 20:10.",
-            bg="#f0f0f0", fg="#555555", wraplength=px(850), justify="left",
-        ).pack(fill="x")
-
         self.bulk_btn = tk.Button(
             root, text="Start Bulk Cut!", height=2,
             font=("Segoe UI", 10, "bold"), command=self._bulk_start_clicked,
