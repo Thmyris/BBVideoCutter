@@ -1349,6 +1349,9 @@ DARK_MENU = {
     "selectcolor": DARK["text"],  # the Dark mode / overwrite check marks
 }
 
+# A list or field's background, themed to the dark field.
+FIELD_BG = "SystemWindow"
+
 # Light chrome backgrounds. A widget whose background is one of these is
 # part of the chrome and gets themed; any other background (black, #1e1e1e,
 # #2a2a2a...) is a content area and is left alone, text colors included.
@@ -1872,6 +1875,9 @@ class VideoPlayer:
     # Extra mpv options for every player; the tests use {"ao": "null"} so
     # nothing is heard.
     extra_options = {}
+    # mpv options another platform needs, over the ones below (see the end
+    # of this file).
+    platform_options = {}
     OBSERVED = ("time-pos", "pause", "duration", "eof-reached", "container-fps", "path",
                 "track-list", "aid", "chapter-list")
 
@@ -1917,6 +1923,7 @@ class VideoPlayer:
             sub_auto="no", audio_file_auto="no",
             volume=self.volume, mute="yes" if self.muted else "no",
         )
+        options.update(self.platform_options)
         options.update(self.options)
         options.update(self.extra_options)
         self.mpv = mpv.MPV(**options)
@@ -2753,8 +2760,8 @@ class FileTable:
         # Rows without their thumbnail yet keep its room, so the names
         # don't shift when it comes.
         self.blank = tk.PhotoImage(width=thumb_size[0], height=thumb_size[1])
-        # In the field's color: SystemWindow is themed to the dark field.
-        self.empty_lbl = tk.Label(self.frame, text=empty_text, bg="SystemWindow", fg="#777777",
+        # In the field's color: FIELD_BG is themed to the dark field.
+        self.empty_lbl = tk.Label(self.frame, text=empty_text, bg=FIELD_BG, fg="#777777",
                                   anchor="w", font=("Segoe UI", 10))
         self.tree.bind("<ButtonPress-1>", self._press)
         self.tree.bind("<B1-Motion>", self._motion)
@@ -8860,7 +8867,7 @@ class LosslessVideoApp(_BaseTk):
         tracks_scrollbar = ttk.Scrollbar(tracks_list)
         tracks_scrollbar.grid(row=0, column=1, sticky="ns")
         self.audio_tracks_canvas = tk.Canvas(
-            tracks_list, bg="SystemWindow", highlightthickness=0,
+            tracks_list, bg=FIELD_BG, highlightthickness=0,
             yscrollcommand=tracks_scrollbar.set
         )
         self.audio_tracks_canvas.grid(row=0, column=0, sticky="nsew")
@@ -8873,7 +8880,7 @@ class LosslessVideoApp(_BaseTk):
             command=self._audio_auto_balance_clicked)
         self.audio_balance_btn.pack(pady=2)
 
-        self.audio_tracks_inner = tk.Frame(self.audio_tracks_canvas, bg="SystemWindow")
+        self.audio_tracks_inner = tk.Frame(self.audio_tracks_canvas, bg=FIELD_BG)
         self._audio_tracks_inner_window = self.audio_tracks_canvas.create_window(
             (0, 0), window=self.audio_tracks_inner, anchor="nw"
         )
@@ -9091,7 +9098,7 @@ class LosslessVideoApp(_BaseTk):
             placeholder = tk.Label(
                 self.audio_tracks_inner,
                 text="(drag & drop a video here, or click the video area above)",
-                bg="SystemWindow", fg="#777777", anchor="w", font=("Segoe UI", 10),
+                bg=FIELD_BG, fg="#777777", anchor="w", font=("Segoe UI", 10),
             )
             placeholder.pack(fill="x", padx=px(10), pady=px(8))
             placeholder.drop_target_register(DND_FILES)
@@ -9107,7 +9114,7 @@ class LosslessVideoApp(_BaseTk):
 
             tk.Checkbutton(
                 top, variable=track["enabled_var"], bg="#f0f0f0",
-                activebackground="#f0f0f0", selectcolor="SystemWindow",
+                activebackground="#f0f0f0", selectcolor=FIELD_BG,
                 command=lambda t=track: self._audio_track_toggled(t),
             ).pack(side="left")
 
@@ -9142,7 +9149,7 @@ class LosslessVideoApp(_BaseTk):
 
             mono_box = tk.Checkbutton(
                 top, text="Mono", variable=track["mono_var"], bg="#f0f0f0",
-                activebackground="#f0f0f0", selectcolor="SystemWindow",
+                activebackground="#f0f0f0", selectcolor=FIELD_BG,
                 state="disabled" if track["channels"] < 2 else "normal",
                 command=self._audio_maybe_restart_playback,
             )
@@ -10253,6 +10260,13 @@ class LosslessVideoApp(_BaseTk):
         elif paths:
             messagebox.showwarning("Unsupported file",
                                     "That doesn't look like a supported video file.")
+
+
+# What differs on Linux lives in bbvc_linux.py, which swaps it in here. The
+# Windows build leaves that file out (--exclude-module bbvc_linux).
+if sys.platform.startswith("linux"):
+    import bbvc_linux
+    bbvc_linux.install(sys.modules[__name__])
 
 
 if __name__ == "__main__":

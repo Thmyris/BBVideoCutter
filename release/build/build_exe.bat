@@ -100,6 +100,7 @@ python -m PyInstaller ^
     --hidden-import mpv ^
     --exclude-module numpy ^
     --exclude-module yaml ^
+    --exclude-module bbvc_linux ^
     %BUNDLE% ^
     --noconfirm ^
     "..\..\BBVideoCutter.py"
