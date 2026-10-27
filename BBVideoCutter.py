@@ -6947,9 +6947,11 @@ class LosslessVideoApp(_BaseTk):
         return f"mostly lossless -- {secs:.2f}s re-encoded near the cut edges (via {encoder})"
 
     def _saved_ask_open(self, text, path, tab):
-        """The success message for a saved video, asking whether to open it
-        here: Yes opens it on tab (0 Cut, 3 Crop/Rotate, 4 Audio)."""
-        if not messagebox.askyesno("Done", f"{text}\n\nOpen the new video in the editor?"):
+        """The success message for a saved video, then a second one asking
+        whether to open it here: Yes opens it on tab (0 Cut, 3 Crop/Rotate,
+        4 Audio)."""
+        messagebox.showinfo("Done", text)
+        if not messagebox.askyesno("Open in the editor?", "Open the new video in the editor?"):
             return
         self._ensure_tab_built(tab)
         self.notebook.select(tab)
