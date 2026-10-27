@@ -37,7 +37,9 @@ app's update box shows as "What's new").
     Cut tab's last step button (3 min >) cut off at the window's edge,
     as Linux's font is wider (the step buttons now narrow until their
     row fits); the Crop/Rotate tab's rotate buttons, wider on Linux,
-    pushed the Zoom controls off the window; the window's class was Tk's
+    pushed the Zoom controls off the window, and at the default window
+    width the Zoom "Fit" button was cut off (that row now tightens up
+    when it doesn't fit); the window's class was Tk's
     default ("Tk"), so docks didn't match it to the app's menu entry and
     icon.
 

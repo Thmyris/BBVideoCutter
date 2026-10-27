@@ -8422,7 +8422,8 @@ class LosslessVideoApp(_BaseTk):
 
         # Turn the picture clockwise, on top of however the file already
         # shows it. The saved video comes out turned the same way.
-        tk.Label(edit_row, text="Rotate ↻:", bg="#f0f0f0").pack(side="left", padx=(18, 2))
+        rotate_lbl = tk.Label(edit_row, text="Rotate ↻:", bg="#f0f0f0")
+        rotate_lbl.pack(side="left", padx=(18, 2))
         self.resize_rotate_buttons = {}
         # The picked one is tinted, edged in blue and bold, like the Cut
         # tab's picked marker. Sized in pixels for "270°" in bold, so the
@@ -8453,9 +8454,12 @@ class LosslessVideoApp(_BaseTk):
         )
         self.resize_zoom_lbl.pack(side="left", padx=2)
         tk.Button(edit_row, text="+", width=3, command=self._resize_zoom_in).pack(side="left")
-        tk.Button(edit_row, text="Fit", command=self._resize_zoom_reset).pack(
-            side="left", padx=(6, 2)
-        )
+        fit_btn = tk.Button(edit_row, text="Fit", command=self._resize_zoom_reset)
+        fit_btn.pack(side="left", padx=(6, 2))
+        self._resize_edit_row = (edit_row, rotate_lbl, zoom_lbl, fit_btn)
+        self._resize_edit_compact = False
+        self._resize_edit_full_width = None
+        controls.bind("<Configure>", lambda e: self._fit_resize_edit_row(), add="+")
 
         # Precise crop entry: type the four corner coordinates directly.
         # These are overwritten automatically whenever the crop changes via
@@ -9484,6 +9488,30 @@ class LosslessVideoApp(_BaseTk):
         )
         self._resize_update_labels()
         self._redraw_resize_canvas()
+
+    def _fit_resize_edit_row(self):
+        """The Aspect / Rotate / Zoom row, compact when it doesn't fit the
+        window (a wider font, e.g. Linux's): smaller gaps, the Aspect button
+        and the rotate buttons only as wide as their text. Otherwise its
+        right end (Fit) would be cut off."""
+        row, rotate_lbl, zoom_lbl, fit_btn = self._resize_edit_row
+        room = row.master.winfo_width()
+        if room < 2:
+            return   # not laid out yet
+        if not self._resize_edit_compact:
+            self._resize_edit_full_width = row.winfo_reqwidth()
+        compact = self._resize_edit_full_width > room
+        if compact == self._resize_edit_compact:
+            return
+        self._resize_edit_compact = compact
+        gap = px(6) if compact else 18
+        rotate_lbl.pack_configure(padx=(gap, 2))
+        zoom_lbl.pack_configure(padx=(gap, 2))
+        fit_btn.pack_configure(padx=(2 if compact else 6, 2))
+        self.resize_aspect_btn.configure(width=0 if compact else len("Aspect: Freeform ▾") + 2)
+        bold = self._marker_fonts()[1]
+        for btn in self.resize_rotate_buttons.values():
+            btn.configure(width=bold.measure("270°") + px(4 if compact else 14))
 
     def _resize_highlight_rotate_button(self):
         font, bold = self._marker_fonts()
