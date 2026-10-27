@@ -4538,17 +4538,16 @@ class LosslessVideoApp(_BaseTk):
 
         # Mirrored round the middle, like the markers' row above: back
         # (−3 min ... −1 s) on the left, forward (+1 s ... +3 min) on the
-        # right, the amount on each button. step_buttons keeps the order
-        # 1 s back, 1 s forward, 5 s back, ... 3 min forward.
+        # right, evenly spaced, the amount on each button. step_buttons keeps
+        # the order 1 s back, 1 s forward, 5 s back, ... 3 min forward.
         amounts = (("1 s", 1), ("5 s", 5), ("30 s", 30), ("3 min", 180))
         made = {}
         for sign, order in ((-1, reversed(amounts)), (1, amounts)):
-            for i, (text, secs) in enumerate(order):
+            for text, secs in order:
                 b = tk.Button(step_row, text=("−" if sign < 0 else "+") + text,
                               width=self.STEP_BUTTON_CHARS,
                               command=lambda s=sign * secs: self._nudge(s))
-                gap = px(16) if sign > 0 and i == 0 else 1   # between back and forward
-                b.pack(side="left", padx=(gap, 1))
+                b.pack(side="left", padx=1)
                 amount = text.replace(" ", "")
                 Tooltip(b, lambda a=("-" if sign < 0 else "+") + amount: step_tip(a))
                 made[sign, secs] = b
