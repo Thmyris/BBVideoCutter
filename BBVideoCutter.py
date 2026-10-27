@@ -7064,12 +7064,12 @@ class LosslessVideoApp(_BaseTk):
 
         return f"{part('start', slide[0])}, {part('end', slide[1])}"
 
-    def _saved_ask_open(self, text, path, tab):
+    def _saved_ask_open(self, text, path, tab, what="new video"):
         """The success message for a saved video, then a second one asking
-        whether to open it here: Yes opens it on tab (0 Cut, 3 Crop/Rotate,
-        4 Audio)."""
+        whether to open it (what: "newly cut video", ...) here: Yes opens it
+        on tab (0 Cut, 3 Crop/Rotate, 4 Audio)."""
         messagebox.showinfo("Done", text)
-        if not messagebox.askyesno("Open in the editor?", "Open the new video in the editor?"):
+        if not messagebox.askyesno("Open in the editor?", f"Open the {what} in the editor?"):
             return
         self._ensure_tab_built(tab)
         self.notebook.select(tab)
@@ -7084,7 +7084,7 @@ class LosslessVideoApp(_BaseTk):
             how = self._describe_cut_result(result)
             self.status_lbl.config(text=f"Saved ({how}): {info}")
             self._saved_ask_open(f"Cut successful.\n\nScene saved to:\n{info}\n\n"
-                                 f"Cutting Mode: {how[0].upper()}{how[1:]}", info, 0)
+                                 f"Cutting Mode: {how[0].upper()}{how[1:]}", info, 0, "newly cut video")
         else:
             self.status_lbl.config(text="Cut failed")
             messagebox.showerror("ffmpeg error",
