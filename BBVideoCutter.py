@@ -4766,6 +4766,9 @@ class LosslessVideoApp(_BaseTk):
         self.end_entry.bind("<FocusOut>", lambda e: self._on_end_entry())
         for event in ("<Button-1>", "<<TraverseIn>>"):
             self.end_entry.bind(event, lambda e: self._field_picks_marker("end"), add="+")
+        # Zero in both before a video is open (they are disabled till then).
+        for entry in (self.start_entry, self.end_entry):
+            entry.insert(0, seconds_to_ffmpeg_time(0))
         self._marker_pickers = {}      # "start" / "end" -> its picker widget
         self._marker_styled = None     # what _style_marker_picker last styled for
         self.cut_mark_buttons = ()
