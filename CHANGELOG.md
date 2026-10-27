@@ -82,13 +82,10 @@ app's update box shows as "What's new").
   step buttons (1 sec ... 3 min) smaller. Each button row now shrinks its
   buttons only when that row itself runs out of room.
 
-- **Cut tab (to try out):** the small Cut Start / Cut End radio buttons
-  were easy to miss. Each label and its time field now sit in one card,
-  and the picked card is tinted, edged in blue and its name bold (Cut
-  Start and Cut End alike); picking one moves nothing in the row.
-  Options > Cut Start / Cut End picker offers two other looks: big radio
-  circles, and outlined boxes (the picked one blue and underlined). The
-  choice is remembered.
+- **Cut tab:** the small Cut Start / Cut End radio buttons were easy to
+  miss. Each label and its time field now sit in one card, and the
+  picked card is tinted, edged in blue and its name bold (Cut Start and
+  Cut End alike); picking one moves nothing in the row.
 - **Crop/Rotate tab:** the picked rotate button (0° / 90° / 180° / 270°)
   looks like the Cut tab's picked marker: tinted, edged in blue and bold,
   instead of pressed in. Picking one moves none of them.

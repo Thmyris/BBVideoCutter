@@ -3593,10 +3593,6 @@ class LosslessVideoApp(_BaseTk):
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", True)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
-        # Cut tab: how Cut Start / Cut End is picked (MARKER_PICKERS).
-        picker = self.settings.get("marker_picker", "cards")
-        self.marker_picker_var = tk.StringVar(
-            value=picker if picker in dict(self.MARKER_PICKERS) else "cards")
         # The scissors in front of Cut Start / Cut End (SCISSORS).
         scissors = self.settings.get("marker_scissors", self.SCISSORS[0][0])
         self.scissors_var = tk.StringVar(
@@ -3808,11 +3804,6 @@ class LosslessVideoApp(_BaseTk):
             variable=self.show_frame_buttons_var,
             command=self._on_show_frame_buttons_toggled,
         )
-        picker_menu = tk.Menu(options_menu, tearoff=0)
-        for value, label in self.MARKER_PICKERS:
-            picker_menu.add_radiobutton(label=label, variable=self.marker_picker_var, value=value,
-                                        command=self._on_marker_picker_changed)
-        options_menu.add_cascade(label="Cut Start / Cut End picker", menu=picker_menu, underline=20)
         # These menus' choices have letters (MENU_LETTERS): Alt+O, the
         # menu's own letter, then a choice's letter switches to it.
         scissors_menu = tk.Menu(options_menu, tearoff=0)
@@ -4768,7 +4759,6 @@ class LosslessVideoApp(_BaseTk):
         for event in ("<Button-1>", "<<TraverseIn>>"):
             self.end_entry.bind(event, lambda e: self._field_picks_marker("end"), add="+")
         self._marker_pickers = {}      # "start" / "end" -> its picker widget
-        self._marker_dots = None       # the big radio circles: ((dark?, scissors), off image, on image)
         self._marker_styled = None     # what _style_marker_picker last styled for
         self.cut_mark_buttons = ()
         if self.cut_player is not None:
@@ -5547,15 +5537,7 @@ class LosslessVideoApp(_BaseTk):
     def _set_active_handle(self, which):
         self.active_handle = which
 
-    # ---- Cut Start / Cut End picker (Options > Cut Start / Cut End picker) --
-    # Ways to show it, to try side by side: (setting value, menu label).
-    MARKER_PICKERS = (
-        ("big_radio", "Big radio circles"),
-        ("cards", "Field cards"),
-        ("outlined_boxes", "Outlined boxes, underlined"),
-    )
-    # Drawn on a canvas (with Pillow).
-    CANVAS_PICKERS = ("outlined_boxes",)
+    # ---- Cut Start / Cut End picker: a card round each time field ----------
 
     # Options > Scissors on Cut Start / Cut End: (setting value, menu
     # label). Each is drawn with Pillow (_scissors_image): a font's glyph
@@ -5636,10 +5618,6 @@ class LosslessVideoApp(_BaseTk):
             if a is not None:
                 a.draw_speaker()
 
-    def _on_marker_picker_changed(self):
-        self._save_option("marker_picker", self.marker_picker_var)
-        self._build_marker_picker()
-
     def _field_picks_marker(self, which):
         """Clicking into a time field picks its marker."""
         if self.handle_var.get() != which:
@@ -5647,8 +5625,8 @@ class LosslessVideoApp(_BaseTk):
             self._set_active_handle(which)
 
     def _build_marker_picker(self):
-        """(Re)makes the Cut Start / Cut End picker, in front of each time
-        field, in the layout chosen in Options."""
+        """(Re)makes the Cut Start / Cut End picker: a card holding each
+        time field (_make_marker_card)."""
         row = self.start_entry.master
         # The fields back in the row on their own (the cards hold them).
         self.start_entry.pack_forget()
@@ -5658,29 +5636,9 @@ class LosslessVideoApp(_BaseTk):
         self._marker_pickers = {}
         self.start_entry.pack(in_=row, side="left", padx=(2, 20))
         self.end_entry.pack(in_=row, side="left", padx=2)
-        layout = self.marker_picker_var.get()
-        if layout in ("big_radio",) + self.CANVAS_PICKERS and not PIL_AVAILABLE:
-            layout = "cards"   # the others are drawn with Pillow
-        self._marker_layout = layout
         for which, entry, key in (("start", self.start_entry, "I"), ("end", self.end_entry, "O")):
             name = "Cut Start" if which == "start" else "Cut End"
-            if layout in self.CANVAS_PICKERS:
-                w = tk.Canvas(row, highlightthickness=0, borderwidth=0, cursor="hand2")
-                w.pack(side="left", padx=(0, px(4)), before=entry)
-                w.bind("<Button-1>", lambda e, m=which: self._pick_marker(m))
-            elif layout == "cards":
-                w = self._make_marker_card(which, name, entry)
-            else:   # big_radio
-                if self._marker_dots is None or self._marker_dots[0] != (self._is_dark(),
-                                                                         self._scissors_style()):
-                    self._marker_dots = self._make_marker_dots()
-                off, on = self._marker_dots[1:]
-                w = tk.Radiobutton(entry.master, text=" " + name + ":", variable=self.handle_var,
-                                   value=which, command=lambda m=which: self._set_active_handle(m),
-                                   indicatoron=0, image=off, selectimage=on, compound="left",
-                                   relief="flat", offrelief="flat", overrelief="flat", borderwidth=0,
-                                   padx=px(2), cursor="hand2")
-                w.pack(side="left", padx=(0, px(2)), before=entry)
+            w = self._make_marker_card(which, name, entry)
             Tooltip(w, f"Shortcut: {key} sets the {which} at the frame on screen")
             self._marker_pickers[which] = w
         if self.cut_mark_buttons:
@@ -5765,11 +5723,10 @@ class LosslessVideoApp(_BaseTk):
             path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         return path if os.path.isfile(path) else None
 
-    def _scissors_image(self, style, color, pil=False):
+    def _scissors_image(self, style, color):
         """The scissors (SCISSORS) as a smooth image as tall as a line of the
-        pickers' text, in color (a glyph in its own colours keeps them): a
-        PhotoImage, or with pil the Pillow image. Kept, so each is made
-        once."""
+        cards' text, in color (a glyph in its own colours keeps them). Kept,
+        so each is made once."""
         size = self._marker_fonts()[1].metrics("linespace")
         key = (style, color, size)
         cache = self.__dict__.setdefault("_scissors_cache", {})
@@ -5781,9 +5738,8 @@ class LosslessVideoApp(_BaseTk):
                 img = self._paint_scissors_glyph(style, color, big)
             if img is None:
                 img = self._paint_scissors_drawn("closed" if style == "closed" else "open", color, big)
-            img = img.reduce(k)
-            cache[key] = (img, ImageTk.PhotoImage(img, master=self))
-        return cache[key][0 if pil else 1]
+            cache[key] = ImageTk.PhotoImage(img.reduce(k), master=self)
+        return cache[key]
 
     def _paint_scissors_glyph(self, style, color, big):
         """A glyph style on a big x big image, fitted inside it with a little
@@ -5829,91 +5785,11 @@ class LosslessVideoApp(_BaseTk):
 
     def _on_scissors_changed(self):
         self._save_option("marker_scissors", self.scissors_var)
-        self._marker_dots = None
         self._build_marker_picker()
-
-    def _rounded(self, w, h, r, fill, outline=None, line=0):
-        """A rounded rectangle w x h (radius r) as a smooth image, drawn 4x
-        large and scaled down. Kept, so each look is made once."""
-        key = (w, h, r, fill, outline, line)
-        cache = self.__dict__.setdefault("_rounded_cache", {})
-        if key not in cache:
-            from PIL import ImageDraw
-            k = 4
-            img = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
-            ImageDraw.Draw(img).rounded_rectangle(
-                (0, 0, w * k - 1, h * k - 1), radius=r * k, fill=fill, outline=outline,
-                width=line * k)
-            cache[key] = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
-        return cache[key]
-
-    def _draw_marker_canvases(self, layout, picked, dark):
-        """Draws the canvas pickers (the outlined boxes) for the pick and the
-        theme."""
-        panel = DARK["panel"] if dark else "#f0f0f0"
-        dim = DARK["text_dim"] if dark else "#555555"
-        accent = DARK["select"] if dark else "#0078d4"
-        font, bold = self._marker_fonts()
-        h = max(self.start_entry.winfo_reqheight(), font.metrics("linespace") + px(8))
-        if layout == "outlined_boxes":
-            # A box outline round each; the picked one's outline, text and
-            # underline in the accent colour.
-            edge = DARK["border"] if dark else "#8c8c8c"
-            radius = 0
-            style = self._scissors_style()
-            for which, c in self._marker_pickers.items():
-                name = "Cut Start" if which == "start" else "Cut End"
-                on = which == picked
-                tw = bold.measure(name)
-                # The scissors, then the name from a fixed place.
-                scissors = self._scissors_image(style, accent if on else dim) if style else None
-                lead = scissors.width() + px(4) if scissors else 0
-                width = lead + tw + px(24)
-                c.configure(width=width, height=h, background=panel)
-                c.delete("all")
-                c.create_image(0, 0, anchor="nw", image=self._rounded(
-                    width, h, radius, panel, accent if on else edge, max(1, px(1))))
-                x = px(12)
-                if scissors:
-                    c.create_image(x, h // 2 - px(1), anchor="w", image=scissors)
-                c.create_text(x + lead, h // 2 - px(1), text=name, font=bold if on else font,
-                              fill=accent if on else dim, anchor="w")
-                if on:
-                    c.create_image(x + lead, h - px(5), anchor="nw",
-                                   image=self._rounded(tw, px(2), px(1), accent))
 
     # The picked marker's card edge and bar, Cut Start and Cut End alike: the
     # blue of the End handle.
     MARKER_PICKED_COLOR = "#1a73e8"
-
-    def _make_marker_dots(self):
-        """The big radio circles: (off, on) images in the current theme,
-        drawn 4x large and scaled down so their edges are smooth."""
-        from PIL import ImageDraw
-        size, big = px(16), px(16) * 4
-        ring = "#d0d0d4" if self._is_dark() else "#333333"
-        dot = DARK["select"] if self._is_dark() else "#0078d4"
-        images = []
-        for picked in (False, True):
-            img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            edge = max(4, big // 10)
-            d.ellipse((edge // 2, edge // 2, big - 1 - edge // 2, big - 1 - edge // 2),
-                      outline=dot if picked else ring, width=edge)
-            if picked:
-                m = big * 27 // 100
-                d.ellipse((m, m, big - 1 - m, big - 1 - m), fill=dot)
-            img = img.resize((size, size), Image.LANCZOS)
-            style = self._scissors_style()
-            if style:   # the scissors after the circle, in the same image
-                text = DARK["text"] if self._is_dark() else "#000000"
-                cut = self._scissors_image(style, dot if picked else text, pil=True)
-                both = Image.new("RGBA", (size + px(4) + cut.width, max(size, cut.height)), (0, 0, 0, 0))
-                both.paste(img, (0, (both.height - size) // 2))
-                both.paste(cut, (size + px(4), (both.height - cut.height) // 2))
-                img = both
-            images.append(ImageTk.PhotoImage(img, master=self))
-        return ((self._is_dark(), style), *images)
 
     def _style_marker_picker(self):
         """Colours the picker for the picked marker and the theme. Also runs
@@ -5921,45 +5797,29 @@ class LosslessVideoApp(_BaseTk):
         pickers = getattr(self, "_marker_pickers", None)
         if not pickers:
             return
-        layout = self.marker_picker_var.get()
         picked = self.handle_var.get()
         dark = self._is_dark()
         # A handle drag sets the pick on every mouse move: only real changes.
-        if (layout, picked, dark, pickers.get("start")) == self._marker_styled:
+        if (picked, dark, pickers.get("start")) == self._marker_styled:
             return
-        self._marker_styled = (layout, picked, dark, pickers.get("start"))
+        self._marker_styled = (picked, dark, pickers.get("start"))
         panel = DARK["panel"] if dark else "#f0f0f0"
-        layout = getattr(self, "_marker_layout", layout)   # without Pillow: the cards
-        if layout in self.CANVAS_PICKERS:
-            self._draw_marker_canvases(layout, picked, dark)
-        elif layout == "cards":
-            text = DARK["text"] if dark else "#000000"
-            for which, card in pickers.items():
-                bar, label = card._bbvc_parts
-                on = which == picked
-                bg = self._theme_color("tabbox_selected") if on else panel
-                edge = (self.MARKER_PICKED_COLOR if on
-                        else DARK["border"] if dark else "#c4c4c8")
-                for w in (card, label):
-                    self._configure_light(w, background=bg)
-                self._configure_light(card, highlightbackground=edge, highlightcolor=edge)
-                self._configure_light(bar, background=self.MARKER_PICKED_COLOR if on else bg)
-                font, bold = self._marker_fonts()
-                self._configure_light(label, foreground=text, font=bold if on else font)
-                if self._scissors_style():
-                    label.configure(image=self._scissors_image(
-                        self._scissors_style(), self.MARKER_PICKED_COLOR if on else text))
-        elif layout == "big_radio" and self._marker_dots is not None:
-            if self._marker_dots[0] != (dark, self._scissors_style()):
-                self._marker_dots = self._make_marker_dots()   # the circles follow the theme
-            off, on = self._marker_dots[1:]
-            fg = DARK["text"] if dark else "SystemButtonText"
-            for w in pickers.values():
-                if isinstance(w, tk.Radiobutton):
-                    self._configure_light(w, image=off, selectimage=on, background=panel,
-                                          activebackground=panel, selectcolor=panel,
-                                          foreground=fg, activeforeground=fg,
-                                          highlightbackground=panel)
+        text = DARK["text"] if dark else "#000000"
+        for which, card in pickers.items():
+            bar, label = card._bbvc_parts
+            on = which == picked
+            bg = self._theme_color("tabbox_selected") if on else panel
+            edge = (self.MARKER_PICKED_COLOR if on
+                    else DARK["border"] if dark else "#c4c4c8")
+            for w in (card, label):
+                self._configure_light(w, background=bg)
+            self._configure_light(card, highlightbackground=edge, highlightcolor=edge)
+            self._configure_light(bar, background=self.MARKER_PICKED_COLOR if on else bg)
+            font, bold = self._marker_fonts()
+            self._configure_light(label, foreground=text, font=bold if on else font)
+            if self._scissors_style():
+                label.configure(image=self._scissors_image(
+                    self._scissors_style(), self.MARKER_PICKED_COLOR if on else text))
 
     def _nudge(self, delta_seconds):
         if not self.input_path:
