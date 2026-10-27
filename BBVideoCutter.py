@@ -4335,6 +4335,9 @@ class LosslessVideoApp(_BaseTk):
         self._drag_target = None
         self._grab_x = None   # where a handle was pressed, until it is dragged
         self._scrub_seek_id = None   # the seek waiting for the dragging mouse to rest
+        # While a handle is dragged the video shows its frame, but the
+        # playhead stays: where the player was, to go back to on release.
+        self._handle_preview = None
 
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", pady=(2, 1))
@@ -4841,10 +4844,13 @@ class LosslessVideoApp(_BaseTk):
             self._update_preview(self.end_sec)
             self.status_lbl.config(text="The player can't open this file; showing still frames")
             return
-        playing = not player.paused
+        playing, pos = not player.paused, player.position
+        if self._handle_preview is not None:
+            # A handle's frame is shown for the drag only: the controls
+            # keep showing where the player is and goes back to.
+            playing, pos = self._handle_preview["playing"], self._handle_preview["pos"]
         self.cut_play_btn.config(text="❚❚ Pause" if playing else "▶ Play")
         self._update_cut_audio_controls()
-        pos = player.position
         if pos is None:
             self.cut_time_lbl.config(text="")
         else:
@@ -5394,7 +5400,8 @@ class LosslessVideoApp(_BaseTk):
             c.create_line(0, 0, 0, 0, fill=PLAYHEAD_COLOR, width=px(2), tags=("playhead",))
             c.create_polygon(0, 0, 0, 0, 0, 0, fill=PLAYHEAD_COLOR, outline="",
                              tags=("playhead_top",))
-            self._move_playhead(self.cut_player.position)
+            back = self._handle_preview   # a dragged handle's frame is on screen
+            self._move_playhead(self.cut_player.position if back is None else back["pos"])
         r = px(7)
         c.create_oval(sx - r, y - r, sx + r, y + r, fill=self._theme_color("slider_start"),
                       outline="")
@@ -5439,8 +5446,10 @@ class LosslessVideoApp(_BaseTk):
         it, only a press on a handle drags the handle; anywhere else moves
         the playhead (scrubbing), and I / O then set the range.
         A press on a handle only grabs it, and makes it the one the step
-        buttons move: the handle and the video only move once it is
-        dragged, so a click on it leaves both (and its exact time) alone."""
+        buttons move: the handle only moves once it is dragged, so a click
+        on it leaves it (and its exact time) alone. While it is dragged the
+        video shows its frame, but the playhead stays, and on release the
+        video goes back there."""
         if not self.input_path:
             return
         if self._cut_player_on and self._strip_on and event.y >= self._strip_y0:
@@ -5485,28 +5494,38 @@ class LosslessVideoApp(_BaseTk):
             self.end_sec = max(t, self.start_sec)
             self.handle_var.set("end")
             self.active_handle = "end"
+        if self._cut_player_on and self._handle_preview is None:
+            player = self.cut_player
+            self._handle_preview = {"pos": player.position, "playing": not player.paused}
+            self._cut_scrubbing = True    # the playhead stays put
+            player.set_paused(True)
         self._sync_entries()
         self._redraw_slider()
         if self._cut_player_on:
-            self._scrub_seek_later(t)
+            self._scrub_seek_later(t, self._drag_target)
         else:
             self._update_preview(t)
 
     SCRUB_REST_MS = 50
 
-    def _scrub_seek_later(self, t):
+    def _scrub_seek_later(self, t, edge=None):
         """While a playhead or handle is dragged, the video follows once the
-        mouse rests (SCRUB_REST_MS), with a keyframe seek (fast); release
-        shows the exact frame. A seek on every mouse move kept the player
-        decoding frames that were stale a moment later, and the drag
-        stuttered."""
+        mouse rests (SCRUB_REST_MS). A seek on every mouse move kept the
+        player decoding frames that were stale a moment later, and the drag
+        stuttered. The playhead's is a keyframe seek (fast; release shows
+        the exact frame); a handle's (edge "start" / "end") shows exactly
+        the frame the cut starts or ends with."""
         self._cancel_scrub_seek()
-        self._scrub_seek_id = self.after(self.SCRUB_REST_MS, self._scrub_seek_now, t)
+        self._scrub_seek_id = self.after(self.SCRUB_REST_MS, self._scrub_seek_now, t, edge)
 
-    def _scrub_seek_now(self, t):
+    def _scrub_seek_now(self, t, edge):
         self._scrub_seek_id = None
-        if self._cut_player_on:
+        if not self._cut_player_on:
+            return
+        if edge is None:
             self.cut_player.seek(t, exact=False)
+        else:
+            self._cut_show_time(t, edge)
 
     def _cancel_scrub_seek(self):
         if self._scrub_seek_id is not None:
@@ -5517,16 +5536,20 @@ class LosslessVideoApp(_BaseTk):
         self._cancel_scrub_seek()   # release seeks itself, exactly
         target, self._drag_target = self._drag_target, None
         clicked, self._grab_x = self._grab_x is not None, None
+        back, self._handle_preview = self._handle_preview, None
+        if back is not None:
+            # A handle was dragged: the video goes back to the playhead.
+            self._cut_scrubbing = False
+            if self._cut_player_on and back["pos"] is not None:
+                self.cut_player.seek(back["pos"])
+                if back["playing"]:
+                    self.cut_player.set_paused(False)
+            return
         if not self._cut_player_on or target is None or clicked:
             return
         if target == "playhead":
             self._cut_scrubbing = False
             self.cut_player.seek(self._cut_scrub_time)
-        else:
-            if target == "start":
-                self._cut_show_time(self.start_sec, "start")
-            else:
-                self._cut_show_time(self.end_sec, "end")
 
     def _x_to_exact_time(self, x):
         frac = (x - self._track_x0) / max(1, (self._track_x1 - self._track_x0))
