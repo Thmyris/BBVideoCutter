@@ -110,6 +110,9 @@ app's update box shows as "What's new").
   balls too). Six more volume looks: macOS, iOS, Material 3, glossy ball,
   blue ball with a soft shadow, and a soft (neumorphic) knob.
 
+- After a save (Cut, Combine, Crop/Rotate, Audio), the "saved" message
+  also asks "Open the new video in the editor?". Yes opens it right away:
+  on the tab it was saved from (Combine's on the Cut tab).
 - The tab boxes on the menu bar are in a new order: Cut, Bulk Cut,
   Combine, Crop/Rotate, Audio (Bulk Cut and Combine swapped places).
 

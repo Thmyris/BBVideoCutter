@@ -7204,13 +7204,24 @@ class LosslessVideoApp(_BaseTk):
             return f"fully re-encoded ({secs:.2f}s, via {encoder}) -- cut is shorter than one keyframe interval"
         return f"mostly lossless -- {secs:.2f}s re-encoded near the cut edges (via {encoder})"
 
+    def _saved_ask_open(self, text, path, tab):
+        """The success message for a saved video, asking whether to open it
+        here: Yes opens it on tab (0 Cut, 3 Crop/Rotate, 4 Audio)."""
+        if not messagebox.askyesno("Done", f"{text}\n\nOpen the new video in the editor?"):
+            return
+        self._ensure_tab_built(tab)
+        self.notebook.select(tab)
+        load = {0: self._load_video_for_cut, 3: self._load_video_for_resize,
+                4: self._load_video_for_audio}[tab]
+        load(path)
+
     def _cut_done(self, info, success, result=None):
         self._end_progress("cut")
         self._set_cut_controls_enabled(True)
         if success:
             how = self._describe_cut_result(result)
             self.status_lbl.config(text=f"Saved ({how}): {info}")
-            messagebox.showinfo("Done", f"Scene saved to:\n{info}\n\n{how[0].upper()}{how[1:]}.")
+            self._saved_ask_open(f"Scene saved to:\n{info}\n\n{how[0].upper()}{how[1:]}.", info, 0)
         else:
             self.status_lbl.config(text="Cut failed")
             messagebox.showerror("ffmpeg error",
@@ -7827,8 +7838,8 @@ class LosslessVideoApp(_BaseTk):
         self.combine_btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved{' (re-encoded)' if reencoded else ''}: {info}")
-            messagebox.showinfo("Done", f"Combined video saved to:\n{info}"
-                                + (f"\n\n{reencoded}" if reencoded else ""))
+            self._saved_ask_open(f"Combined video saved to:\n{info}"
+                                 + (f"\n\n{reencoded}" if reencoded else ""), info, 0)
         else:
             self.status_lbl.config(text="Combine failed")
             messagebox.showerror("ffmpeg error", info)
@@ -9692,7 +9703,7 @@ class LosslessVideoApp(_BaseTk):
         self._resize_update_rotate_save_btn()
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
-            messagebox.showinfo("Done", f"{what} video saved to:\n{info}")
+            self._saved_ask_open(f"{what} video saved to:\n{info}", info, 3)
         else:
             verb = "rotation" if what == "Rotated" else "crop"
             self.status_lbl.config(text=f"{verb.capitalize()} failed")
@@ -10809,7 +10820,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_finalize_btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
-            messagebox.showinfo("Done", f"Mixed video saved to:\n{info}")
+            self._saved_ask_open(f"Mixed video saved to:\n{info}", info, 4)
         else:
             self.status_lbl.config(text="Audio mix failed")
             messagebox.showerror("ffmpeg error", "The audio mix failed.\n\n" + info)
