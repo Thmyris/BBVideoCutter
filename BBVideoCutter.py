@@ -4657,12 +4657,20 @@ class LosslessVideoApp(_BaseTk):
         time_box.pack(fill="x", pady=(1, 2))
         time_row = time_box.center
         if self.cut_player is not None:
-            replay = tk.Button(time_box.right, text="Replay selected scene", command=self._cut_replay,
+            # A child of controls, so it can move to a row of its own under
+            # this one when both don't fit (_fit_cut_time_row).
+            replay = tk.Button(controls, text="Replay selected scene", command=self._cut_replay,
                                state="disabled")
-            replay.pack(side="right")
+            replay.pack(in_=time_box.right, side="right")
             Tooltip(replay, "Plays from Start to End once, then stops")
             self.cut_transport_buttons.append(replay)
             self.cut_replay_btn = replay
+            self._replay_row = tk.Frame(controls, bg="#f0f0f0")
+            replay.tkraise()   # above the row made after it
+            self._replay_own_row = False
+            self._cut_time_box = time_box
+            for w in (time_box, time_box.center):
+                w.bind("<Configure>", lambda e: self._fit_cut_time_row(), add="+")
         self.handle_var = tk.StringVar(value="end")
         # The time fields take only what a time is made of: digits, ":" and
         # "." (the milliseconds); a typed or pasted letter is refused.
@@ -4980,6 +4988,27 @@ class LosslessVideoApp(_BaseTk):
             for w in (row, row.left, row.right):
                 w.bind("<Configure>", lambda e: self._fit_cut_buttons(), add="+")
         self.cut_step_row.master.bind("<Configure>", lambda e: self._fit_cut_buttons(), add="+")
+
+    def _fit_cut_time_row(self):
+        """Replay selected scene at the right of the Start / End row, or on
+        a row of its own under it when both don't fit the window (a wider
+        font, e.g. Linux's), where it would cover Mark Cut End."""
+        box, replay = self._cut_time_box, self.cut_replay_btn
+        room = box.winfo_width()
+        if room < 2:
+            return   # not laid out yet
+        need = (box.left.winfo_reqwidth() + box.center.winfo_reqwidth() + replay.winfo_reqwidth()
+                + 2 * px(CenteredRow.GAP))
+        own = need > room
+        if own == self._replay_own_row:
+            return
+        self._replay_own_row = own
+        if own:
+            self._replay_row.pack(fill="x", after=box, pady=(0, 2))
+            replay.pack(in_=self._replay_row, side="right")
+        else:
+            replay.pack(in_=box.right, side="right")
+            self._replay_row.pack_forget()
 
     def _fit_cut_buttons(self):
         if not getattr(self, "_cut_fit_base", None):
