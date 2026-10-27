@@ -65,13 +65,14 @@ app's update box shows as "What's new").
   buttons only when that row itself runs out of room.
 
 - **Cut tab (to try out):** Options > Cut Start / Cut End picker offers
-  eleven ways to show the Cut Start / Cut End choice, since the small
+  twelve ways to show the Cut Start / Cut End choice, since the small
   radio buttons were easy to miss: A radio buttons (as before), B toggle
   buttons, C toggle buttons in the slider handles' colours, D radio
   buttons with the picked time field framed in its handle's colour, E big
   radio circles, F Windows themed radio buttons, G a segmented control,
   H underlined tabs, I pill chips with a tick, J a Start / End switch,
-  K field cards. Plus "Clicking a time field picks its marker". The
+  K field cards, L outlined tabs (a pill outline round each, the picked
+  one underlined). Plus "Clicking a time field picks its marker". The
   choice is remembered.
 
 ### Project and docs
