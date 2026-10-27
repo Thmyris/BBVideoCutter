@@ -5521,7 +5521,7 @@ class LosslessVideoApp(_BaseTk):
         else:
             self._update_preview(t)
 
-    SCRUB_REST_MS = 50
+    SCRUB_REST_MS = 5
 
     def _scrub_seek_later(self, t, edge=None):
         """While a playhead or handle is dragged, the video follows once the

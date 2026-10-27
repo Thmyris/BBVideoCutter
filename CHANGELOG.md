@@ -44,7 +44,7 @@ app's update box shows as "What's new").
   naming the marker it moves right now and by how much, e.g.
   "Cut start -> -5s".
 - **Cut tab:** while you drag the playhead or a handle, the video shows
-  the frame once the mouse rests for 50 ms, instead of seeking on every
+  the frame once the mouse rests for 5 ms, instead of seeking on every
   mouse move. Letting go still shows the exact frame.
 - **Cut tab:** dragging a Start / End handle no longer moves the
   playhead. The video previews the handle's frame while you drag, and
