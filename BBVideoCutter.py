@@ -3161,13 +3161,10 @@ class LosslessVideoApp(_BaseTk):
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", True)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
-        # Cut tab: how Cut Start / Cut End is picked (MARKER_PICKERS), and
-        # whether clicking into a time field picks its marker too.
+        # Cut tab: how Cut Start / Cut End is picked (MARKER_PICKERS).
         picker = self.settings.get("marker_picker", "big_radio")
         self.marker_picker_var = tk.StringVar(
             value=picker if picker in dict(self.MARKER_PICKERS) else "big_radio")
-        self.field_picks_marker_var = tk.BooleanVar(
-            value=bool(self.settings.get("field_picks_marker", False)))
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -3375,12 +3372,6 @@ class LosslessVideoApp(_BaseTk):
         for value, label in self.MARKER_PICKERS:
             picker_menu.add_radiobutton(label=label, variable=self.marker_picker_var, value=value,
                                         command=self._on_marker_picker_changed)
-        picker_menu.add_separator()
-        picker_menu.add_checkbutton(
-            label="Clicking a time field picks its marker",
-            variable=self.field_picks_marker_var,
-            command=lambda: self._save_option("field_picks_marker", self.field_picks_marker_var),
-        )
         options_menu.add_cascade(label="Cut Start / Cut End picker", menu=picker_menu)
 
         help_menu = self._add_menu_bar_menu("Help")
@@ -4299,14 +4290,18 @@ class LosslessVideoApp(_BaseTk):
         self.start_entry.pack(side="left", padx=(2, 20))
         self.start_entry.bind("<Return>", lambda e: self._on_start_entry())
         self.start_entry.bind("<FocusOut>", lambda e: self._on_start_entry())
-        self.start_entry.bind("<FocusIn>", lambda e: self._field_picks_marker("start"))
+        # A click (or Tab) into a field picks its marker. Not <FocusIn>: that
+        # also comes when the window is switched back to.
+        for event in ("<Button-1>", "<<TraverseIn>>"):
+            self.start_entry.bind(event, lambda e: self._field_picks_marker("start"), add="+")
 
         self.end_entry = tk.Entry(time_row, width=13, justify="center",
                                   validate="key", validatecommand=time_chars)
         self.end_entry.pack(side="left", padx=2)
         self.end_entry.bind("<Return>", lambda e: self._on_end_entry())
         self.end_entry.bind("<FocusOut>", lambda e: self._on_end_entry())
-        self.end_entry.bind("<FocusIn>", lambda e: self._field_picks_marker("end"))
+        for event in ("<Button-1>", "<<TraverseIn>>"):
+            self.end_entry.bind(event, lambda e: self._field_picks_marker("end"), add="+")
         self._marker_pickers = {}      # "start" / "end" -> its picker widget
         self._marker_dots = None       # the big radio circles: (dark?, off image, on image)
         self._marker_styled = None     # what _style_marker_picker last styled for
@@ -5056,8 +5051,8 @@ class LosslessVideoApp(_BaseTk):
         self._build_marker_picker()
 
     def _field_picks_marker(self, which):
-        """Clicking into a time field picks its marker, when that option is on."""
-        if self.field_picks_marker_var.get() and self.handle_var.get() != which:
+        """Clicking into a time field picks its marker."""
+        if self.handle_var.get() != which:
             self.handle_var.set(which)
             self._set_active_handle(which)
 

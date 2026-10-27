@@ -69,8 +69,10 @@ app's update box shows as "What's new").
   Cut Start / Cut End picker offers three other looks: K field cards
   (each label and its time field in one card, the picked card tinted),
   L outlined tabs (a pill outline round each, the picked one blue and
-  underlined) and M the same with square boxes. Plus "Clicking a time
-  field picks its marker". The choice is remembered.
+  underlined) and M the same with square boxes. The choice is remembered.
+- **Cut tab:** clicking (or tabbing) into the Cut Start or Cut End time
+  field picks that marker for the step buttons, so after typing a time
+  you can fine-tune it with the step buttons straight away.
 
 ### Project and docs
 
