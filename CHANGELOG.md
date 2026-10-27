@@ -53,6 +53,8 @@ app's update box shows as "What's new").
 - **Cut tab:** dragging a Start / End handle sets its time to the
   millisecond, like dragging the playhead, instead of snapping to whole
   seconds.
+- **Cut tab:** the step buttons keep the milliseconds: 5 sec back from
+  `00:00:12.345` is `00:00:07.345`, not `00:00:07.000`.
 
 ### Project and docs
 

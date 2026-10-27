@@ -5007,13 +5007,12 @@ class LosslessVideoApp(_BaseTk):
     def _nudge(self, delta_seconds):
         if not self.input_path:
             return
-        # Button nudges always land on a whole second (.000), so the same
-        # presses always give the same time.
+        # A nudge keeps the milliseconds: -5s from 12.345 is 7.345.
         if self.active_handle == "start":
-            self.start_sec = float(round(max(0.0, min(self.start_sec + delta_seconds, self.end_sec))))
+            self.start_sec = round(max(0.0, min(self.start_sec + delta_seconds, self.end_sec)), 3)
             self._cut_show_time(self.start_sec, "start")
         else:
-            self.end_sec = float(round(min(self.duration, max(self.end_sec + delta_seconds, self.start_sec))))
+            self.end_sec = round(min(self.duration, max(self.end_sec + delta_seconds, self.start_sec)), 3)
             self._cut_show_time(self.end_sec, "end")
         self._sync_entries()
         self._redraw_slider()
