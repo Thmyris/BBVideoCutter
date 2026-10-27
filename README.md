@@ -89,8 +89,8 @@ Scripts in `release/build/` (PyInstaller onedir + optional Inno Setup
 installer):
 
 - `build_exe.bat` — quick test build
-- `build_setup.bat` — installer → `release/BBVideoCutter-Win-Setup.exe`
-- `build_portable.bat` — zip → `release/BBVideoCutter-Win-Portable.zip`
+- `build_setup.bat` — installer → `release/BBVideoCutter-Setup.exe`
+- `build_portable.bat` — zip → `release/BBVideoCutter-Portable.zip`
 - `build_portable_and_setup.bat` — both of the above, one after the
   other, from a single app build
 
