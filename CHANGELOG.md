@@ -8,7 +8,9 @@ app's update box shows as "What's new").
 
 - **Updates:** the update box shows the release notes formatted
   (bold, bullets, code) instead of raw Markdown, and a progress window
-  while the app updates itself.
+  while the app updates itself. The updater also finds the Windows files
+  under their future names (`BBVideoCutter-Win-Setup.exe`,
+  `BBVideoCutter-Win-Portable.zip`).
 
 ## v1.1 (2026-10-27)
 
