@@ -3361,10 +3361,6 @@ class LosslessVideoApp(_BaseTk):
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", True)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
-        # The scissors in front of Cut Start / Cut End (SCISSORS).
-        scissors = self.settings.get("marker_scissors", self.SCISSORS[0][0])
-        self.scissors_var = tk.StringVar(
-            value=scissors if scissors in dict(self.SCISSORS) else self.SCISSORS[0][0])
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -3568,15 +3564,6 @@ class LosslessVideoApp(_BaseTk):
             variable=self.show_frame_buttons_var,
             command=self._on_show_frame_buttons_toggled,
         )
-        # Its choices have letters (MENU_LETTERS): Alt+O, S, then a choice's
-        # letter switches to it.
-        scissors_menu = tk.Menu(options_menu, tearoff=0)
-        for letter, (value, label) in zip(self.MENU_LETTERS, self.SCISSORS):
-            scissors_menu.add_radiobutton(label=f"{letter}: {label}", underline=0,
-                                          variable=self.scissors_var, value=value,
-                                          command=self._on_scissors_changed)
-        options_menu.add_cascade(label="Scissors on Cut Start / Cut End", menu=scissors_menu,
-                                 underline=0)
 
         help_menu = self._add_menu_bar_menu("Help")
         help_menu.add_command(label="Check for updates...", command=self._check_for_update)
@@ -5274,37 +5261,15 @@ class LosslessVideoApp(_BaseTk):
 
     # ---- Cut Start / Cut End picker: a card round each time field ----------
 
-    # Options > Scissors on Cut Start / Cut End: (setting value, menu
-    # label). Each is drawn with Pillow (_scissors_image): a font's glyph
-    # (SCISSORS_GLYPHS) or drawn lines; a glyph whose font isn't there is
-    # drawn as "open" instead.
-    SCISSORS = (
-        ("mdl2", "Scissors icon, like the Cut tab box's"),
-        ("black", "Solid scissors ✂"),
-        ("white", "Outlined scissors ✄"),
-        ("blade", "Upper blade scissors ✁"),
-        ("emoji", "Colour emoji scissors"),
-        ("open", "Drawn, blades open"),
-        ("closed", "Drawn, blades closed"),
-        ("none", "None"),
-    )
-    # The glyph styles: (font file on Windows, character, in its own colours).
-    # On Linux the Unicode ones come from DejaVu Sans.
-    SCISSORS_GLYPHS = {
-        "mdl2": ("segmdl2.ttf", "", False),
-        "black": ("seguisym.ttf", "✂", False),
-        "white": ("seguisym.ttf", "✄", False),
-        "blade": ("seguisym.ttf", "✁", False),
-        "emoji": ("seguiemj.ttf", "✂", True),
-    }
+    # The scissors on the Cut Start / Cut End cards: the Cut tab box's glyph
+    # (font file on Windows, character), open on Cut Start, shut on Cut End
+    # (_shut_scissors). Where the font isn't there (Linux) they are drawn.
+    SCISSORS_GLYPH = ("segmdl2.ttf", "\ue8c6")
 
     # The volume sliders' look: (knob (TimeSlider.KNOBS), track width): no
     # knob but a dot under the mouse, a thick track. Their speaker is the
     # Windows 11 one (PlayerAudioControls.draw_speaker).
     VOLUME_LOOK = ("none", 6)
-    # The letters an Options menu gives its choices, in keyboard order:
-    # with the menu open, the letter picks one.
-    MENU_LETTERS = "QWERTYUIOPASDFGHJKLZXCVBNM"
 
     def _style_volume_slider(self, slider):
         slider.set_look(*self.VOLUME_LOOK)
@@ -5361,11 +5326,11 @@ class LosslessVideoApp(_BaseTk):
         # As wide as the name in bold, so bolding the picked one moves
         # nothing (a label with an image is sized in pixels).
         font, bold = self._marker_fonts()
-        if self._scissors_style():
+        if PIL_AVAILABLE:
             # The scissors on the left (_style_marker_picker sets them),
             # the name after them, from a fixed place.
             text = " " + name
-            image = self._scissors_image(self._scissors_style(), "#000000", shut=which == "end")
+            image = self._scissors_image("#000000", shut=which == "end")
             label = tk.Label(card, text=text, cursor="hand2", image=image, compound="left", anchor="w",
                              width=image.width() + bold.measure(text),
                              height=bold.metrics("linespace"))
@@ -5400,44 +5365,30 @@ class LosslessVideoApp(_BaseTk):
             bold.configure(weight="bold")
         return font, bold
 
-    def _scissors_style(self):
-        """The scissors picked in Options, or None: none picked, or no
-        Pillow to draw them."""
-        style = self.scissors_var.get()
-        return style if style != "none" and PIL_AVAILABLE else None
-
     @classmethod
-    def _scissors_font_file(cls, style):
-        """The font file for a glyph style, or None where it isn't there."""
-        file, char, _colour = cls.SCISSORS_GLYPHS[style]
-        if os.name == "nt":
-            path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", file)
-        elif style in ("mdl2", "emoji"):
-            return None   # Windows' own fonts
-        else:
-            path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    def _scissors_font_file(cls):
+        """The scissors glyph's font file, or None where it isn't there
+        (it is Windows' own)."""
+        if os.name != "nt":
+            return None
+        path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", cls.SCISSORS_GLYPH[0])
         return path if os.path.isfile(path) else None
 
-    def _scissors_image(self, style, color, shut=False):
-        """The scissors (SCISSORS) as a smooth image as tall as a line of the
-        cards' text, in color (a glyph in its own colours keeps them). shut:
-        the Cut tab box's scissors ("mdl2") with their blades closed, for
-        Cut End (_shut_scissors). Kept, so each is made once."""
+    def _scissors_image(self, color, shut=False):
+        """The scissors as a smooth image as tall as a line of the cards'
+        text, in color; shut: with their blades closed, for Cut End. Kept,
+        so each is made once."""
         size = self._marker_fonts()[1].metrics("linespace")
-        shut = shut and style == "mdl2"
-        key = (style, color, size, shut)
+        key = (color, size, shut)
         cache = self.__dict__.setdefault("_scissors_cache", {})
         if key not in cache:
             k = SMOOTH_SCALE
             big = size * k
-            img = None
-            if style in self.SCISSORS_GLYPHS and self._scissors_font_file(style):
-                img = self._paint_scissors_glyph(style, color, big)
-                if img is not None and shut:
-                    img = self._shut_scissors(img)
+            img = self._paint_scissors_glyph(color, big) if self._scissors_font_file() else None
+            if img is not None and shut:
+                img = self._shut_scissors(img)
             if img is None:
-                img = self._paint_scissors_drawn("closed" if style == "closed" or shut else "open",
-                                                 color, big)
+                img = self._paint_scissors_drawn("closed" if shut else "open", color, big)
             cache[key] = ImageTk.PhotoImage(img.reduce(k), master=self)
         return cache[key]
 
@@ -5501,12 +5452,12 @@ class LosslessVideoApp(_BaseTk):
         shut.putalpha(out)
         return shut
 
-    def _paint_scissors_glyph(self, style, color, big):
-        """A glyph style on a big x big image, fitted inside it with a little
-        margin, or None if its font can't be drawn with."""
+    def _paint_scissors_glyph(self, color, big):
+        """The scissors glyph on a big x big image, fitted inside it with a
+        little margin, or None if its font can't be drawn with."""
         from PIL import ImageDraw, ImageFont
-        _file, char, colour = self.SCISSORS_GLYPHS[style]
-        path = self._scissors_font_file(style)
+        char = self.SCISSORS_GLYPH[1]
+        path = self._scissors_font_file()
         try:
             font = ImageFont.truetype(path, big)
             box = font.getbbox(char)
@@ -5515,7 +5466,7 @@ class LosslessVideoApp(_BaseTk):
             box = font.getbbox(char)
             img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
             pos = ((big - (box[2] - box[0])) / 2 - box[0], (big - (box[3] - box[1])) / 2 - box[1])
-            ImageDraw.Draw(img).text(pos, char, font=font, fill=color, embedded_color=colour)
+            ImageDraw.Draw(img).text(pos, char, font=font, fill=color)
         except (OSError, ValueError, TypeError):
             return None
         return img if img.getbbox() else None
@@ -5542,10 +5493,6 @@ class LosslessVideoApp(_BaseTk):
             w = 0.06 * s
             d.polygon(((ax + nx * w, ay + ny * w), (ax - nx * w, ay - ny * w), (tx, ty)), fill=color)
         return img
-
-    def _on_scissors_changed(self):
-        self._save_option("marker_scissors", self.scissors_var)
-        self._build_marker_picker()
 
     # The picked marker's card edge and bar, Cut Start and Cut End alike: the
     # blue of the End handle.
@@ -5577,10 +5524,9 @@ class LosslessVideoApp(_BaseTk):
             self._configure_light(bar, background=self.MARKER_PICKED_COLOR if on else bg)
             font, bold = self._marker_fonts()
             self._configure_light(label, foreground=text, font=bold if on else font)
-            if self._scissors_style():
+            if PIL_AVAILABLE:
                 label.configure(image=self._scissors_image(
-                    self._scissors_style(), self.MARKER_PICKED_COLOR if on else text,
-                    shut=which == "end"))
+                    self.MARKER_PICKED_COLOR if on else text, shut=which == "end"))
 
     def _nudge(self, delta_seconds):
         if not self.input_path:
