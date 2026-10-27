@@ -1057,6 +1057,22 @@ def version_tuple(text):
     return tuple(parts)
 
 
+def https_context():
+    """TLS for talking to GitHub: the system's trusted roots plus the
+    standard (Mozilla) set from certifi. Windows adds a root to its store
+    only when its own TLS first needs it, so a machine can lack the one
+    GitHub's chain ends at (Sectigo Root E46, in 2026), and Python, which
+    only reads the store, then can't verify GitHub at all."""
+    import ssl
+    context = ssl.create_default_context()
+    try:
+        import certifi
+        context.load_verify_locations(certifi.where())
+    except (ImportError, OSError, ssl.SSLError):
+        pass   # the system's roots alone
+    return context
+
+
 def fetch_latest_release(timeout=15):
     """The latest release, as GitHub's API describes it: a dict with
     tag_name, html_url, body (the release notes) and assets (name,
@@ -1067,7 +1083,7 @@ def fetch_latest_release(timeout=15):
         "Accept": "application/vnd.github+json",
         "User-Agent": f"BBVideoCutter/{APP_VERSION}",
     })
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout, context=https_context()) as response:
         release = json.loads(response.read().decode("utf-8"))
     if not isinstance(release, dict) or version_tuple(release.get("tag_name")) is None:
         raise ValueError("GitHub's answer names no release version.")
@@ -1096,7 +1112,8 @@ def download_file(url, dest, report=None, timeout=30):
         "User-Agent": f"BBVideoCutter/{APP_VERSION}",
     })
     done = 0
-    with urllib.request.urlopen(request, timeout=timeout) as response, open(dest, "wb") as f:
+    with urllib.request.urlopen(request, timeout=timeout, context=https_context()) as response, \
+            open(dest, "wb") as f:
         total = int(response.headers.get("Content-Length") or 0)
         while True:
             chunk = response.read(1 << 18)

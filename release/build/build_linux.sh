@@ -44,7 +44,7 @@ echo "[1/3] Build dependencies ($VENV)..."
 if [ ! -x "$VENV/bin/python" ]; then
     python3 -m venv "$VENV"
 fi
-"$VENV/bin/python" -m pip install -q --upgrade pyinstaller pillow tkinterdnd2 python-mpv
+"$VENV/bin/python" -m pip install -q --upgrade pyinstaller pillow tkinterdnd2 python-mpv certifi
 
 set -- --add-data "$ROOT/assets/rnnoise/cb.rnnn:."
 if [ -f ffmpeg ] && [ -f ffprobe ]; then

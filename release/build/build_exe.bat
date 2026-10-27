@@ -64,7 +64,7 @@ cd /d "%~dp0"
 
 echo.
 echo [1/3] Installing/updating build dependencies...
-python -m pip install --upgrade pyinstaller pillow tkinterdnd2 python-mpv
+python -m pip install --upgrade pyinstaller pillow tkinterdnd2 python-mpv certifi
 if errorlevel 1 goto :error
 
 echo.
