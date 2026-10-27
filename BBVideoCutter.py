@@ -4475,25 +4475,18 @@ class LosslessVideoApp(_BaseTk):
         if self.cut_player is not None:
             self._build_cut_transport(controls)
 
-        # Start / End in the middle; at the right, under the volume, replay.
-        time_box = CenteredRow(controls, bg="#f0f0f0")
-        time_box.pack(fill="x", pady=(1, 2))
-        time_row = time_box.center
+        # The markers' row, centred and symmetric: Mark Cut Start, the Cut
+        # Start card, Replay (what lies between them), the Cut End card, Mark
+        # Cut End (_build_marker_picker puts them in that order).
+        time_row = tk.Frame(controls, bg="#f0f0f0")
+        time_row.pack(pady=(px(3), px(2)))
+        self.cut_replay_btn = None
         if self.cut_player is not None:
-            # A child of controls, so it can move to a row of its own under
-            # this one when both don't fit (_fit_cut_time_row).
-            replay = tk.Button(controls, text="Replay selected scene", command=self._cut_replay,
+            replay = tk.Button(time_row, text="▶ Replay scene", command=self._cut_replay,
                                state="disabled")
-            replay.pack(in_=time_box.right, side="right")
-            Tooltip(replay, "Plays from Start to End once, then stops")
+            Tooltip(replay, "Plays from Cut Start to Cut End once, then stops")
             self.cut_transport_buttons.append(replay)
             self.cut_replay_btn = replay
-            self._replay_row = tk.Frame(controls, bg="#f0f0f0")
-            replay.tkraise()   # above the row made after it
-            self._replay_own_row = False
-            self._cut_time_box = time_box
-            for w in (time_box, time_box.center):
-                w.bind("<Configure>", lambda e: self._fit_cut_time_row(), add="+")
         self.handle_var = tk.StringVar(value="end")
         # The time fields take only what a time is made of: digits, ":" and
         # "." (the milliseconds); a typed or pasted letter is refused.
@@ -4543,18 +4536,23 @@ class LosslessVideoApp(_BaseTk):
             which = "start" if self.active_handle == "start" else "end"
             return f"Cut {which} -> {step}"
 
-        for label, secs in (("1 sec", 1), ("5 sec", 5), ("30 sec", 30), ("3 min", 180)):
-            tk.Label(step_row, text=f"{label}:", bg="#f0f0f0").pack(side="left", padx=(10, 2))
-            amount = label.replace(" sec", "s").replace(" min", "min")
-            b1 = tk.Button(step_row, text="<", width=self.STEP_BUTTON_CHARS,
-                           command=lambda s=secs: self._nudge(-s))
-            b1.pack(side="left")
-            Tooltip(b1, lambda a=amount: step_tip("-" + a))
-            b2 = tk.Button(step_row, text=">", width=self.STEP_BUTTON_CHARS,
-                           command=lambda s=secs: self._nudge(s))
-            b2.pack(side="left", padx=(0, 4))
-            Tooltip(b2, lambda a=amount: step_tip("+" + a))
-            self.step_buttons += [b1, b2]
+        # Mirrored round the middle, like the markers' row above: back
+        # (−3 min ... −1 s) on the left, forward (+1 s ... +3 min) on the
+        # right, the amount on each button. step_buttons keeps the order
+        # 1 s back, 1 s forward, 5 s back, ... 3 min forward.
+        amounts = (("1 s", 1), ("5 s", 5), ("30 s", 30), ("3 min", 180))
+        made = {}
+        for sign, order in ((-1, reversed(amounts)), (1, amounts)):
+            for i, (text, secs) in enumerate(order):
+                b = tk.Button(step_row, text=("−" if sign < 0 else "+") + text,
+                              width=self.STEP_BUTTON_CHARS,
+                              command=lambda s=sign * secs: self._nudge(s))
+                gap = px(16) if sign > 0 and i == 0 else 1   # between back and forward
+                b.pack(side="left", padx=(gap, 1))
+                amount = text.replace(" ", "")
+                Tooltip(b, lambda a=("-" if sign < 0 else "+") + amount: step_tip(a))
+                made[sign, secs] = b
+        self.step_buttons = [made[sign, secs] for _text, secs in amounts for sign in (-1, 1)]
         self.cut_step_row = step_row
         self._init_cut_button_fit()
 
@@ -4783,11 +4781,12 @@ class LosslessVideoApp(_BaseTk):
     # row fits the window, each row on its own. The Play / Pause button
     # always keeps room for "Pause".
     CUT_BUTTON_EXTRA = (0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.0)
-    # The 1 sec ... 3 min buttons' width in characters. When their row
+    # The −3 min ... +3 min buttons' width in characters. When their row
     # doesn't fit even with no extra (a wider font, e.g. Linux's DejaVu
-    # Sans), they give up characters, down to STEP_BUTTON_MIN_CHARS.
+    # Sans), they give up characters, down to STEP_BUTTON_MIN_CHARS: the
+    # longest text, "−3 min".
     STEP_BUTTON_CHARS = 7
-    STEP_BUTTON_MIN_CHARS = 2
+    STEP_BUTTON_MIN_CHARS = 6
 
     def _init_cut_button_fit(self):
         """Notes each button's own width and padding, and refits on resize."""
@@ -4810,27 +4809,6 @@ class LosslessVideoApp(_BaseTk):
             for w in (row, row.left, row.right):
                 w.bind("<Configure>", lambda e: self._fit_cut_buttons(), add="+")
         self.cut_step_row.master.bind("<Configure>", lambda e: self._fit_cut_buttons(), add="+")
-
-    def _fit_cut_time_row(self):
-        """Replay selected scene at the right of the Start / End row, or on
-        a row of its own under it when both don't fit the window (a wider
-        font, e.g. Linux's), where it would cover Mark Cut End."""
-        box, replay = self._cut_time_box, self.cut_replay_btn
-        room = box.winfo_width()
-        if room < 2:
-            return   # not laid out yet
-        need = (box.left.winfo_reqwidth() + box.center.winfo_reqwidth() + replay.winfo_reqwidth()
-                + 2 * px(CenteredRow.GAP))
-        own = need > room
-        if own == self._replay_own_row:
-            return
-        self._replay_own_row = own
-        if own:
-            self._replay_row.pack(fill="x", after=box, pady=(0, 2))
-            replay.pack(in_=self._replay_row, side="right")
-        else:
-            replay.pack(in_=box.right, side="right")
-            self._replay_row.pack_forget()
 
     def _fit_cut_buttons(self):
         if not getattr(self, "_cut_fit_base", None):
@@ -5355,14 +5333,18 @@ class LosslessVideoApp(_BaseTk):
             w = self._make_marker_card(which, name, entry)
             Tooltip(w, f"Shortcut: {key} sets the {which} at the frame on screen")
             self._marker_pickers[which] = w
+        if self.cut_replay_btn is not None:
+            # Between the cards: it plays what lies between them.
+            self.cut_replay_btn.pack(side="left", padx=px(5), fill="y", after=self._marker_pickers["start"])
         if self.cut_mark_buttons:
-            # Outside the pickers and fields: first and last in the row.
+            # Outside the cards: first and last in the row. All as tall as the
+            # cards (fill y), so the row lines up.
             mark_start, mark_end = self.cut_mark_buttons
             mark_start.pack_forget()
             mark_end.pack_forget()
             others = row.pack_slaves()
-            mark_start.pack(side="left", padx=(0, px(8)), before=others[0])
-            mark_end.pack(side="left", padx=(px(8), 0), after=others[-1])
+            mark_start.pack(side="left", padx=(0, px(5)), fill="y", before=others[0])
+            mark_end.pack(side="left", padx=(px(5), 0), fill="y", after=others[-1])
         self._style_marker_picker()
 
     def _pick_marker(self, which):
@@ -5374,7 +5356,7 @@ class LosslessVideoApp(_BaseTk):
         click anywhere on it (but the field) picks its marker."""
         row = entry.master
         card = tk.Frame(row, highlightthickness=1, borderwidth=0, cursor="hand2")
-        card.pack(side="left", padx=(0, px(10)), before=entry)
+        card.pack(side="left", padx=px(5), before=entry)
         bar = tk.Frame(card, width=px(4))
         bar.pack(side="left", fill="y")
         # As wide as the name in bold, so bolding the picked one moves
