@@ -212,26 +212,45 @@ dialog. The app keeps a reference to each one, marked `# for the tests`:
 |---|---|
 | `app._update_dialog`, `app._update_notes`, `app._update_auto_var` | Update available |
 | `app._search_window_dialog` | Keyframe search window |
-| `app._nice_try_dialog` | Whole-video save refused |
+| `app._refuse_dialog` | A refused save (the whole video, or 0.000 s) |
 | `app._cut_ranges_menu_widget` | The scene list menu |
 
 ```python
-def look():
-    dlg = getattr(app, "_nice_try_dialog", None)
-    if dlg is None:                     # not open yet: try again
-        app.after(50, look)
-        return
-    dlg.update()
-    seen["title"] = dlg.title()
-    ...                                 # read labels, take a picture
-    dlg.destroy()                       # or .invoke() its button
+def try_save():
+    seen, finished = {}, []
+    t0 = time.time()
 
-app.after(50, look)
-app._save_scene_clicked()               # returns once the dialog is closed
+    def look():
+        if finished:                        # this step is over: see below
+            return
+        dlg = getattr(app, "_refuse_dialog", None)
+        if dlg is None:                     # not open yet: try again, for 3 s
+            if time.time() - t0 < 3:
+                app.after(50, look)
+            return
+        dlg.update()
+        seen["title"] = dlg.title()
+        ...                                 # read labels, take a picture
+        dlg.destroy()                       # or .invoke() its button
+
+    app.after(50, look)
+    app._save_scene_clicked()               # returns once the dialog is closed
+    settle(0.1)
+    finished.append(True)
+    return seen
 ```
 
-Give `look` a time limit (stop rescheduling after a few seconds) so a
-dialog that never opens doesn't loop forever. When you add a new dialog to
+- **Time limit:** stop rescheduling after a few seconds, so a dialog that
+  never opens (the case where no box is the right answer) doesn't loop
+  forever.
+- **Stop each step's checker when the step ends** (`finished`). When a step
+  opens no dialog, its `look` is still queued after the step returns. In the
+  next step it finds *that* step's dialog, records into the old `seen` and
+  closes it, so the new step sees nothing and fails. This happened.
+  `after_cancel` on the first id doesn't help, because each reschedule has a
+  new id.
+
+When you add a new dialog to
 the app, store it the same way (`self._x_dialog = dlg  # for the tests`,
 then `None` after `wait_window`).
 
