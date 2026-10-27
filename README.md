@@ -3,6 +3,7 @@
 <h1>BarkBark Lossless Video Cutter</h1>
 
 The fastest and the most stable video editor for your simple video editing needs. Built with ffmpeg and mpv.
+For Windows 10 / 11, and Linux ([beta](#linux-beta)).
 
 [![Latest release](https://img.shields.io/github/v/release/Thmyris/BBVideoCutter?style=for-the-badge&color=2ea043)](https://github.com/Thmyris/BBVideoCutter/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Thmyris/BBVideoCutter/releases/latest)
@@ -30,15 +31,16 @@ On the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/late
   `ffmpeg` and `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and
   glibc 2.38 or newer.
 
-  Neither Linux file updates itself yet.
+  The Linux build tells you when a new version is out, but doesn't
+  install it itself yet.
 
 ## Features
 
-**Cut:** Losslessly cut any video down to the milisecond easily. Cuts are <u>instant</u>, the only bottleneck is the disk write speed.
-
-**Combine:** Join the cut videos together losslessly.
+**Cut:** Losslessly cut any video down to the millisecond easily. Cuts are <u>instant</u>, the only bottleneck is the disk write speed.
 
 **Bulk Cut:** Batch cut hundreds of files with one click.
+
+**Combine:** Join the cut videos together losslessly.
 
 **Crop/Rotate:** Self explanatory.
 
@@ -58,7 +60,7 @@ On the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/late
 ## Running from source
 
 ```
-pip install pillow tkinterdnd2 python-mpv
+pip install pillow tkinterdnd2 python-mpv certifi
 python BBVideoCutter.py
 ```
 
@@ -87,7 +89,7 @@ Debian/Ubuntu:
 ```
 sudo apt install ffmpeg libmpv2 python3-tk python3-venv
 python3 -m venv ~/bbvc-venv
-~/bbvc-venv/bin/pip install pillow tkinterdnd2 python-mpv
+~/bbvc-venv/bin/pip install pillow tkinterdnd2 python-mpv certifi
 ~/bbvc-venv/bin/python BBVideoCutter.py
 ```
 
