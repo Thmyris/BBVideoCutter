@@ -3161,6 +3161,13 @@ class LosslessVideoApp(_BaseTk):
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", True)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
+        # Cut tab: how Cut Start / Cut End is picked (MARKER_PICKERS), and
+        # whether clicking into a time field picks its marker too.
+        picker = self.settings.get("marker_picker", "radio")
+        self.marker_picker_var = tk.StringVar(
+            value=picker if picker in dict(self.MARKER_PICKERS) else "radio")
+        self.field_picks_marker_var = tk.BooleanVar(
+            value=bool(self.settings.get("field_picks_marker", False)))
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -3364,6 +3371,17 @@ class LosslessVideoApp(_BaseTk):
             variable=self.show_frame_buttons_var,
             command=self._on_show_frame_buttons_toggled,
         )
+        picker_menu = tk.Menu(options_menu, tearoff=0)
+        for value, label in self.MARKER_PICKERS:
+            picker_menu.add_radiobutton(label=label, variable=self.marker_picker_var, value=value,
+                                        command=self._on_marker_picker_changed)
+        picker_menu.add_separator()
+        picker_menu.add_checkbutton(
+            label="Clicking a time field picks its marker",
+            variable=self.field_picks_marker_var,
+            command=lambda: self._save_option("field_picks_marker", self.field_picks_marker_var),
+        )
+        options_menu.add_cascade(label="Cut Start / Cut End picker", menu=picker_menu)
 
         help_menu = self._add_menu_bar_menu("Help")
         help_menu.add_command(label="Check for updates...", command=self._check_for_update)
@@ -3444,6 +3462,9 @@ class LosslessVideoApp(_BaseTk):
                 activebackground=self._theme_color("menubar_hover"),
             )
             menu.configure(dropdown)
+            for sub in menu.winfo_children():   # submenus, e.g. Options' picker
+                if isinstance(sub, tk.Menu):
+                    sub.configure(dropdown)
         self._style_tab_boxes()
 
     # The tabs, as boxes on the menu bar: (box label, the tab's full name,
@@ -3946,6 +3967,7 @@ class LosslessVideoApp(_BaseTk):
         self._style_menu_bar()
         self._set_title_bar_dark(self._is_dark())
         self._redraw_slider()  # canvas items drawn with theme colors
+        self._style_marker_picker()
         if getattr(self, "cut_mute_btn", None) is not None:
             self._draw_cut_speaker()
         if getattr(self, "resize_audio", None) is not None:
@@ -4041,6 +4063,12 @@ class LosslessVideoApp(_BaseTk):
             selectforeground="#ffffff", insertcolor=d["text"], arrowcolor=d["text"],
         )
         style.map(".", foreground=[("disabled", d["text_disabled"])])
+        # The Cut tab's themed radio buttons (Options > Cut Start / Cut End
+        # picker): clam's indicator is white otherwise.
+        style.configure("TRadiobutton", indicatorbackground=d["field"], indicatorforeground=d["text"],
+                        upperbordercolor=d["border"], lowerbordercolor=d["border"])
+        style.map("TRadiobutton", indicatorbackground=[("pressed", d["panel"]), ("selected", d["field"])],
+                  background=[("active", d["panel"])])
         style.configure("TNotebook", background=d["panel"], bordercolor=d["border"])
         style.configure("TNotebook.Tab", background=d["button"], foreground=d["text"],
                         bordercolor=d["border"], lightcolor=d["button"])
@@ -4272,27 +4300,27 @@ class LosslessVideoApp(_BaseTk):
         # "." (the milliseconds); a typed or pasted letter is refused.
         # %S: the text being inserted (or deleted).
         time_chars = (self.register(lambda s: all(c in "0123456789:." for c in s)), "%S")
-        start_radio = tk.Radiobutton(
-            time_row, text="Cut Start:", variable=self.handle_var, value="start",
-            bg="#f0f0f0", command=lambda: self._set_active_handle("start"))
-        start_radio.pack(side="left")
-        Tooltip(start_radio, "Shortcut: I sets the start at the frame on screen")
         self.start_entry = tk.Entry(time_row, width=13, justify="center",
                                     validate="key", validatecommand=time_chars)
         self.start_entry.pack(side="left", padx=(2, 20))
         self.start_entry.bind("<Return>", lambda e: self._on_start_entry())
         self.start_entry.bind("<FocusOut>", lambda e: self._on_start_entry())
+        self.start_entry.bind("<FocusIn>", lambda e: self._field_picks_marker("start"))
 
-        end_radio = tk.Radiobutton(
-            time_row, text="Cut End:", variable=self.handle_var, value="end",
-            bg="#f0f0f0", command=lambda: self._set_active_handle("end"))
-        end_radio.pack(side="left")
-        Tooltip(end_radio, "Shortcut: O sets the end at the frame on screen")
         self.end_entry = tk.Entry(time_row, width=13, justify="center",
                                   validate="key", validatecommand=time_chars)
         self.end_entry.pack(side="left", padx=2)
         self.end_entry.bind("<Return>", lambda e: self._on_end_entry())
         self.end_entry.bind("<FocusOut>", lambda e: self._on_end_entry())
+        self.end_entry.bind("<FocusIn>", lambda e: self._field_picks_marker("end"))
+        # The fields' own frame, for the layout that frames the picked one.
+        self._field_light_frame = {opt: str(self.start_entry.cget(opt)) for opt in
+                                   ("highlightthickness", "highlightbackground", "highlightcolor")}
+        self._marker_pickers = {}      # "start" / "end" -> its picker widget
+        self._marker_dots = None       # the big radio circles: (dark?, off image, on image)
+        self._marker_styled = None     # what _style_marker_picker last styled for
+        self._build_marker_picker()
+        self.handle_var.trace_add("write", lambda *a: self._style_marker_picker())
 
         step_row = tk.Frame(controls, bg="#f0f0f0")
         step_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
@@ -5020,6 +5048,139 @@ class LosslessVideoApp(_BaseTk):
 
     def _set_active_handle(self, which):
         self.active_handle = which
+
+    # ---- Cut Start / Cut End picker (Options > Cut Start / Cut End picker) --
+    # Ways to show it, to try side by side: (setting value, menu label).
+    MARKER_PICKERS = (
+        ("radio", "A: Radio buttons (as before)"),
+        ("toggle", "B: Toggle buttons"),
+        ("toggle_color", "C: Toggle buttons in the handle colours"),
+        ("radio_field", "D: Radio buttons, picked time field framed in its handle colour"),
+        ("big_radio", "E: Big radio circles"),
+        ("ttk_radio", "F: Windows themed radio buttons"),
+    )
+
+    def _on_marker_picker_changed(self):
+        self._save_option("marker_picker", self.marker_picker_var)
+        self._build_marker_picker()
+
+    def _field_picks_marker(self, which):
+        """Clicking into a time field picks its marker, when that option is on."""
+        if self.field_picks_marker_var.get() and self.handle_var.get() != which:
+            self.handle_var.set(which)
+            self._set_active_handle(which)
+
+    def _build_marker_picker(self):
+        """(Re)makes the Cut Start / Cut End picker, in front of each time
+        field, in the layout chosen in Options."""
+        for w in self._marker_pickers.values():
+            w.destroy()
+        self._marker_pickers = {}
+        layout = self.marker_picker_var.get()
+        if layout == "big_radio" and not PIL_AVAILABLE:
+            layout = "radio"   # the circles are drawn with Pillow
+        for which, entry, key in (("start", self.start_entry, "I"), ("end", self.end_entry, "O")):
+            name = "Cut Start" if which == "start" else "Cut End"
+            command = (lambda w=which: self._set_active_handle(w))
+            if layout == "ttk_radio":
+                w = ttk.Radiobutton(entry.master, text=name + ":", variable=self.handle_var,
+                                    value=which, command=command)
+                w.pack(side="left", padx=(0, px(2)), before=entry)
+            elif layout in ("toggle", "toggle_color"):
+                w = tk.Radiobutton(entry.master, text=name, variable=self.handle_var, value=which,
+                                   command=command, indicatoron=0, padx=px(10), pady=px(1),
+                                   borderwidth=2, cursor="hand2")
+                w.pack(side="left", padx=(0, px(4)), before=entry)
+            elif layout == "big_radio":
+                if self._marker_dots is None or self._marker_dots[0] != self._is_dark():
+                    self._marker_dots = self._make_marker_dots()
+                off, on = self._marker_dots[1:]
+                w = tk.Radiobutton(entry.master, text=" " + name + ":", variable=self.handle_var,
+                                   value=which, command=command, indicatoron=0, image=off,
+                                   selectimage=on, compound="left", relief="flat", offrelief="flat",
+                                   overrelief="flat", borderwidth=0, padx=px(2), cursor="hand2")
+                w.pack(side="left", padx=(0, px(2)), before=entry)
+            else:   # radio, radio_field
+                w = tk.Radiobutton(entry.master, text=name + ":", variable=self.handle_var,
+                                   value=which, bg="#f0f0f0", command=command)
+                w.pack(side="left", before=entry)
+            Tooltip(w, f"Shortcut: {key} sets the {which} at the frame on screen")
+            self._marker_pickers[which] = w
+        self._style_marker_picker()
+
+    def _marker_colors(self, which):
+        """(background, text) of a picked marker in its slider handle's colour."""
+        if which == "start":
+            return self._theme_color("slider_start"), "#000000" if self._is_dark() else "#ffffff"
+        return "#1a73e8", "#ffffff"
+
+    def _make_marker_dots(self):
+        """The big radio circles: (off, on) images in the current theme,
+        drawn 4x large and scaled down so their edges are smooth."""
+        from PIL import ImageDraw
+        size, big = px(16), px(16) * 4
+        ring = "#d0d0d4" if self._is_dark() else "#333333"
+        dot = DARK["select"] if self._is_dark() else "#0078d4"
+        images = []
+        for picked in (False, True):
+            img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            edge = max(4, big // 10)
+            d.ellipse((edge // 2, edge // 2, big - 1 - edge // 2, big - 1 - edge // 2),
+                      outline=dot if picked else ring, width=edge)
+            if picked:
+                m = big * 27 // 100
+                d.ellipse((m, m, big - 1 - m, big - 1 - m), fill=dot)
+            images.append(ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS)))
+        return (self._is_dark(), *images)
+
+    def _style_marker_picker(self):
+        """Colours the picker (and the time fields) for the picked marker and
+        the theme. Also runs after a theme switch."""
+        pickers = getattr(self, "_marker_pickers", None)
+        if not pickers:
+            return
+        layout = self.marker_picker_var.get()
+        picked = self.handle_var.get()
+        dark = self._is_dark()
+        # A handle drag sets the pick on every mouse move: only real changes.
+        if (layout, picked, dark, pickers.get("start")) == self._marker_styled:
+            return
+        self._marker_styled = (layout, picked, dark, pickers.get("start"))
+        panel = DARK["panel"] if dark else "#f0f0f0"
+        if layout in ("toggle", "toggle_color"):
+            for which, w in pickers.items():
+                if which != picked:
+                    bg = DARK["button"] if dark else "SystemButtonFace"
+                    fg = DARK["text"] if dark else "SystemButtonText"
+                    active = DARK["button_active"] if dark else "SystemButtonFace"
+                elif layout == "toggle":
+                    bg = active = self._theme_color("tabbox_selected")
+                    fg = DARK["text"] if dark else "SystemButtonText"
+                else:
+                    bg, fg = self._marker_colors(which)
+                    active = bg
+                self._configure_light(w, background=bg, activebackground=active, selectcolor=bg,
+                                      foreground=fg, activeforeground=fg,
+                                      highlightbackground=panel)
+        elif layout == "big_radio" and self._marker_dots is not None:
+            if self._marker_dots[0] != dark:
+                self._marker_dots = self._make_marker_dots()   # the circles follow the theme
+            off, on = self._marker_dots[1:]
+            fg = DARK["text"] if dark else "SystemButtonText"
+            for w in pickers.values():
+                if isinstance(w, tk.Radiobutton):
+                    self._configure_light(w, image=off, selectimage=on, background=panel,
+                                          activebackground=panel, selectcolor=panel,
+                                          foreground=fg, activeforeground=fg,
+                                          highlightbackground=panel)
+        for which, entry in (("start", self.start_entry), ("end", self.end_entry)):
+            if layout == "radio_field" and which == picked:
+                color = self._marker_colors(which)[0]
+                self._configure_light(entry, highlightthickness=px(2),
+                                      highlightbackground=color, highlightcolor=color)
+            else:
+                self._configure_light(entry, **self._field_light_frame)
 
     def _nudge(self, delta_seconds):
         if not self.input_path:
