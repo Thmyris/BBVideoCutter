@@ -1041,8 +1041,11 @@ UPDATE_REPO = "Thmyris/BBVideoCutter"
 UPDATE_API_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_PAGE_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 UPDATE_CHECK_INTERVAL = 24 * 3600     # seconds between the automatic checks
-UPDATE_SETUP_ASSET = "BBVideoCutter-Setup.exe"        # what an installed copy downloads
-UPDATE_PORTABLE_ASSET = "BBVideoCutter-Portable.zip"  # what a portable copy downloads
+# What an installed / a portable copy downloads: the first of these names
+# the release has. The releases may move to the "-Win-" names; this copy
+# finds its file either way.
+UPDATE_SETUP_ASSETS = ("BBVideoCutter-Win-Setup.exe", "BBVideoCutter-Setup.exe")
+UPDATE_PORTABLE_ASSETS = ("BBVideoCutter-Win-Portable.zip", "BBVideoCutter-Portable.zip")
 
 
 def version_tuple(text):
@@ -1190,11 +1193,13 @@ def is_newer_release(release, current=APP_VERSION):
     return new is not None and new > version_tuple(current)
 
 
-def release_asset(release, name):
-    """The release's downloadable file called name, or None."""
-    for asset in release.get("assets") or []:
-        if isinstance(asset, dict) and asset.get("name") == name and asset.get("browser_download_url"):
-            return asset
+def release_asset(release, names):
+    """The release's downloadable file called names[0], or else the next
+    of names it has (names can also be one name); None if none."""
+    for name in ([names] if isinstance(names, str) else names):
+        for asset in release.get("assets") or []:
+            if isinstance(asset, dict) and asset.get("name") == name and asset.get("browser_download_url"):
+                return asset
     return None
 
 
@@ -4098,11 +4103,12 @@ class LosslessVideoApp(_BaseTk):
             self._update_source(release)
             return
         installed = app_is_installed()
-        name = UPDATE_SETUP_ASSET if installed else UPDATE_PORTABLE_ASSET
-        asset = release_asset(release, name)
+        names = UPDATE_SETUP_ASSETS if installed else UPDATE_PORTABLE_ASSETS
+        asset = release_asset(release, names)
         if asset is None:
-            self._update_offer_page(release, f"Version {version}'s release has no {name} to download.")
+            self._update_offer_page(release, f"Version {version}'s release has no {names[-1]} to download.")
             return
+        name = asset["name"]
         app_dir = _app_dir()
         if not installed and not folder_is_writable(app_dir):
             self._update_offer_page(
