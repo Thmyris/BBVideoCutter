@@ -4,7 +4,9 @@ What changed in each release. Newest first. "Unreleased" is everything
 since the last release; it becomes the next version's notes (which the
 app's update box shows as "What's new").
 
-## Unreleased (since v1.0)
+## Unreleased (since v1.1)
+
+## v1.1 (2026-10-27)
 
 ### New
 
