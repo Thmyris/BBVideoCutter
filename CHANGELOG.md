@@ -71,6 +71,9 @@ app's update box shows as "What's new").
   Options > Cut Start / Cut End picker offers two other looks: big radio
   circles, and outlined boxes (the picked one blue and underlined). The
   choice is remembered.
+- **Crop/Rotate tab:** the picked rotate button (0° / 90° / 180° / 270°)
+  looks like the Cut tab's picked marker: tinted, edged in blue and bold,
+  instead of pressed in. Picking one moves none of them.
 - **Cut tab:** clicking (or tabbing) into the Cut Start or Cut End time
   field picks that marker for the step buttons, so after typing a time
   you can fine-tune it with the step buttons straight away.

@@ -7785,10 +7785,20 @@ class LosslessVideoApp(_BaseTk):
         # shows it. The saved video comes out turned the same way.
         tk.Label(edit_row, text="Rotate ↻:", bg="#f0f0f0").pack(side="left", padx=(18, 2))
         self.resize_rotate_buttons = {}
+        # The picked one is tinted, edged in blue and bold, like the Cut
+        # tab's picked marker. Sized in pixels for "270°" in bold, so the
+        # bolding moves nothing.
+        font, bold = self._marker_fonts()
+        blank = self._pixel_image()
         for turn in (0, 90, 180, 270):
-            btn = tk.Button(edit_row, text=f"{turn}°", width=4,
+            # A native button draws no coloured edge: a frame round it does.
+            edge = tk.Frame(edit_row, bg="#f0f0f0")
+            edge.pack(side="left")
+            btn = tk.Button(edge, text=f"{turn}°", image=blank, compound="center",
+                            width=bold.measure("270°") + px(14), height=bold.metrics("linespace"),
                             command=lambda t=turn: self._resize_set_rotation(t))
-            btn.pack(side="left", padx=1)
+            btn.pack(padx=px(2), pady=px(2))
+            btn._bbvc_edge = edge
             self.resize_rotate_buttons[turn] = btn
         self._resize_button_default_bg = btn.cget("bg")
         self._resize_highlight_rotate_button()
@@ -8836,12 +8846,15 @@ class LosslessVideoApp(_BaseTk):
         self._redraw_resize_canvas()
 
     def _resize_highlight_rotate_button(self):
+        font, bold = self._marker_fonts()
         for turn, btn in self.resize_rotate_buttons.items():
             active = turn == self.resize_user_rotation
+            self._configure_light(btn._bbvc_edge,
+                                  bg=self.MARKER_PICKED_COLOR if active else "#f0f0f0")
             self._configure_light(
                 btn,
-                relief="sunken" if active else "raised",
                 bg="#cfe2ff" if active else self._resize_button_default_bg,
+                font=bold if active else font,
             )
 
     def _resize_set_rotation(self, turn):
