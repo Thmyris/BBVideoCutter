@@ -5670,7 +5670,7 @@ class LosslessVideoApp(_BaseTk):
             # The scissors on the left (_style_marker_picker sets them),
             # the name after them, from a fixed place.
             text = " " + name
-            image = self._scissors_image(self._scissors_style(), "#000000")
+            image = self._scissors_image(self._scissors_style(), "#000000", shut=which == "end")
             label = tk.Label(card, text=text, cursor="hand2", image=image, compound="left", anchor="w",
                              width=image.width() + bold.measure(text),
                              height=bold.metrics("linespace"))
@@ -5723,12 +5723,14 @@ class LosslessVideoApp(_BaseTk):
             path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         return path if os.path.isfile(path) else None
 
-    def _scissors_image(self, style, color):
+    def _scissors_image(self, style, color, shut=False):
         """The scissors (SCISSORS) as a smooth image as tall as a line of the
-        cards' text, in color (a glyph in its own colours keeps them). Kept,
-        so each is made once."""
+        cards' text, in color (a glyph in its own colours keeps them). shut:
+        the Cut tab box's scissors ("mdl2") with their blades closed, for
+        Cut End (_shut_scissors). Kept, so each is made once."""
         size = self._marker_fonts()[1].metrics("linespace")
-        key = (style, color, size)
+        shut = shut and style == "mdl2"
+        key = (style, color, size, shut)
         cache = self.__dict__.setdefault("_scissors_cache", {})
         if key not in cache:
             k = SMOOTH_SCALE
@@ -5736,10 +5738,73 @@ class LosslessVideoApp(_BaseTk):
             img = None
             if style in self.SCISSORS_GLYPHS and self._scissors_font_file(style):
                 img = self._paint_scissors_glyph(style, color, big)
+                if img is not None and shut:
+                    img = self._shut_scissors(img)
             if img is None:
-                img = self._paint_scissors_drawn("closed" if style == "closed" else "open", color, big)
+                img = self._paint_scissors_drawn("closed" if style == "closed" or shut else "open",
+                                                 color, big)
             cache[key] = ImageTk.PhotoImage(img.reduce(k), master=self)
         return cache[key]
+
+    @staticmethod
+    def _shut_scissors(img):
+        """The upright open scissors glyph (blades crossing at the pivot,
+        rings below) with its blades closed and its rings swung in until
+        they nearly touch, as scissors look shut. Each quarter round the
+        pivot is turned about it (blades 90% of the way, rings a third);
+        a round pivot screw covers the seam. img: RGBA, one colour."""
+        from PIL import ImageChops, ImageDraw
+        alpha = img.getchannel("A")
+        w, h = alpha.size
+        px_ = alpha.load()
+
+        def runs(y):
+            out, start = [], None
+            for x in range(w):
+                on = px_[x, y] > 127
+                if on and start is None:
+                    start = x
+                elif not on and start is not None:
+                    out.append((start, x))
+                    start = None
+            if start is not None:
+                out.append((start, w))
+            return out
+
+        ink = [y for y in range(h) if runs(y)]
+        if not ink:
+            return img
+        top, bottom = ink[0], ink[-1]
+        tall = bottom - top
+        # The pivot: the rows, in the top two thirds, where the blades cross
+        # as one stroke.
+        single = [y for y in range(top + tall // 10, top + tall * 2 // 3) if len(runs(y)) == 1]
+        tip_row = top + tall // 12
+        tips = runs(tip_row)
+        if not single or len(tips) < 2:
+            return img
+        py = (single[0] + single[-1]) / 2
+        run = runs(int(py))[0]
+        cx = (run[0] + run[1]) / 2
+        left, right = tips[0], tips[-1]
+        a_left = math.degrees(math.atan2(cx - (left[0] + left[1]) / 2, py - tip_row))
+        a_right = math.degrees(math.atan2((right[0] + right[1]) / 2 - cx, py - tip_row))
+        stroke = left[1] - left[0]
+        lift = max(1, int(h * 0.02))   # each quarter reaches past the pivot: no gap there
+        out = Image.new("L", alpha.size, 0)
+        for box, turn in (((0, 0, int(cx), int(py) + lift), -a_left * 0.9),
+                          ((int(cx), 0, w, int(py) + lift), a_right * 0.9),
+                          ((0, int(py) - lift, int(cx), h), a_right * 0.33),
+                          ((int(cx), int(py) - lift, w, h), -a_left * 0.33)):
+            piece = Image.new("L", alpha.size, 0)
+            piece.paste(alpha.crop(box), box[:2])
+            out = ImageChops.lighter(out, piece.rotate(turn, center=(cx, py), resample=Image.BICUBIC))
+        r = stroke * 1.1
+        ImageDraw.Draw(out).ellipse((cx - r, py - r, cx + r, py + r), fill=255)
+        color = img.convert("RGB").getpixel((int(cx), int(py)))
+        shut = Image.new("RGBA", alpha.size, color + (0,))
+        shut.putalpha(out)
+        return shut
 
     def _paint_scissors_glyph(self, style, color, big):
         """A glyph style on a big x big image, fitted inside it with a little
@@ -5819,7 +5884,8 @@ class LosslessVideoApp(_BaseTk):
             self._configure_light(label, foreground=text, font=bold if on else font)
             if self._scissors_style():
                 label.configure(image=self._scissors_image(
-                    self._scissors_style(), self.MARKER_PICKED_COLOR if on else text))
+                    self._scissors_style(), self.MARKER_PICKED_COLOR if on else text,
+                    shut=which == "end"))
 
     def _nudge(self, delta_seconds):
         if not self.input_path:

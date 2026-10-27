@@ -92,7 +92,8 @@ app's update box shows as "What's new").
 - **Cut tab:** scissors in front of Cut Start and Cut End, blue on the
   picked one. Options > Scissors on Cut Start / Cut End offers seven
   (the Cut tab box's icon, solid, outlined, upper blade, colour emoji,
-  and two drawn ones: blades open or closed) and None.
+  and two drawn ones: blades open or closed) and None. With the Cut tab
+  box's icon (the default), Cut End's scissors are shut.
 - **Options:** the choices under Volume control look and Scissors have
   letters, in keyboard order (Q, W, E, R, ...): Alt+O, then V (or S),
   then a choice's letter switches to it.
