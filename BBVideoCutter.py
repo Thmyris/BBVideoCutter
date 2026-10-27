@@ -4459,10 +4459,12 @@ class LosslessVideoApp(_BaseTk):
         for label, secs in (("1 sec", 1), ("5 sec", 5), ("30 sec", 30), ("3 min", 180)):
             tk.Label(step_row, text=f"{label}:", bg="#f0f0f0").pack(side="left", padx=(10, 2))
             amount = label.replace(" sec", "s").replace(" min", "min")
-            b1 = tk.Button(step_row, text="<", width=7, command=lambda s=secs: self._nudge(-s))
+            b1 = tk.Button(step_row, text="<", width=self.STEP_BUTTON_CHARS,
+                           command=lambda s=secs: self._nudge(-s))
             b1.pack(side="left")
             Tooltip(b1, lambda a=amount: step_tip("-" + a))
-            b2 = tk.Button(step_row, text=">", width=7, command=lambda s=secs: self._nudge(s))
+            b2 = tk.Button(step_row, text=">", width=self.STEP_BUTTON_CHARS,
+                           command=lambda s=secs: self._nudge(s))
             b2.pack(side="left", padx=(0, 4))
             Tooltip(b2, lambda a=amount: step_tip("+" + a))
             self.step_buttons += [b1, b2]
@@ -4697,6 +4699,11 @@ class LosslessVideoApp(_BaseTk):
     # row fits the window, each row on its own. The Play / Pause button
     # always keeps room for "Pause".
     CUT_BUTTON_EXTRA = (0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.0)
+    # The 1 sec ... 3 min buttons' width in characters. When their row
+    # doesn't fit even with no extra (a wider font, e.g. Linux's DejaVu
+    # Sans), they give up characters, down to STEP_BUTTON_MIN_CHARS.
+    STEP_BUTTON_CHARS = 7
+    STEP_BUTTON_MIN_CHARS = 2
 
     def _init_cut_button_fit(self):
         """Notes each button's own width and padding, and refits on resize."""
@@ -4761,12 +4768,22 @@ class LosslessVideoApp(_BaseTk):
         row_room = row.winfo_width() if row is not None else room
         step_extra = next((x for x in self.CUT_BUTTON_EXTRA if needed(x)[0] <= room), 0.0)
         row_extra = next((x for x in self.CUT_BUTTON_EXTRA if needed(x)[1] <= row_room), 0.0)
-        if (step_extra, row_extra) == self._cut_fit_extra:
+        # Too wide even with no extra: the step buttons drop characters (a
+        # Tk button's character is the width of its font's "0").
+        chars = self.STEP_BUTTON_CHARS
+        over = needed(0.0)[0] - room
+        if over > 0:
+            per_char = tkfont.Font(font=self.step_buttons[0].cget("font")).measure("0")
+            drop = -(-over // (max(1, per_char) * len(self.step_buttons)))
+            chars = max(self.STEP_BUTTON_MIN_CHARS, chars - drop)
+        if (step_extra, row_extra, chars) == self._cut_fit_extra:
             return
-        self._cut_fit_extra = (step_extra, row_extra)
+        self._cut_fit_extra = (step_extra, row_extra, chars)
         steps_set = set(self.step_buttons)
         for b, (width, padx) in self._cut_fit_base.items():
             b.config(padx=padx + pad(b, step_extra if b in steps_set else row_extra))
+            if b in steps_set:
+                b.config(width=chars)
 
     def _build_cut_audio_controls(self, parent):
         """Mute, volume and the audio track heard. A cut keeps every audio

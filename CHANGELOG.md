@@ -27,7 +27,10 @@ app's update box shows as "What's new").
     opened on the Crop/Rotate or Audio tab first (the player started
     before its window existed on the X server); in the build, waveforms
     that didn't draw (a Pillow module was left out) and an ffmpeg that
-    picked up the build's own libraries instead of the system's.
+    picked up the build's own libraries instead of the system's; the
+    Cut tab's last step button (3 min >) cut off at the window's edge,
+    as Linux's font is wider (the step buttons now narrow until their
+    row fits).
 
 ### Changed
 
