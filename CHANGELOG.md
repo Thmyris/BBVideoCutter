@@ -113,7 +113,8 @@ app's update box shows as "What's new").
   sliders, and the choice is remembered.
 - **Sliders:** every slider's knob, and the round ends of its track, now
   have smooth edges instead of jagged ones (the Cut slider's Start / End
-  balls too). Six more volume looks: macOS, iOS, Material 3, glossy ball,
+  balls too), and so are the speaker icons next to the volume and the
+  red playhead's tip. Six more volume looks: macOS, iOS, Material 3, glossy ball,
   blue ball with a soft shadow, and a soft (neumorphic) knob.
 
 - After a save (Cut, Combine, Crop/Rotate, Audio), the "saved" message

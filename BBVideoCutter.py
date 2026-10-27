@@ -1621,6 +1621,66 @@ def smooth_disc(canvas, cx, cy, r, color, **item_options):
     return draw_smooth(canvas, cx, cy, r, ("disc", r, color), paint, **item_options)
 
 
+class SmoothPainter:
+    """Takes the canvas drawing calls an icon is made of (create_line,
+    create_arc, create_oval, create_polygon, create_rectangle, with the
+    canvas's coordinates and options) and draws them with Pillow
+    SMOOTH_SCALE times as large; photo() gives them back scaled down,
+    smooth, for one create_image. Line ends and corners come out round
+    where Tk's capstyle / joinstyle say so."""
+
+    def __init__(self, widget, width, height):
+        from PIL import ImageDraw
+        self.widget, self.k = widget, SMOOTH_SCALE
+        self.img = Image.new("RGBA", (math.ceil(width) * self.k, math.ceil(height) * self.k), (0, 0, 0, 0))
+        self.draw = ImageDraw.Draw(self.img)
+
+    def _color(self, color):
+        return color_hex(self.widget, color) if color else None
+
+    def _dot(self, x, y, r, color):
+        self.draw.ellipse((x - r, y - r, x + r, y + r), fill=color)
+
+    def _stroke(self, pts, color, width, round_ends):
+        """A line through pts (big image pixels), width wide."""
+        self.draw.line(pts, fill=color, width=max(1, round(width)))
+        if round_ends:
+            for x, y in zip(pts[::2], pts[1::2]):
+                self._dot(x, y, width / 2, color)
+
+    def create_line(self, *pts, fill="black", width=1, capstyle="butt", **_kw):
+        self._stroke([v * self.k for v in pts], self._color(fill), width * self.k, capstyle == "round")
+
+    def create_arc(self, x0, y0, x1, y1, start=0, extent=90, outline="black", width=1, **_kw):
+        # Tk: degrees counter-clockwise from 3 o'clock, the line centred on
+        # the oval; Pillow: clockwise, the line inside the box.
+        k, w = self.k, width * self.k
+        box = (x0 * k - w / 2, y0 * k - w / 2, x1 * k + w / 2, y1 * k + w / 2)
+        self.draw.arc(box, -(start + extent), -start, fill=self._color(outline), width=max(1, round(w)))
+
+    def create_oval(self, x0, y0, x1, y1, fill="", **_kw):
+        k = self.k
+        if fill:
+            self.draw.ellipse((x0 * k, y0 * k, x1 * k, y1 * k), fill=self._color(fill))
+
+    def create_rectangle(self, x0, y0, x1, y1, fill="", **_kw):
+        k = self.k
+        if fill:
+            self.draw.rectangle((x0 * k, y0 * k, x1 * k, y1 * k), fill=self._color(fill))
+
+    def create_polygon(self, *pts, fill="black", outline="", width=1, joinstyle="miter", **_kw):
+        big = [v * self.k for v in pts]
+        if fill:
+            self.draw.polygon(big, fill=self._color(fill))
+        if outline:
+            # The outline round the shape, with round corners as Tk's
+            # joinstyle "round" (and near enough for its thin miter ones).
+            self._stroke(big + big[:2], self._color(outline), width * self.k, True)
+
+    def photo(self):
+        return ImageTk.PhotoImage(self.img.reduce(self.k), master=self.widget)
+
+
 def _shadow_under(img, k, shape, dx, dy, blur, rgba):
     """img with a blurred shadow under it: shape(draw, dx, dy) draws the
     shadow's outline (offset dx, dy in img pixels) on a layer, which is
@@ -2760,10 +2820,21 @@ class PlayerAudioControls:
             glyph = "" if muted else ""[level]
             c.create_text(*g(13, 11), text=glyph, fill=color,
                           font=(self.app.ICON_FONT_FAMILY, 12))
-        elif style == "levels":
+            return
+        lit = 0 if muted else math.ceil(min(100.0, self.player.volume) / 25)
+        dim = self.app._theme_color("slider_track")
+        # The shapes below go to a SmoothPainter (drawn smooth with Pillow),
+        # one image per look, state and theme, kept.
+        canvas = c
+        if PIL_AVAILABLE:
+            key = (style, icon, lit if style == "levels" else None, color, dim, k)
+            cache = self.app.__dict__.setdefault("_speaker_icons", {})
+            if key in cache:
+                canvas.create_image(0, 0, anchor="nw", image=cache[key])
+                return
+            c = SmoothPainter(canvas, 26 * k, 22 * k)
+        if style == "levels":
             # Four rising bars, lit up to the volume; crossed out when muted.
-            lit = 0 if muted else math.ceil(min(100.0, self.player.volume) / 25)
-            dim = self.app._theme_color("slider_track")
             for i in range(4):
                 x, top = 4 + i * 5, 15 - i * 3.5
                 c.create_rectangle(*g(x, top, x + 3, 18), fill=color if i < lit else dim, width=0)
@@ -2810,6 +2881,9 @@ class PlayerAudioControls:
                         c.create_oval(*g(x - 1, 11 + dy - 1, x + 1, 11 + dy + 1), fill=color, width=0)
             else:
                 arcs(width=1 if style == "thin" else max(1.0, 2.2 * k) if style == "round" else line)
+        if PIL_AVAILABLE:
+            cache[key] = c.photo()
+            canvas.create_image(0, 0, anchor="nw", image=cache[key])
 
     def post_track_menu(self):
         menu = self.track_menu
@@ -6278,8 +6352,12 @@ class LosslessVideoApp(_BaseTk):
             # The playhead: where the player is. Under the handles, so they
             # stay visible and grabbable when it sits on one.
             c.create_line(0, 0, 0, 0, fill=PLAYHEAD_COLOR, width=px(2), tags=("playhead",))
-            c.create_polygon(0, 0, 0, 0, 0, 0, fill=PLAYHEAD_COLOR, outline="",
-                             tags=("playhead_top",))
+            if PIL_AVAILABLE:   # its tip smooth: an image, moved with the line
+                c.create_image(0, 0, anchor="n", image=self._playhead_tip_image(),
+                               tags=("playhead_top",))
+            else:
+                c.create_polygon(0, 0, 0, 0, 0, 0, fill=PLAYHEAD_COLOR, outline="",
+                                 tags=("playhead_top",))
             back, pin = self._handle_preview, self._playhead_pin
             if back is not None:           # a dragged handle's frame is on screen
                 self._move_playhead(back["pos"])
@@ -6320,9 +6398,23 @@ class LosslessVideoApp(_BaseTk):
         h = c.winfo_height() or int(c.cget("height"))   # down through the strip
         a = px(5)
         c.coords("playhead", x, a, x, h)
-        c.coords("playhead_top", x - a, 0, x + a, 0, x, a + px(1))
+        if c.type("playhead_top") == "image":
+            c.coords("playhead_top", x, 0)
+        else:
+            c.coords("playhead_top", x - a, 0, x + a, 0, x, a + px(1))
         c.itemconfigure("playhead", state="normal")
         c.itemconfigure("playhead_top", state="normal")
+
+    def _playhead_tip_image(self):
+        """The playhead's tip on the Cut slider: a smooth downward triangle
+        2 x px(5) wide, px(6) tall, its middle on the line. Made once."""
+        image = self.__dict__.get("_playhead_tip")
+        if image is None:
+            a = px(5)
+            p = SmoothPainter(self.slider_canvas, 2 * a, a + px(1) + 1)
+            p.create_polygon(0, 0, 2 * a, 0, a, a + px(1), fill=PLAYHEAD_COLOR)
+            image = self._playhead_tip = p.photo()
+        return image
 
     def _pin_playhead(self, t):
         """For a seek just sent to time t: the playhead goes there now, not
