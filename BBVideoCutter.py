@@ -6527,6 +6527,9 @@ class LosslessVideoApp(_BaseTk):
         if self.end_sec <= self.start_sec:
             messagebox.showerror("Invalid range", "End time must be after start time.")
             return
+        if round(self.start_sec, 3) <= 0 and round(self.end_sec, 3) >= round(self.duration, 3):
+            self._nice_try_whole_video()
+            return
 
         source_dir = os.path.dirname(os.path.abspath(self.input_path))
         base_name = os.path.splitext(os.path.basename(self.input_path))[0]
@@ -6559,6 +6562,38 @@ class LosslessVideoApp(_BaseTk):
         threading.Thread(
             target=self._run_cut, args=(out_path, cut_mode, search_window), daemon=True
         ).start()
+
+    def _nice_try_whole_video(self):
+        """Saving the whole video as a scene is refused: a box with one
+        button, "Oops.". Waits until it is closed."""
+        dlg = tk.Toplevel(self, bg="#f0f0f0")
+        dlg.withdraw()
+        dlg.title("Nice try")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        self._nice_try_dialog = dlg     # for the tests
+        body = tk.Frame(dlg, bg="#f0f0f0", padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, bg="#f0f0f0", justify="left", anchor="w",
+                 text="You just tried cutting the entire video out of the video, nice try."
+                 ).pack(fill="x")
+        oops = tk.Button(body, text="Oops.", width=10, command=dlg.destroy)
+        oops.pack(side="right", pady=(px(12), 0))
+        for key in ("<Return>", "<Escape>"):
+            dlg.bind(key, lambda e: dlg.destroy())
+
+        self._theme_tree(dlg)
+        dlg.update_idletasks()
+        self._set_title_bar_dark(self._is_dark(), dlg)
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - h) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.deiconify()
+        oops.focus_set()
+        dlg.grab_set()
+        self.wait_window(dlg)
+        self._nice_try_dialog = None
 
     def _run_cut(self, out_path, cut_mode, search_window):
         try:
