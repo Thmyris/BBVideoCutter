@@ -7995,7 +7995,8 @@ class LosslessVideoApp(_BaseTk):
             # A native button draws no coloured edge: a frame round it does.
             edge = tk.Frame(edit_row, bg="#f0f0f0")
             edge.pack(side="left")
-            btn = tk.Button(edge, text=f"{turn}°", image=blank, compound="center",
+            # padx as Windows' default: X11's (3m) would add ~20 px a button.
+            btn = tk.Button(edge, text=f"{turn}°", image=blank, compound="center", padx=1,
                             width=bold.measure("270°") + px(14), height=bold.metrics("linespace"),
                             command=lambda t=turn: self._resize_set_rotation(t))
             btn.pack(padx=px(2), pady=px(2))

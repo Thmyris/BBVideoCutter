@@ -30,7 +30,8 @@ app's update box shows as "What's new").
     picked up the build's own libraries instead of the system's; the
     Cut tab's last step button (3 min >) cut off at the window's edge,
     as Linux's font is wider (the step buttons now narrow until their
-    row fits).
+    row fits); the Crop/Rotate tab's rotate buttons, wider on Linux,
+    pushed the Zoom controls off the window.
 
 ### Changed
 
