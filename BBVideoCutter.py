@@ -6230,6 +6230,16 @@ class LosslessVideoApp(_BaseTk):
                 mode=cut_mode, search_window=search_window,
                 progress=self._progress_reporter("Cutting...", "cut"),
             )
+            if result["mode"] == "classic":
+                # Snapped to keyframes: check where it landed, to say by how
+                # many frames (_describe_cut_result).
+                self.after(0, lambda: self.status_lbl.config(text="Checking where the cut landed..."))
+                try:
+                    result["slide"] = self._measure_cut_slide(
+                        find_exe("ffmpeg"), find_exe("ffprobe"), self.input_path,
+                        self.start_sec, self.end_sec, out_path)
+                except (OSError, ValueError):
+                    result["slide"] = None
             self.after(0, lambda: self._cut_done(out_path, True, result))
         except Exception as exc:
             self.after(0, lambda e=str(exc): self._cut_done(e, False, None))
@@ -6303,6 +6313,79 @@ class LosslessVideoApp(_BaseTk):
             if 1 <= fps <= 1000:
                 return 1.0 / fps
         return 1.0 / 30
+
+    @staticmethod
+    def _frame_hashes(ffmpeg, args):
+        """[(time, md5)] of the video frames ffmpeg decodes with args (its
+        input options and -i), each frame's time from its own timestamps.
+        Every frame kept, none made up (passthrough)."""
+        for sync in (["-fps_mode", "passthrough"], ["-vsync", "0"]):   # -fps_mode: ffmpeg 5.1+
+            proc = subprocess.run(
+                [ffmpeg, "-v", "error", *args, "-map", "0:v:0", *sync, "-f", "framemd5", "-"],
+                capture_output=True, text=True, **SUBPROCESS_KWARGS)
+            if proc.returncode == 0:
+                break
+        else:
+            return []
+        tb, frames = 1.0, []
+        for line in proc.stdout.splitlines():
+            if line.startswith("#tb 0:"):
+                num, _, den = line.split(":", 1)[1].strip().partition("/")
+                tb = float(num) / float(den or 1)
+            elif line and not line.startswith("#"):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 6 and parts[0] == "0":
+                    frames.append((int(parts[1]) * tb, parts[5]))
+        return frames
+
+    def _measure_cut_slide(self, ffmpeg, ffprobe, input_path, start_sec, end_sec, out_path):
+        """How many frames a cut's first and last frames are from the ones
+        asked for (the frame shown at start_sec, the last one before
+        end_sec): (start, end), negative = earlier, positive = later. Found
+        by matching the cut's first and last frames to the source's frames
+        near start_sec and end_sec. None when they can't be matched."""
+        from concurrent.futures import ThreadPoolExecutor
+        origin = self._probe_start_time(ffprobe, input_path)
+
+        def around(at_sec, pad):
+            seek = max(0.0, at_sec - pad)
+            frames = self._frame_hashes(ffmpeg, [
+                "-copyts", "-ss", seconds_to_ffmpeg_time(seek),
+                "-t", f"{at_sec + pad - seek:.3f}", "-i", input_path])
+            return [(t - origin, h) for t, h in frames]
+
+        def slide(frames, at_sec, md5, before_end):
+            eps = 0.0005   # times are whole milliseconds
+            if before_end:
+                want = [i for i, (t, _h) in enumerate(frames) if t < at_sec - eps]
+            else:
+                want = [i for i, (t, _h) in enumerate(frames) if t <= at_sec + eps]
+            found = [i for i, (_t, h) in enumerate(frames) if h == md5]
+            if not (want and found):
+                return None
+            # Identical frames (a still picture): the nearest.
+            return min((i - want[-1] for i in found), key=abs)
+
+        # Each decode starts at a keyframe, so the four run side by side.
+        with ThreadPoolExecutor(4) as pool:
+            jobs = [pool.submit(self._frame_hashes, ffmpeg, ["-i", out_path, "-frames:v", "1"]),
+                    pool.submit(self._frame_hashes, ffmpeg, ["-sseof", "-0.5", "-i", out_path]),
+                    pool.submit(around, start_sec, 0.5), pool.submit(around, end_sec, 0.5)]
+            first, last, near_start, near_end = (j.result() for j in jobs)
+            if not first or not last:
+                return None
+            start = slide(near_start, start_sec, first[0][1], False)
+            end = slide(near_end, end_sec, last[-1][1], True)
+            # Further than that (up to a long keyframe interval): wider.
+            wide = [pool.submit(around, at, 12.0) if got is None else None
+                    for at, got in ((start_sec, start), (end_sec, end))]
+            if wide[0] is not None:
+                start = slide(wide[0].result(), start_sec, first[0][1], False)
+            if wide[1] is not None:
+                end = slide(wide[1].result(), end_sec, last[-1][1], True)
+        if start is None or end is None:
+            return None
+        return start, end
 
     def _probe_keyframe_dts(self, ffprobe_exe, path, keyframe_sec):
         """Decode timestamp (same clock as _probe_keyframes_near) of the
@@ -6879,7 +6962,9 @@ class LosslessVideoApp(_BaseTk):
             return ""
         mode = result["mode"]
         if mode == "classic":
-            return "100% lossless, no re-encoding (classic -- snapped to the nearest keyframe, may not be frame-exact)"
+            if "slide" not in result:
+                return "100% lossless, no re-encoding (classic -- snapped to the nearest keyframe, may not be frame-exact)"
+            return f"100% lossless (snapped to the nearest keyframe: {LosslessVideoApp._describe_slide(result['slide'])})"
         if mode == "editlist":
             return "100% lossless, no re-encoding (edit-list trim -- exact cut point, hidden via MP4 metadata)"
         if mode == "copy":
@@ -6891,6 +6976,21 @@ class LosslessVideoApp(_BaseTk):
         if mode == "full":
             return f"fully re-encoded ({secs:.2f}s, via {encoder}) -- cut is shorter than one keyframe interval"
         return f"mostly lossless -- {secs:.2f}s re-encoded near the cut edges (via {encoder})"
+
+    @staticmethod
+    def _describe_slide(slide):
+        """_measure_cut_slide's (start, end) in words."""
+        if slide is None:
+            return "couldn't check by how many frames"
+        if slide == (0, 0):
+            return "frame-exact"
+
+        def part(name, n):
+            if n == 0:
+                return f"{name} exact"
+            return f"{name} {abs(n)} frame{'s' if abs(n) != 1 else ''} {'early' if n < 0 else 'late'}"
+
+        return f"{part('start', slide[0])}, {part('end', slide[1])}"
 
     def _saved_ask_open(self, text, path, tab):
         """The success message for a saved video, then a second one asking
@@ -6911,7 +7011,8 @@ class LosslessVideoApp(_BaseTk):
         if success:
             how = self._describe_cut_result(result)
             self.status_lbl.config(text=f"Saved ({how}): {info}")
-            self._saved_ask_open(f"Scene saved to:\n{info}\n\n{how[0].upper()}{how[1:]}.", info, 0)
+            self._saved_ask_open(f"Cut successful.\n\nScene saved to:\n{info}\n\n"
+                                 f"Cutting Mode: {how[0].upper()}{how[1:]}", info, 0)
         else:
             self.status_lbl.config(text="Cut failed")
             messagebox.showerror("ffmpeg error",
