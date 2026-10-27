@@ -1,8 +1,8 @@
 @echo off
 REM ===================================================================
 REM Builds both distributables, one after the other, from one app build:
-REM   1) ..\BBVideoCutter-Portable.zip  (same as build_portable.bat)
-REM   2) ..\BBVideoCutter-Setup.exe     (same as build_setup.bat)
+REM   1) ..\BBVideoCutter-Win-Portable.zip  (same as build_portable.bat)
+REM   2) ..\BBVideoCutter-Win-Setup.exe     (same as build_setup.bat)
 REM
 REM Running build_portable.bat and then build_setup.bat would build the
 REM app with PyInstaller twice; this builds it once and makes the zip
@@ -78,11 +78,11 @@ python -m PyInstaller ^
 if errorlevel 1 goto :error
 
 echo.
-echo [3/5] Portable: zipping dist\BBVideoCutter\ into BBVideoCutter-Portable.zip...
-if exist "..\BBVideoCutter-Portable.zip" del /f /q "..\BBVideoCutter-Portable.zip"
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\BBVideoCutter' -DestinationPath '..\BBVideoCutter-Portable.zip' -Force"
+echo [3/5] Portable: zipping dist\BBVideoCutter\ into BBVideoCutter-Win-Portable.zip...
+if exist "..\BBVideoCutter-Win-Portable.zip" del /f /q "..\BBVideoCutter-Win-Portable.zip"
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\BBVideoCutter' -DestinationPath '..\BBVideoCutter-Win-Portable.zip' -Force"
 if errorlevel 1 goto :error
-echo       BBVideoCutter-Portable.zip is ready in release\.
+echo       BBVideoCutter-Win-Portable.zip is ready in release\.
 
 echo.
 echo [4/5] Setup: compiling the installer with Inno Setup...
@@ -95,9 +95,9 @@ if not defined APP_VERSION goto :error
 echo       version %APP_VERSION%
 %ISCC% /DMyAppVersion=%APP_VERSION% installer.iss
 if errorlevel 1 goto :error
-copy /y "installer_output\BBVideoCutter-Setup.exe" "..\BBVideoCutter-Setup.exe" >nul
+copy /y "installer_output\BBVideoCutter-Win-Setup.exe" "..\BBVideoCutter-Win-Setup.exe" >nul
 if errorlevel 1 goto :error
-echo       BBVideoCutter-Setup.exe is ready in release\.
+echo       BBVideoCutter-Win-Setup.exe is ready in release\.
 
 echo.
 echo [5/5] Cleaning up build byproducts...
@@ -107,7 +107,7 @@ if exist "installer_output" rmdir /s /q "installer_output"
 if exist "BBVideoCutter.spec" del /f /q "BBVideoCutter.spec"
 
 echo.
-echo Done! BBVideoCutter-Portable.zip and BBVideoCutter-Setup.exe are ready in release\.
+echo Done! BBVideoCutter-Win-Portable.zip and BBVideoCutter-Win-Setup.exe are ready in release\.
 goto :end
 
 :error
