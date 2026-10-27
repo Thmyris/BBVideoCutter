@@ -7064,10 +7064,10 @@ class LosslessVideoApp(_BaseTk):
 
         return f"{part('start', slide[0])}, {part('end', slide[1])}"
 
-    def _saved_ask_open(self, text, path, tab, what="new video"):
+    def _saved_ask_open(self, text, path, tab, what):
         """The success message for a saved video, then a second one asking
-        whether to open it (what: "newly cut video", ...) here: Yes opens it
-        on tab (0 Cut, 3 Crop/Rotate, 4 Audio)."""
+        whether to open it (what: "newly cut video", "combined video", ...)
+        here: Yes opens it on tab (0 Cut, 3 Crop/Rotate, 4 Audio)."""
         messagebox.showinfo("Done", text)
         if not messagebox.askyesno("Open in the editor?", f"Open the {what} in the editor?"):
             return
@@ -7702,7 +7702,7 @@ class LosslessVideoApp(_BaseTk):
         if success:
             self.status_lbl.config(text=f"Saved{' (re-encoded)' if reencoded else ''}: {info}")
             self._saved_ask_open(f"Combined video saved to:\n{info}"
-                                 + (f"\n\n{reencoded}" if reencoded else ""), info, 0)
+                                 + (f"\n\n{reencoded}" if reencoded else ""), info, 0, "combined video")
         else:
             self.status_lbl.config(text="Combine failed")
             messagebox.showerror("ffmpeg error", info)
@@ -9594,7 +9594,7 @@ class LosslessVideoApp(_BaseTk):
         self._resize_update_rotate_save_btn()
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
-            self._saved_ask_open(f"{what} video saved to:\n{info}", info, 3)
+            self._saved_ask_open(f"{what} video saved to:\n{info}", info, 3, f"{what.lower()} video")
         else:
             verb = "rotation" if what == "Rotated" else "crop"
             self.status_lbl.config(text=f"{verb.capitalize()} failed")
@@ -10711,7 +10711,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_finalize_btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
-            self._saved_ask_open(f"Mixed video saved to:\n{info}", info, 4)
+            self._saved_ask_open(f"Mixed video saved to:\n{info}", info, 4, "mixed video")
         else:
             self.status_lbl.config(text="Audio mix failed")
             messagebox.showerror("ffmpeg error", "The audio mix failed.\n\n" + info)
