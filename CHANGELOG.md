@@ -6,6 +6,9 @@ app's update box shows as "What's new").
 
 ## Unreleased (since v1.1)
 
+- **Updates:** the update box shows the release notes formatted
+  (bold, bullets, code) instead of raw Markdown.
+
 ## v1.1 (2026-10-27)
 
 - **Linux (beta):** a `.deb` package for Ubuntu 24.04+ and a `.tar.gz`

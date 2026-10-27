@@ -1090,6 +1090,101 @@ def fetch_latest_release(timeout=15):
     return release
 
 
+def markdown_runs(line):
+    """[(text, style)] of one line of release notes: style "bold" for
+    **text** (or __text__), "code" for `text`, "" otherwise; a link
+    [text](url) is its text."""
+    runs = []
+    pattern = re.compile(r"\*\*(.+?)\*\*|__(.+?)__|`([^`]+)`|\[([^\]]+)\]\([^)]*\)")
+    at = 0
+    for match in pattern.finditer(line):
+        if match.start() > at:
+            runs.append((line[at:match.start()], ""))
+        bold, bold2, code, link = match.groups()
+        if code is not None:
+            runs.append((code, "code"))
+        elif link is not None:
+            runs.append((link, ""))
+        else:
+            runs.append((bold if bold is not None else bold2, "bold"))
+        at = match.end()
+    if at < len(line):
+        runs.append((line[at:], ""))
+    return runs
+
+
+def markdown_blocks(notes):
+    """GitHub-style release notes as [(kind, runs)]: kind "bullet" (a
+    "- " or "* " item), "heading" ("#" lines) or "para"; a line that
+    goes on the one before (a wrapped item or paragraph) is joined to it,
+    as Markdown shows it."""
+    blocks, current = [], None
+    for raw in str(notes).splitlines():
+        line = raw.strip()
+        if not line:
+            current = None
+            continue
+        bullet = re.match(r"[-*+]\s+(.*)", line)
+        heading = re.match(r"#{1,6}\s+(.*)", line)
+        if bullet or heading:
+            current = ["bullet" if bullet else "heading", (bullet or heading).group(1)]
+            blocks.append(current)
+            if heading:
+                current = None
+        elif current is not None:
+            current[1] += " " + line
+        else:
+            current = ["para", line]
+            blocks.append(current)
+    return [(kind, markdown_runs(text)) for kind, text in blocks]
+
+
+def insert_markdown(text, blocks):
+    """Writes markdown_blocks into a Text widget with its styles: bold,
+    code, headings, and bullets with a hanging indent."""
+    base = tkfont.Font(font=text.cget("font"))
+    bold = base.copy()
+    bold.configure(weight="bold")
+    heading = base.copy()
+    heading.configure(weight="bold", size=base.cget("size") + 1)
+    mono = tkfont.Font(family="Consolas" if os.name == "nt" else "DejaVu Sans Mono",
+                       size=base.cget("size"))
+    text._bbvc_fonts = (bold, heading, mono)   # kept alive with the widget
+    gap = base.metrics("linespace") // 2
+    text.tag_configure("bold", font=bold)
+    text.tag_configure("code", font=mono)
+    text.tag_configure("heading", font=heading)
+    dot = "•  "
+    text.tag_configure("bullet", lmargin1=0, lmargin2=base.measure(dot))
+    text.tag_configure("gap", spacing1=gap)
+    for i, (kind, runs) in enumerate(blocks):
+        block = (kind,) if kind != "para" else ()
+        block += ("gap",) if i else ()
+        if kind == "bullet":
+            text.insert("end", dot, block)
+        for run, style in runs:
+            text.insert("end", run, block + ((style,) if style else ()))
+        if i < len(blocks) - 1:
+            text.insert("end", "\n", block)
+    # The height it takes, in pixels, wrapped by words as Tk wraps them at
+    # the box's width (it can't measure itself before it is shown).
+    room = int(text.cget("width")) * base.measure("0")
+    fonts = {"": base, "bold": bold, "code": mono}
+    tall = 0
+    for i, (kind, runs) in enumerate(blocks):
+        indent = base.measure(dot) if kind == "bullet" else 0
+        x, lines = indent, 1
+        for run, style in runs:
+            font = heading if kind == "heading" else fonts[style]
+            for word in re.findall(r"\S+\s*", run):
+                w = font.measure(word.rstrip())
+                if x > indent and x + w > room:
+                    x, lines = indent, lines + 1
+                x += font.measure(word)
+        tall += lines * (heading if kind == "heading" else base).metrics("linespace") + (gap if i else 0)
+    return tall
+
+
 def is_newer_release(release, current=APP_VERSION):
     new = version_tuple(release.get("tag_name"))
     return new is not None and new > version_tuple(current)
@@ -3864,16 +3959,24 @@ class LosslessVideoApp(_BaseTk):
                      text="What's new").pack(fill="x", pady=(px(10), px(2)))
             box = tk.Frame(body, bg="#f0f0f0")
             box.pack(fill="both", expand=True)
-            lines = sum(len(line) // 60 + 1 for line in notes.splitlines()) or 1
-            text = tk.Text(box, width=62, height=min(lines, 12), wrap="word", relief="solid",
+            text = tk.Text(box, width=62, height=1, wrap="word", relief="solid",
                            borderwidth=1, padx=px(6), pady=px(4), font=("Segoe UI", 9))
-            text.insert("1.0", notes)
+            tall = insert_markdown(text, markdown_blocks(notes))
             text.config(state="disabled")
             text.pack(side="left", fill="both", expand=True)
-            if lines > 12:
-                bar = tk.Scrollbar(box, command=text.yview)
-                text.config(yscrollcommand=bar.set)
-                bar.pack(side="right", fill="y")
+            bar = tk.Scrollbar(box, command=text.yview)
+            line = tkfont.Font(font=text.cget("font")).metrics("linespace")
+
+            def fit(tall):
+                """As tall as the notes (tall pixels), up to 12 lines; more
+                scrolls."""
+                lines = max(1, -(-tall // max(1, line)))
+                text.config(height=min(lines, 12))
+                if lines > 12 and not bar.winfo_manager():
+                    text.config(yscrollcommand=bar.set)
+                    bar.pack(side="right", fill="y")
+
+            fit(tall)
             self._update_notes = text     # for the tests
 
         def choose(choice):
@@ -3912,6 +4015,12 @@ class LosslessVideoApp(_BaseTk):
         y = self.winfo_rooty() + (self.winfo_height() - h) // 3
         dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
         dlg.deiconify()
+        if notes:
+            # Laid out at its real width only now (hidden, a Text is 1 px
+            # wide): Tk's own measure corrects the estimate.
+            dlg.update_idletasks()
+            tall = text.count("1.0", "end", "update", "ypixels")
+            fit(tall[0] if isinstance(tall, tuple) else tall or 0)
         update_btn.focus_set()
         dlg.grab_set()
         self.wait_window(dlg)
