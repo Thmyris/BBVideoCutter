@@ -46,7 +46,7 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 "$VENV/bin/python" -m pip install -q --upgrade pyinstaller pillow tkinterdnd2 python-mpv certifi
 
-set -- --add-data "$ROOT/assets/rnnoise/cb.rnnn:."
+set -- --add-data "$ROOT/assets/rnnoise/cb.rnnn:." --add-data "$ROOT/assets/barkbark2.ico:."
 if [ -f ffmpeg ] && [ -f ffprobe ]; then
     echo "      including ffmpeg/ffprobe from here"
     set -- "$@" --add-binary "$HERE/ffmpeg:." --add-binary "$HERE/ffprobe:."

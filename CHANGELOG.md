@@ -6,6 +6,8 @@ app's update box shows as "What's new").
 
 ## Unreleased (since v1.2)
 
+- **The app's icon on its windows** instead of the default feather.
+
 ## v1.2 (2026-10-27)
 
 - **Improved auto-updating pipeline.**

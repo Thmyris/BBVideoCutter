@@ -576,6 +576,24 @@ def find_denoise_file(name):
     return shutil.which(name)
 
 
+APP_ICON = "barkbark2.ico"   # the window icon (the exe's icon too)
+
+
+def find_app_icon():
+    """The app icon's file, or None: next to the app, inside a PyInstaller
+    bundle (the build scripts add it), or in assets\\ (a source checkout)."""
+    app = _app_dir()
+    dirs = [app]
+    if getattr(sys, "_MEIPASS", None):
+        dirs.append(sys._MEIPASS)
+    dirs.append(os.path.join(app, "assets"))
+    for d in dirs:
+        candidate = os.path.join(d, APP_ICON)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def lavfi_value(value):
     """value (a file path, say) written as a filter option inside a filter
     graph, for ffmpeg's -filter_complex and mpv's lavfi-complex alike: its
@@ -3376,6 +3394,7 @@ class LosslessVideoApp(_BaseTk):
         # The list thumbnails' size, scaled like everything else.
         self.THUMB_SIZE = (px(self.THUMB_SIZE[0]), px(self.THUMB_SIZE[1]))
         self.title("BarkBark Lossless Video Cutter")
+        self._set_window_icon()
         # 900x700 at 100% scaling, never bigger than the screen at high scaling.
         # Plus the app-drawn menu bar, which is inside this size where the
         # native one (20 px at 100%) was outside it, so the tabs get as much
@@ -4236,6 +4255,32 @@ class LosslessVideoApp(_BaseTk):
     def _launch_update_helper(self, script):
         launch_detached(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                          "Bypass", "-WindowStyle", "Hidden", "-File", script])
+
+    def _set_window_icon(self):
+        """The app's icon (not Tk's feather) on this window and every
+        window opened after it. Windows takes the .ico as it is; elsewhere
+        Tk can't read .ico, so its images go in through Pillow."""
+        path = find_app_icon()
+        if path is None:
+            return
+        try:
+            if os.name == "nt":
+                self.iconbitmap(default=path)
+            elif PIL_AVAILABLE:
+                ico = Image.open(path)
+                sizes = sorted(ico.info.get("sizes") or {ico.size}, reverse=True)
+                images = []
+                for size in sizes[:3]:
+                    ico.size = size
+                    images.append(ImageTk.PhotoImage(ico.convert("RGBA"), master=self))
+                if len(images) == 1:   # one big image: small ones for the title bar too
+                    big = ico.convert("RGBA")
+                    images += [ImageTk.PhotoImage(big.resize((s, s), Image.LANCZOS), master=self)
+                               for s in (48, 32) if s < big.width]
+                self._icon_images = images   # kept, or Tk drops them
+                self.iconphoto(True, *images)
+        except (tk.TclError, OSError, ValueError):
+            pass   # Tk's own icon then
 
     def _show_about(self):
         messagebox.showinfo(

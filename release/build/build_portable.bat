@@ -56,6 +56,7 @@ if "%HAVE_FFMPEG%"=="1" set BUNDLE=--add-binary "ffmpeg.exe;." --add-binary "ffp
 if exist "libmpv-2.dll" set BUNDLE=%BUNDLE% --add-binary "libmpv-2.dll;."
 if exist "deep-filter.exe" set BUNDLE=%BUNDLE% --add-binary "deep-filter.exe;."
 set BUNDLE=%BUNDLE% --add-data "..\..\assets\rnnoise\cb.rnnn;."
+set BUNDLE=%BUNDLE% --add-data "..\..\assets\barkbark2.ico;."
 echo [2/4] Building the app with PyInstaller...
 if "%HAVE_FFMPEG%"=="1" (
     echo       including ffmpeg.exe/ffprobe.exe from here
