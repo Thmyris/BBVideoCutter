@@ -423,8 +423,9 @@ kill $XPID
 - **Settings**: the app reads `$APPDATA` first, on Linux too, then
   `~/.config`. It does *not* read `XDG_CONFIG_HOME`. Set
   `os.environ["APPDATA"]` to a private folder, as on Windows.
-- Pictures: `import -window root out.png` (ImageMagick), then crop to the
-  window (`app.winfo_rootx()` / `winfo_rooty()` / sizes).
+- **Never take Linux screenshots**, not for checks, the README or anything
+  else (the owner's rule). Check Linux layout with numbers (`winfo_width()`,
+  `winfo_reqwidth()`, positions), not pictures.
 - Driving a separately running app (for example the frozen build): Tk `send`
   works over X11. Find the interp with `winfo interps` whose `wm title .`
   contains "BarkBark", then `send` Tcl to it (press buttons, fill Tk's own
