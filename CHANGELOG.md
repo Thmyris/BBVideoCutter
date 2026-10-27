@@ -94,26 +94,22 @@ app's update box shows as "What's new").
   (the Cut tab box's icon, solid, outlined, upper blade, colour emoji,
   and two drawn ones: blades open or closed) and None. With the Cut tab
   box's icon (the default), Cut End's scissors are shut.
-- **Options:** the choices under Volume control look and Scissors have
-  letters, in keyboard order (Q, W, E, R, ...): Alt+O, then V (or S),
-  then a choice's letter switches to it.
+- **Options:** the Scissors choices have letters, in keyboard order (Q,
+  W, E, R, ...): Alt+O, then S, then a choice's letter switches to it.
 - **Cut tab:** Mark Cut Start and Mark Cut End moved from the play row to
   either side of the Cut Start / Cut End fields: Mark Cut Start on the
   left, Mark Cut End on the right.
 - **Cut tab:** clicking (or tabbing) into the Cut Start or Cut End time
   field picks that marker for the step buttons, so after typing a time
   you can fine-tune it with the step buttons straight away.
-- **Volume controls (to try out):** Options > Volume control look offers
-  15 looks for the speaker icon and the slider ball (Windows 11, white
-  ball, ring, small dot, bar, square, diamond, pill, round badge, fill
-  only, halo and more). The default is the look from before. It applies to
-  the Cut and Crop/Rotate volume sliders and the Audio tab's track volume
-  sliders, and the choice is remembered.
+- **Volume controls:** a new look on the Cut and Crop/Rotate volume
+  sliders and the Audio tab's track volume sliders: the Windows 11
+  speaker icon and a thicker track with no ball, just a dot under the
+  mouse or while dragging.
 - **Sliders:** every slider's knob, and the round ends of its track, now
   have smooth edges instead of jagged ones (the Cut slider's Start / End
-  balls too), and so are the speaker icons next to the volume and the
-  red playhead's tip. Six more volume looks: macOS, iOS, Material 3, glossy ball,
-  blue ball with a soft shadow, and a soft (neumorphic) knob.
+  balls too), and so are the speaker icon (where it is drawn, on Linux)
+  and the red playhead's tip.
 
 - After a save (Cut, Combine, Crop/Rotate, Audio), the "saved" message
   also asks "Open the new video in the editor?". Yes opens it right away:

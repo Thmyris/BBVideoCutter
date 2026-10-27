@@ -1681,18 +1681,6 @@ class SmoothPainter:
         return ImageTk.PhotoImage(self.img.reduce(self.k), master=self.widget)
 
 
-def _shadow_under(img, k, shape, dx, dy, blur, rgba):
-    """img with a blurred shadow under it: shape(draw, dx, dy) draws the
-    shadow's outline (offset dx, dy in img pixels) on a layer, which is
-    blurred by blur px (at 1x) and put under img."""
-    from PIL import ImageDraw, ImageFilter
-    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    shape(ImageDraw.Draw(layer), dx, dy, rgba)
-    if blur > 0:
-        layer = layer.filter(ImageFilter.GaussianBlur(blur * k))
-    return Image.alpha_composite(layer, img)
-
-
 class TimeSlider(tk.Canvas):
     # The marks (set_marks): where the parts of a joined video meet. Gray
     # shows on the track in both themes.
@@ -1714,7 +1702,7 @@ class TimeSlider(tk.Canvas):
         self._track_color = track_color
         self._fill_color = fill_color
         self._handle_color = handle_color
-        self._knob = "classic"        # the ball's look (set_look; KNOBS)
+        self._knob = "classic"        # the knob (set_look; KNOBS)
         self._track_width = 5
         self._hover = False
         self.bind("<Configure>", lambda e: self._redraw())
@@ -1724,12 +1712,12 @@ class TimeSlider(tk.Canvas):
         self.bind("<Enter>", lambda e: self._set_hover(True), add="+")
         self.bind("<Leave>", lambda e: self._set_hover(False), add="+")
 
-    # The balls set_look takes; "classic" is the blue ball with a white edge.
-    KNOBS = ("classic", "fluent", "white", "ring", "dot", "bar", "square", "diamond",
-             "pill", "big", "none", "halo", "mac", "ios", "material", "glossy", "soft",
-             "neumorphic")
-    # The looks that change under the mouse.
-    HOVER_KNOBS = ("fluent", "dot", "none", "halo", "soft")
+    # The knobs set_look takes: "classic", the blue ball with a white edge
+    # (the seek sliders); "none", no knob but a dot under the mouse or while
+    # dragging (the volume sliders).
+    KNOBS = ("classic", "none")
+    # The knobs that change under the mouse.
+    HOVER_KNOBS = ("none",)
 
     def set_look(self, knob, track_width):
         """The ball's look (one of KNOBS) and the track's width (unscaled px)."""
@@ -1830,202 +1818,36 @@ class TimeSlider(tk.Canvas):
     def _draw_smooth_knob(self, x, y):
         """The knob (KNOBS) drawn smooth with Pillow; sizes as _draw_knob's."""
         knob, drag, hover = self._knob, self._dragging, self._hover
-        u = UI_SCALE
-        bg = color_hex(self, self.cget("bg"))
-        dark = sum(self.winfo_rgb(bg)) < 3 * 32768
-        accent = color_hex(self, self._handle_color)
-        track_w = max(1, px(self._track_width))
-        white = "#ffffff"
         if knob == "none" and not (drag or hover):
             return
-
-        def disc(d, ox, oy, r, fill, k):
-            d.ellipse((ox - r * k, oy - r * k, ox + r * k, oy + r * k), fill=fill)
-
-        def round_bar(d, ox, oy, w, h, fill, k):
-            """A w x h bar (px) with round ends, centred on (ox, oy)."""
-            d.rounded_rectangle((ox - w * k / 2, oy - h * k / 2, ox + w * k / 2, oy + h * k / 2),
-                                radius=min(w, h) * k / 2, fill=fill)
-
-        def disc_shadow(img, ox, oy, k, r, dy, blur, alpha, dx=0.0, color=(0, 0, 0)):
-            def shape(d, sx, sy, rgba):
-                disc(d, ox + sx, oy + sy, r, rgba, k)
-            return _shadow_under(img, k, shape, dx * k, dy * k, blur,
-                                 color + (int(255 * alpha),))
+        u = UI_SCALE
+        accent = color_hex(self, self._handle_color)
 
         def paint(img, d, ox, oy, k):
-            if knob == "fluent":          # Windows 11: a disc with a dot that grows under the mouse
-                disc(d, ox, oy, 9 * u, "#5a5a5a" if dark else "#c8c8c8", k)
-                disc(d, ox, oy, 8 * u, "#454545" if dark else white, k)
-                disc(d, ox, oy, (3 if drag else 5 if hover else 4) * u, accent, k)
-                return disc_shadow(img, ox, oy, k, 9 * u, 0.6 * u, 0.8 * u, 0.25)
-            if knob == "white":           # a white ball with a soft shadow
-                r = (9 if drag else 8) * u
-                if not dark:
-                    disc(d, ox, oy, r, "#9a9a9a", k)
-                disc(d, ox, oy, r - (0 if dark else u), white, k)
-                return disc_shadow(img, ox, oy, k, r, 1.2 * u, 1.0 * u, 0.7 if dark else 0.35)
-            if knob == "ring":
-                r = (8 if drag else 7) * u
-                disc(d, ox, oy, r + 1.5 * u, accent, k)
-                disc(d, ox, oy, r - 1.5 * u, bg, k)
-            elif knob == "dot":
-                disc(d, ox, oy, (6 if drag or hover else 4) * u, accent, k)
-            elif knob == "bar":
-                half = (8 if drag else 7) * u
-                round_bar(d, ox, oy, 8 * u, 2 * half + 8 * u, white, k)
-                round_bar(d, ox, oy, 5 * u, 2 * half + 5 * u, accent, k)
-            elif knob == "square":
-                r = (7 if drag else 6) * u
-                d.rectangle((ox - (r + u) * k, oy - (r + u) * k, ox + (r + u) * k, oy + (r + u) * k),
-                            fill=white)
-                d.rectangle((ox - (r - u) * k, oy - (r - u) * k, ox + (r - u) * k, oy + (r - u) * k),
-                            fill=accent)
-            elif knob == "diamond":
-                r = (10 if drag else 8) * u
-                for rr, fill in ((r + 1.4 * u, white), (r - 1.4 * u, accent)):
-                    rr *= k
-                    d.polygon((ox, oy - rr, ox + rr, oy, ox, oy + rr, ox - rr, oy), fill=fill)
-            elif knob == "pill":
-                half = (6 if drag else 5) * u
-                round_bar(d, ox, oy, 2 * half + 13 * u, 13 * u, white, k)
-                round_bar(d, ox, oy, 2 * half + 9 * u, 9 * u, accent, k)
-            elif knob == "big":           # a big ball with a white centre
-                r = (10 if drag else 9) * u
-                disc(d, ox, oy, r + u, white, k)
-                disc(d, ox, oy, r - u, accent, k)
-                disc(d, ox, oy, 3 * u, white, k)
-            elif knob == "none":          # just the fill; a dot while dragging or under the mouse
-                disc(d, ox, oy, 6 * u, accent, k)
-            elif knob == "halo":          # a ball with a pale ring round it under the mouse
-                if drag or hover:
-                    disc(d, ox, oy, 11 * u, "#28456f" if dark else "#cfe2ff", k)
-                disc(d, ox, oy, 7 * u, accent, k)
-            elif knob == "mac":           # macOS: a white knob, a thin edge, a soft shadow
-                disc(d, ox, oy, 8.5 * u, "#b8b8b8" if not dark else "#d0d0d0", k)
-                disc(d, ox, oy, 8.5 * u - max(0.6, 0.6 * u), "#ececec" if drag else white, k)
-                return disc_shadow(img, ox, oy, k, 8.5 * u, 0.8 * u, 1.0 * u, 0.6 if dark else 0.3)
-            elif knob == "ios":           # iOS: a big white knob on a wide, soft shadow
-                r = 9.5 * u               # with its shadow, inside the 22 px slider
-                disc(d, ox, oy, r, "#ececec" if drag else white, k)
-                img = disc_shadow(img, ox, oy, k, r, 0, 0.5 * u, 0.14)
-                return disc_shadow(img, ox, oy, k, r, 1.0 * u, 1.3 * u, 0.6 if dark else 0.28)
-            elif knob == "material":      # Material 3: a tall thin handle in a gap in the track
-                w = (2 if drag else 4) * u
-                gap = 4 * u + 3 * u
-                d.rectangle((ox - gap * k, oy - (track_w / 2 + 1) * k,
-                             ox + gap * k, oy + (track_w / 2 + 1) * k), fill=bg)
-                round_bar(d, ox, oy, w, 22 * u, accent, k)
-            elif knob == "glossy":        # a shiny ball: lit from the top left
-                r = (9 if drag else 8) * u
-                return self._glossy_ball(img, ox, oy, r, accent, k, dark)
-            elif knob == "soft":          # a blue ball floating on a soft shadow
-                r = (9 if drag else 8) * u
-                if hover or drag:
-                    disc(d, ox, oy, r + 4 * u, "#28456f" if dark else "#dbe7fb", k)
-                disc(d, ox, oy, r, accent, k)
-                return disc_shadow(img, ox, oy, k, r, 1.5 * u, 1.6 * u, 0.7 if dark else 0.35)
-            elif knob == "neumorphic":    # pressed out of the background: lit top left, shadow bottom right
-                r = 8 * u
-                disc(d, ox, oy, r, bg, k)
-                disc(d, ox, oy, (3.5 if drag else 2.5) * u, accent, k)
-                img = disc_shadow(img, ox, oy, k, r, 1.0 * u, 1.2 * u, 0.7 if dark else 0.3,
-                                  dx=1.0 * u)
-                return disc_shadow(img, ox, oy, k, r, -1.0 * u, 1.2 * u, 0.10 if dark else 1.0,
-                                   dx=-1.0 * u, color=(255, 255, 255))
+            def disc(r, fill):
+                d.ellipse((ox - r * k, oy - r * k, ox + r * k, oy + r * k), fill=fill)
+            if knob == "none":            # just the fill; a dot while dragging or under the mouse
+                disc(6 * u, accent)
             else:                         # classic
                 r = (9 if drag else 7) * u
-                disc(d, ox, oy, r + u, white, k)
-                disc(d, ox, oy, r - u, accent, k)
+                disc(r + u, "#ffffff")
+                disc(r - u, accent)
             return img
 
-        key = ("knob", knob, drag, hover and knob in self.HOVER_KNOBS, bg, accent, track_w, u)
-        draw_smooth(self, x, y, 22 * u, key, paint)   # room for the widest shadow
-
-    @staticmethod
-    def _glossy_ball(img, ox, oy, r, accent, k, dark):
-        """A ball in accent, lit from the top left: a gradient from a light
-        to a dark shade of it, a white glint, a small shadow under it."""
-        from PIL import ImageChops, ImageDraw, ImageFilter
-        rgb = tuple(int(accent[i:i + 2], 16) for i in (1, 3, 5))
-        light = tuple(min(255, int(c + (255 - c) * 0.55)) for c in rgb)
-        deep = tuple(int(c * 0.55) for c in rgb)
-        rk = r * k
-        ball = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        d = ImageDraw.Draw(ball)
-        # Shrinking circles drift toward the light: from the dark edge to
-        # the light spot.
-        steps = max(8, int(rk))
-        for i in range(steps):
-            t = i / (steps - 1)
-            cr = rk * (1 - 0.85 * t)
-            cx, cy = ox - rk * 0.35 * t, oy - rk * 0.35 * t
-            color = tuple(int(deep[j] + (light[j] - deep[j]) * t ** 0.8) for j in range(3))
-            d.ellipse((cx - cr, cy - cr, cx + cr, cy + cr), fill=color + (255,))
-        ball = ball.filter(ImageFilter.GaussianBlur(k * 0.6))
-        mask = Image.new("L", img.size, 0)
-        ImageDraw.Draw(mask).ellipse((ox - rk, oy - rk, ox + rk, oy + rk), fill=255)
-        ball.putalpha(ImageChops.multiply(ball.getchannel("A"), mask))
-        glint = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        gx, gy = ox - rk * 0.38, oy - rk * 0.45
-        ImageDraw.Draw(glint).ellipse((gx - rk * 0.42, gy - rk * 0.26, gx + rk * 0.42, gy + rk * 0.26),
-                                      fill=(255, 255, 255, 170))
-        glint = glint.filter(ImageFilter.GaussianBlur(k * 0.5))
-        glint.putalpha(ImageChops.multiply(glint.getchannel("A"), mask))
-        ball = Image.alpha_composite(ball, glint)
-
-        def shape(sd, sx, sy, rgba):
-            sd.ellipse((ox - rk + sx, oy - rk + sy, ox + rk + sx, oy + rk + sy), fill=rgba)
-        return _shadow_under(Image.alpha_composite(img, ball), k, shape, 0, 1.2 * k,
-                             1.2, (0, 0, 0, 170 if dark else 90))
+        key = ("knob", knob, drag, hover and knob in self.HOVER_KNOBS, accent, u)
+        draw_smooth(self, x, y, 11 * u, key, paint)
 
     def _draw_knob(self, x, y):
+        """The knob on the canvas itself (no Pillow)."""
         knob, accent, drag = self._knob, self._handle_color, self._dragging
-        oval = lambda r, **kw: self.create_oval(x - r, y - r, x + r, y + r, **kw)  # noqa: E731
-        # Dark or light, from the canvas's own (themed) background.
-        dark = sum(self.winfo_rgb(self.cget("bg"))) < 3 * 32768
-        edge = max(1, px(2))
-        if knob == "fluent":          # Windows 11: a disc with a dot that grows under the mouse
-            oval(px(9), fill="#454545" if dark else "#ffffff",
-                 outline="#5a5a5a" if dark else "#c8c8c8", width=1)
-            oval(px(3) if drag else px(5) if self._hover else px(4), fill=accent, outline="")
-        elif knob == "white":         # a white ball with a soft shadow
-            r = px(9) if drag else px(8)
-            self.create_oval(x - r, y - r + px(1), x + r, y + r + px(1),
-                             fill="#101010" if dark else "#bdbdbd", outline="")
-            oval(r, fill="#ffffff", outline="#9a9a9a" if not dark else "#ffffff", width=1)
-        elif knob == "ring":
-            oval(px(8) if drag else px(7), fill=self.cget("bg"), outline=accent, width=px(3))
-        elif knob == "dot":
-            oval(px(6) if drag or self._hover else px(4), fill=accent, outline="")
-        elif knob == "bar":
-            half = px(8) if drag else px(7)
-            self.create_line(x, y - half, x, y + half, fill="#ffffff", width=px(8), capstyle="round")
-            self.create_line(x, y - half, x, y + half, fill=accent, width=px(5), capstyle="round")
-        elif knob == "square":
-            r = px(7) if drag else px(6)
-            self.create_rectangle(x - r, y - r, x + r, y + r, fill=accent, outline="#ffffff", width=edge)
-        elif knob == "diamond":
-            r = px(10) if drag else px(8)
-            self.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
-                                fill=accent, outline="#ffffff", width=edge)
-        elif knob == "pill":
-            half = px(6) if drag else px(5)
-            self.create_line(x - half, y, x + half, y, fill="#ffffff", width=px(13), capstyle="round")
-            self.create_line(x - half, y, x + half, y, fill=accent, width=px(9), capstyle="round")
-        elif knob == "big":           # a big ball with a white centre
-            oval(px(10) if drag else px(9), fill=accent, outline="#ffffff", width=edge)
-            oval(px(3), fill="#ffffff", outline="")
-        elif knob == "none":          # just the fill; a dot while dragging or under the mouse
+        if knob == "none":
             if drag or self._hover:
-                oval(px(6), fill=accent, outline="")
-        elif knob == "halo":          # a ball with a pale ring round it under the mouse
-            if drag or self._hover:
-                oval(px(11), fill="#28456f" if dark else "#cfe2ff", outline="")
-            oval(px(7), fill=accent, outline="")
+                r = px(6)
+                self.create_oval(x - r, y - r, x + r, y + r, fill=accent, outline="")
         else:                         # classic
             r = px(9) if drag else px(7)
-            oval(r, fill=accent, outline="#ffffff", width=edge)
+            self.create_oval(x - r, y - r, x + r, y + r, fill=accent, outline="#ffffff",
+                             width=max(1, px(2)))
 
     def _emit(self):
         if self._command:
@@ -2799,88 +2621,34 @@ class PlayerAudioControls:
         if self.hover:
             c.create_rectangle(0, 0, 26 * k, 22 * k, fill=self.app._theme_color("icon_hover"),
                                width=0)
-        style = self.app._volume_look()[0]
         muted, waves = icon == "muted", 0 if icon == "muted" else int(icon[-1])
-        line = max(1.0, 1.6 * k)
         g = lambda *pts: [v * k for v in pts]  # noqa: E731
-        speaker = (3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5)
-
-        def cross(x=18, y=11, s=3, width=line):
-            c.create_line(*g(x - s, y - s, x + s, y + s), fill=color, width=width, capstyle="round")
-            c.create_line(*g(x - s, y + s, x + s, y - s), fill=color, width=width, capstyle="round")
-
-        def arcs(cx=12, width=line, radii=(4, 7.5)):
-            for r in radii[:waves]:
-                c.create_arc(*g(cx - r, 11 - r, cx + r, 11 + r), start=-50, extent=100,
-                             style="arc", outline=color, width=width)
-
-        if style == "mdl2" and self.app.ICON_FONT_FAMILY in tkfont.families(c):
+        if self.app.ICON_FONT_FAMILY in tkfont.families(c):
             # The Windows icon font's speakers: muted, then 0-3 waves.
             level = 0 if self.player.volume <= 0 else 1 + min(2, int(self.player.volume // 34))
             glyph = "" if muted else ""[level]
             c.create_text(*g(13, 11), text=glyph, fill=color,
                           font=(self.app.ICON_FONT_FAMILY, 12))
             return
-        lit = 0 if muted else math.ceil(min(100.0, self.player.volume) / 25)
-        dim = self.app._theme_color("slider_track")
-        # The shapes below go to a SmoothPainter (drawn smooth with Pillow),
-        # one image per look, state and theme, kept.
+        # Without that font (Linux): a drawn speaker, smooth with Pillow
+        # (SmoothPainter), one image per state and theme, kept.
         canvas = c
         if PIL_AVAILABLE:
-            key = (style, icon, lit if style == "levels" else None, color, dim, k)
+            key = (icon, color, k)
             cache = self.app.__dict__.setdefault("_speaker_icons", {})
             if key in cache:
                 canvas.create_image(0, 0, anchor="nw", image=cache[key])
                 return
             c = SmoothPainter(canvas, 26 * k, 22 * k)
-        if style == "levels":
-            # Four rising bars, lit up to the volume; crossed out when muted.
-            for i in range(4):
-                x, top = 4 + i * 5, 15 - i * 3.5
-                c.create_rectangle(*g(x, top, x + 3, 18), fill=color if i < lit else dim, width=0)
-            if muted:
-                c.create_line(*g(3, 19, 22, 4), fill=color, width=line, capstyle="round")
-        elif style == "badge":
-            # A white speaker on a round badge, blue (grey when muted).
-            c.create_oval(*g(2, 0.5, 23, 21.5), fill="#8c8c8c" if muted else "#1a73e8", width=0)
-            pts = (5.5, 9, 8.5, 9, 12, 5.5, 12, 16.5, 8.5, 13, 5.5, 13)
-            c.create_polygon(*g(*pts), fill="#ffffff", outline="#ffffff")
-            if muted:
-                c.create_line(*g(14, 8.5, 19, 13.5), fill="#ffffff", width=line, capstyle="round")
-                c.create_line(*g(14, 13.5, 19, 8.5), fill="#ffffff", width=line, capstyle="round")
-            else:
-                for r in (3.5, 6.5)[:waves]:
-                    c.create_arc(*g(12 - r, 11 - r, 12 + r, 11 + r), start=-50, extent=100,
-                                 style="arc", outline="#ffffff", width=line)
+        line = max(1.0, 1.6 * k)
+        c.create_polygon(*g(3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5), fill=color, outline=color)
+        if muted:
+            for y0, y1 in ((8, 14), (14, 8)):
+                c.create_line(*g(15, y0, 21, y1), fill=color, width=line, capstyle="round")
         else:
-            if style == "outline":
-                c.create_polygon(*g(*speaker), fill="", outline=color, width=max(1.0, 1.3 * k),
-                                 joinstyle="round")
-            elif style == "thin":
-                c.create_polygon(*g(*speaker), fill="", outline=color, width=1)
-            elif style == "round":
-                c.create_polygon(*g(3, 8, 7.5, 8, 12.5, 3.5, 12.5, 18.5, 7.5, 14, 3, 14),
-                                 fill=color, outline=color, width=max(1.0, 1.5 * k),
-                                 joinstyle="round")
-            elif style == "cone":
-                c.create_polygon(*g(3, 11, 12, 3.5, 12, 18.5), fill=color, outline=color,
-                                 joinstyle="round")
-            else:      # classic, bars, dots
-                c.create_polygon(*g(*speaker), fill=color, outline=color)
-            if muted:
-                cross(width=1 if style == "thin" else line)
-            elif style == "bars":
-                for i in range(waves + 1 if waves else 0):
-                    x, half = 15.5 + i * 3.5, 2 + i * 2
-                    c.create_line(*g(x, 11 - half, x, 11 + half), fill=color, width=line,
-                                  capstyle="round")
-            elif style == "dots":
-                for i in range(waves + 1 if waves else 0):
-                    for dy in ((0,) if i == 0 else (-2.5 * i, 0, 2.5 * i)):
-                        x = 15 + i * 3.5
-                        c.create_oval(*g(x - 1, 11 + dy - 1, x + 1, 11 + dy + 1), fill=color, width=0)
-            else:
-                arcs(width=1 if style == "thin" else max(1.0, 2.2 * k) if style == "round" else line)
+            for r in (4, 7.5)[:waves]:
+                c.create_arc(*g(12 - r, 11 - r, 12 + r, 11 + r), start=-50, extent=100,
+                             style="arc", outline=color, width=line)
         if PIL_AVAILABLE:
             cache[key] = c.photo()
             canvas.create_image(0, 0, anchor="nw", image=cache[key])
@@ -3597,10 +3365,6 @@ class LosslessVideoApp(_BaseTk):
         scissors = self.settings.get("marker_scissors", self.SCISSORS[0][0])
         self.scissors_var = tk.StringVar(
             value=scissors if scissors in dict(self.SCISSORS) else self.SCISSORS[0][0])
-        # The volume controls' look: speaker icon, ball and track (VOLUME_LOOKS).
-        look = self.settings.get("volume_look", "classic")
-        self.volume_look_var = tk.StringVar(
-            value=look if look in {v[0] for v in self.VOLUME_LOOKS} else "classic")
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -3804,8 +3568,8 @@ class LosslessVideoApp(_BaseTk):
             variable=self.show_frame_buttons_var,
             command=self._on_show_frame_buttons_toggled,
         )
-        # These menus' choices have letters (MENU_LETTERS): Alt+O, the
-        # menu's own letter, then a choice's letter switches to it.
+        # Its choices have letters (MENU_LETTERS): Alt+O, S, then a choice's
+        # letter switches to it.
         scissors_menu = tk.Menu(options_menu, tearoff=0)
         for letter, (value, label) in zip(self.MENU_LETTERS, self.SCISSORS):
             scissors_menu.add_radiobutton(label=f"{letter}: {label}", underline=0,
@@ -3813,12 +3577,6 @@ class LosslessVideoApp(_BaseTk):
                                           command=self._on_scissors_changed)
         options_menu.add_cascade(label="Scissors on Cut Start / Cut End", menu=scissors_menu,
                                  underline=0)
-        volume_menu = tk.Menu(options_menu, tearoff=0)
-        for letter, (value, label, *_look) in zip(self.MENU_LETTERS, self.VOLUME_LOOKS):
-            volume_menu.add_radiobutton(label=f"{letter}: {label}", underline=0,
-                                        variable=self.volume_look_var, value=value,
-                                        command=self._on_volume_look_changed)
-        options_menu.add_cascade(label="Volume control look", menu=volume_menu, underline=0)
 
         help_menu = self._add_menu_bar_menu("Help")
         help_menu.add_command(label="Check for updates...", command=self._check_for_update)
@@ -5563,60 +5321,16 @@ class LosslessVideoApp(_BaseTk):
         "emoji": ("seguiemj.ttf", "✂", True),
     }
 
-    # Options > Volume control look: (setting value, menu label, speaker icon
-    # (PlayerAudioControls.draw_speaker), ball (TimeSlider.KNOBS), track
-    # width). For the Cut and Crop/Rotate tabs' volume and the Audio tab's
-    # track volumes. In the menu each has a letter, in keyboard order
-    # (MENU_LETTERS): with the menu open, the letter picks it.
-    VOLUME_LOOKS = (
-        ("classic", "Classic (as before)", "classic", "classic", 5),
-        ("win11", "Windows 11", "mdl2", "fluent", 4),
-        ("win11_outline", "Windows 11, outlined speaker", "outline", "fluent", 4),
-        ("white_ball", "White ball", "classic", "white", 4),
-        ("ring", "Ring", "outline", "ring", 4),
-        ("small_dot", "Small dot, thin line", "thin", "dot", 3),
-        ("bar", "Bar handle, bar waves", "bars", "bar", 4),
-        ("square", "Square handle", "classic", "square", 5),
-        ("diamond", "Diamond, speaker cone", "cone", "diamond", 4),
-        ("pill", "Pill handle, level bars", "levels", "pill", 4),
-        ("badge", "Round badge, big ball", "badge", "big", 5),
-        ("fill_only", "Fill only (a dot under the mouse)", "mdl2", "none", 6),
-        ("rounded", "Rounded speaker, white ball", "round", "white", 5),
-        ("dotted", "Dotted waves, ring", "dots", "ring", 3),
-        ("halo", "Halo ball", "round", "halo", 4),
-        ("mac", "macOS: white knob, soft shadow", "round", "mac", 4),
-        ("ios", "iOS: big white knob", "outline", "ios", 4),
-        ("material", "Material 3: tall handle in a gap", "mdl2", "material", 6),
-        ("glossy", "Glossy ball", "classic", "glossy", 4),
-        ("soft", "Blue ball, soft shadow", "mdl2", "soft", 4),
-        ("neumorphic", "Soft (neumorphic) knob", "outline", "neumorphic", 4),
-    )
-    # The letters the Options menus give their choices, in keyboard order.
+    # The volume sliders' look: (knob (TimeSlider.KNOBS), track width): no
+    # knob but a dot under the mouse, a thick track. Their speaker is the
+    # Windows 11 one (PlayerAudioControls.draw_speaker).
+    VOLUME_LOOK = ("none", 6)
+    # The letters an Options menu gives its choices, in keyboard order:
+    # with the menu open, the letter picks one.
     MENU_LETTERS = "QWERTYUIOPASDFGHJKLZXCVBNM"
 
-    def _volume_look(self):
-        """(speaker icon, ball, track width) of the look picked in Options."""
-        key = self.volume_look_var.get()
-        return next(look[2:] for look in self.VOLUME_LOOKS if look[0] == key)
-
-    def _volume_sliders(self):
-        """Every volume slider there is now."""
-        sliders = [a.volume_slider for a in (getattr(self, "cut_audio", None), self.resize_audio)
-                   if a is not None]
-        sliders += [t["volume_slider"] for t in getattr(self, "audio_tracks", ())
-                    if t.get("volume_slider") is not None]
-        return sliders
-
     def _style_volume_slider(self, slider):
-        slider.set_look(*self._volume_look()[1:])
-
-    def _on_volume_look_changed(self):
-        self._save_option("volume_look", self.volume_look_var)
-        for slider in self._volume_sliders():
-            self._style_volume_slider(slider)
-        for a in (getattr(self, "cut_audio", None), self.resize_audio):
-            if a is not None:
-                a.draw_speaker()
+        slider.set_look(*self.VOLUME_LOOK)
 
     def _field_picks_marker(self, which):
         """Clicking into a time field picks its marker."""
