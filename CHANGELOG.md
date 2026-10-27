@@ -86,6 +86,13 @@ app's update box shows as "What's new").
 - **Crop/Rotate tab:** the picked rotate button (0° / 90° / 180° / 270°)
   looks like the Cut tab's picked marker: tinted, edged in blue and bold,
   instead of pressed in. Picking one moves none of them.
+- **Cut tab:** scissors in front of Cut Start and Cut End, blue on the
+  picked one. Options > Scissors on Cut Start / Cut End offers seven
+  (the Cut tab box's icon, solid, outlined, upper blade, colour emoji,
+  and two drawn ones: blades open or closed) and None.
+- **Options:** the choices under Volume control look and Scissors have
+  letters, in keyboard order (Q, W, E, R, ...): Alt+O, then V (or S),
+  then a choice's letter switches to it.
 - **Cut tab:** Mark Cut Start and Mark Cut End moved from the play row to
   either side of the Cut Start / Cut End fields: Mark Cut Start on the
   left, Mark Cut End on the right.
