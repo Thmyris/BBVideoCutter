@@ -5058,7 +5058,14 @@ class LosslessVideoApp(_BaseTk):
         ("radio_field", "D: Radio buttons, picked time field framed in its handle colour"),
         ("big_radio", "E: Big radio circles"),
         ("ttk_radio", "F: Windows themed radio buttons"),
+        ("segmented", "G: Segmented control"),
+        ("tabs", "H: Underlined tabs"),
+        ("chips", "I: Pill chips with a tick"),
+        ("switch", "J: Start / End switch"),
+        ("cards", "K: Field cards"),
     )
+    # Drawn on a canvas (with Pillow, for smooth rounded shapes).
+    CANVAS_PICKERS = ("segmented", "tabs", "chips", "switch")
 
     def _on_marker_picker_changed(self):
         self._save_option("marker_picker", self.marker_picker_var)
@@ -5073,16 +5080,41 @@ class LosslessVideoApp(_BaseTk):
     def _build_marker_picker(self):
         """(Re)makes the Cut Start / Cut End picker, in front of each time
         field, in the layout chosen in Options."""
-        for w in self._marker_pickers.values():
+        row = self.start_entry.master
+        # The fields back in the row on their own (the cards hold them).
+        self.start_entry.pack_forget()
+        self.end_entry.pack_forget()
+        for w in set(self._marker_pickers.values()):
             w.destroy()
         self._marker_pickers = {}
+        self.start_entry.pack(in_=row, side="left", padx=(2, 20))
+        self.end_entry.pack(in_=row, side="left", padx=2)
         layout = self.marker_picker_var.get()
-        if layout == "big_radio" and not PIL_AVAILABLE:
-            layout = "radio"   # the circles are drawn with Pillow
+        if layout in ("big_radio",) + self.CANVAS_PICKERS and not PIL_AVAILABLE:
+            layout = "radio"   # drawn with Pillow
+        self._marker_layout = layout
         for which, entry, key in (("start", self.start_entry, "I"), ("end", self.end_entry, "O")):
             name = "Cut Start" if which == "start" else "Cut End"
             command = (lambda w=which: self._set_active_handle(w))
-            if layout == "ttk_radio":
+            if layout in ("segmented", "switch"):
+                # One control for both, in front of the Start field; the
+                # fields follow it in the same order.
+                if which == "end":
+                    self._marker_pickers["end"] = self._marker_pickers["start"]
+                    continue
+                w = tk.Canvas(row, highlightthickness=0, borderwidth=0, cursor="hand2")
+                w.pack(side="left", padx=(0, px(6)), before=entry)
+                w.bind("<Button-1>", lambda e, c=w: self._marker_canvas_click(c, e.x))
+                Tooltip(w, "Shortcuts: I / O set the start / end at the frame on screen")
+                self._marker_pickers["start"] = w
+                continue
+            if layout in ("tabs", "chips"):
+                w = tk.Canvas(row, highlightthickness=0, borderwidth=0, cursor="hand2")
+                w.pack(side="left", padx=(0, px(4)), before=entry)
+                w.bind("<Button-1>", lambda e, m=which: self._pick_marker(m))
+            elif layout == "cards":
+                w = self._make_marker_card(which, name, entry)
+            elif layout == "ttk_radio":
                 w = ttk.Radiobutton(entry.master, text=name + ":", variable=self.handle_var,
                                     value=which, command=command)
                 w.pack(side="left", padx=(0, px(2)), before=entry)
@@ -5107,6 +5139,137 @@ class LosslessVideoApp(_BaseTk):
             Tooltip(w, f"Shortcut: {key} sets the {which} at the frame on screen")
             self._marker_pickers[which] = w
         self._style_marker_picker()
+
+    def _pick_marker(self, which):
+        self.handle_var.set(which)
+        self._set_active_handle(which)
+
+    def _make_marker_card(self, which, name, entry):
+        """A card holding a coloured bar, the label and the time field; a
+        click anywhere on it (but the field) picks its marker."""
+        row = entry.master
+        card = tk.Frame(row, highlightthickness=1, borderwidth=0, cursor="hand2")
+        card.pack(side="left", padx=(0, px(10)), before=entry)
+        bar = tk.Frame(card, width=px(4))
+        bar.pack(side="left", fill="y")
+        label = tk.Label(card, text=name, cursor="hand2")
+        label.pack(side="left", padx=(px(6), px(4)), pady=px(3))
+        # The field is the row's child; the card only lays it out, above it.
+        entry.pack_forget()
+        entry.pack(in_=card, side="left", padx=(0, px(6)), pady=px(3))
+        entry.tkraise(card)
+        for w in (card, bar, label):
+            w.bind("<Button-1>", lambda e, m=which: self._pick_marker(m))
+        card._bbvc_parts = (bar, label)
+        return card
+
+    def _marker_fonts(self):
+        """(normal, bold) fonts for the pickers' labels."""
+        font = tkfont.nametofont("TkDefaultFont")
+        bold = self.__dict__.get("_marker_bold")
+        if bold is None:
+            bold = self._marker_bold = tkfont.Font(font=font)
+            bold.configure(weight="bold")
+        return font, bold
+
+    def _marker_canvas_click(self, c, x):
+        """A click on the segmented control or the switch."""
+        for x0, x1, which in getattr(c, "_bbvc_regions", ()):
+            if x0 <= x < x1:
+                if which == "toggle":
+                    which = "end" if self.handle_var.get() == "start" else "start"
+                self._pick_marker(which)
+                return
+
+    def _rounded(self, w, h, r, fill, outline=None, line=0):
+        """A rounded rectangle w x h (radius r) as a smooth image, drawn 4x
+        large and scaled down. Kept, so each look is made once."""
+        key = (w, h, r, fill, outline, line)
+        cache = self.__dict__.setdefault("_rounded_cache", {})
+        if key not in cache:
+            from PIL import ImageDraw
+            k = 4
+            img = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+            ImageDraw.Draw(img).rounded_rectangle(
+                (0, 0, w * k - 1, h * k - 1), radius=r * k, fill=fill, outline=outline,
+                width=line * k)
+            cache[key] = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
+        return cache[key]
+
+    def _draw_marker_canvases(self, layout, picked, dark):
+        """Draws the canvas pickers (G-J) for the pick and the theme."""
+        panel = DARK["panel"] if dark else "#f0f0f0"
+        text = DARK["text"] if dark else "#000000"
+        dim = DARK["text_dim"] if dark else "#555555"
+        accent = DARK["select"] if dark else "#0078d4"
+        font, bold = self._marker_fonts()
+        h =max(self.start_entry.winfo_reqheight(), font.metrics("linespace") + px(8))
+        if layout == "segmented":
+            c = self._marker_pickers["start"]
+            seg = max(bold.measure("Cut Start"), bold.measure("Cut End")) + px(24)
+            c.configure(width=2 * seg, height=h, background=panel)
+            c.delete("all")
+            track = DARK["field"] if dark else "#dcdcdf"
+            c.create_image(0, 0, anchor="nw", image=self._rounded(2 * seg, h, px(7), track))
+            on = 0 if picked == "start" else seg
+            thumb = DARK["button_active"] if dark else "#ffffff"
+            c.create_image(on + px(2), px(2), anchor="nw",
+                           image=self._rounded(seg - px(4), h - px(4), px(6), thumb,
+                                               DARK["border"] if dark else "#c4c4c8", 1))
+            for i, (which, name) in enumerate((("start", "Cut Start"), ("end", "Cut End"))):
+                c.create_text(i * seg + seg // 2, h // 2, text=name,
+                              font=bold if which == picked else font,
+                              fill=text if which == picked else dim)
+            c._bbvc_regions = ((0, seg, "start"), (seg, 2 * seg + 1, "end"))
+        elif layout == "switch":
+            c = self._marker_pickers["start"]
+            tw, th = px(38), px(20)
+            ws, we = bold.measure("Start"), bold.measure("End")
+            gap = px(8)
+            width = ws + gap + tw + gap + we
+            c.configure(width=width, height=h, background=panel)
+            c.delete("all")
+            color = self._marker_colors(picked)[0]
+            x = ws + gap
+            c.create_image(x, (h - th) // 2, anchor="nw", image=self._rounded(tw, th, th // 2, color))
+            knob = th - px(4)
+            kx = x + px(2) if picked == "start" else x + tw - px(2) - knob
+            knob_color = "#000000" if dark and picked == "start" else "#ffffff"
+            c.create_image(kx, (h - knob) // 2, anchor="nw",
+                           image=self._rounded(knob, knob, knob // 2, knob_color))
+            c.create_text(0, h // 2, anchor="w", text="Start", font=bold if picked == "start" else font,
+                          fill=text if picked == "start" else dim)
+            c.create_text(width, h // 2, anchor="e", text="End", font=bold if picked == "end" else font,
+                          fill=text if picked == "end" else dim)
+            c._bbvc_regions = ((0, x, "start"), (x, x + tw, "toggle"), (x + tw, width + 1, "end"))
+        elif layout == "tabs":
+            for which, c in self._marker_pickers.items():
+                name = "Cut Start" if which == "start" else "Cut End"
+                on = which == picked
+                width = bold.measure(name) + px(12)
+                c.configure(width=width, height=h, background=panel)
+                c.delete("all")
+                c.create_text(width // 2, h // 2 - px(1), text=name, font=bold if on else font,
+                              fill=accent if on else dim)
+                if on:
+                    c.create_image(px(2), h - px(3), anchor="nw",
+                                   image=self._rounded(width - px(4), px(3), px(1), accent))
+        elif layout == "chips":
+            for which, c in self._marker_pickers.items():
+                name = "Cut Start" if which == "start" else "Cut End"
+                on = which == picked
+                width = bold.measure("✓ " + name) + px(22)
+                c.configure(width=width, height=h, background=panel)
+                c.delete("all")
+                if on:
+                    fill, fg = self._marker_colors(which)
+                    c.create_image(0, 0, anchor="nw", image=self._rounded(width, h, h // 2, fill))
+                    c.create_text(width // 2, h // 2, text="✓ " + name, font=bold, fill=fg)
+                else:
+                    edge = DARK["border"] if dark else "#8c8c8c"
+                    c.create_image(0, 0, anchor="nw",
+                                   image=self._rounded(width, h, h // 2, panel, edge, max(1, px(1))))
+                    c.create_text(width // 2, h // 2, text=name, font=font, fill=text)
 
     def _marker_colors(self, which):
         """(background, text) of a picked marker in its slider handle's colour."""
@@ -5148,7 +5311,24 @@ class LosslessVideoApp(_BaseTk):
             return
         self._marker_styled = (layout, picked, dark, pickers.get("start"))
         panel = DARK["panel"] if dark else "#f0f0f0"
-        if layout in ("toggle", "toggle_color"):
+        layout = getattr(self, "_marker_layout", layout)   # without Pillow: the radios
+        if layout in self.CANVAS_PICKERS:
+            self._draw_marker_canvases(layout, picked, dark)
+        elif layout == "cards":
+            text = DARK["text"] if dark else "#000000"
+            for which, card in pickers.items():
+                bar, label = card._bbvc_parts
+                on = which == picked
+                bg = self._theme_color("tabbox_selected") if on else panel
+                edge = (self._marker_colors(which)[0] if on
+                        else DARK["border"] if dark else "#c4c4c8")
+                for w in (card, label):
+                    self._configure_light(w, background=bg)
+                self._configure_light(card, highlightbackground=edge, highlightcolor=edge)
+                self._configure_light(bar, background=self._marker_colors(which)[0] if on else bg)
+                font, bold = self._marker_fonts()
+                self._configure_light(label, foreground=text, font=bold if on else font)
+        elif layout in ("toggle", "toggle_color"):
             for which, w in pickers.items():
                 if which != picked:
                     bg = DARK["button"] if dark else "SystemButtonFace"
