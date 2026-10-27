@@ -4332,15 +4332,7 @@ class LosslessVideoApp(_BaseTk):
         messagebox.showinfo(
             "About",
             f"BarkBark Lossless Video Cutter\nVersion {APP_VERSION}\n\n"
-            "Cutting and joining both use ffmpeg stream-copy (-c copy) for the "
-            "bulk of the video, so almost nothing is re-encoded: it's fast and "
-            "lossless. Cutting only re-encodes a fraction of a second right at "
-            "an edge that doesn't land exactly on a keyframe, so the cut lands "
-            "on the exact second you asked for (GPU-accelerated when "
-            "available) — everything else stays byte-identical.\n\n"
-            "Drag & drop is enabled — drop a video onto the Cut, Crop/Rotate or Audio tab, "
-            "or onto the Combine tab's list. The Crop/Rotate tab uses a visual crop editor; "
-            "arbitrary spatial cropping requires video re-encoding.\n\n"
+            "Best simple video editor this world has ever seen.\n\n"
             "Built with Python by Thmyris.\n\n"
             "Special thanks to\n"
             "Josh (Madcat) - for testing and feedback",

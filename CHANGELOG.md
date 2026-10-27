@@ -10,6 +10,7 @@ app's update box shows as "What's new").
 - **The version in the window title.**
 - **The update box shows what every skipped version brought**, each under its own version.
 - **Cut Start and Cut End show 00:00:00.000 before a video is open**, instead of being empty.
+- **A shorter About box.**
 
 ## v1.2 (2026-10-27)
 
