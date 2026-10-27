@@ -5007,8 +5007,8 @@ class LosslessVideoApp(_BaseTk):
     def _nudge(self, delta_seconds):
         if not self.input_path:
             return
-        # Button nudges always land on a whole second (.000) -- see
-        # _x_to_time's docstring for why that matters for reproducibility.
+        # Button nudges always land on a whole second (.000), so the same
+        # presses always give the same time.
         if self.active_handle == "start":
             self.start_sec = float(round(max(0.0, min(self.start_sec + delta_seconds, self.end_sec))))
             self._cut_show_time(self.start_sec, "start")
@@ -5421,20 +5421,10 @@ class LosslessVideoApp(_BaseTk):
         c.itemconfigure("playhead_top", state="normal")
 
     def _x_to_time(self, x):
-        # Rounds to a whole second (.000) -- a drag is only pixel-precise,
-        # not sub-second-precise (especially on a long video, where one
-        # pixel can span several real seconds), but the entry only ever
-        # *displays* whole seconds from slider input. Without this, two
-        # drags that look identical on screen could silently land on
-        # different floats a fraction of a second apart -- and since
-        # classic mode's cut point is a stream-copy keyframe snap with no
-        # decode to correct it, that invisible difference can be the whole
-        # reason "the same second" sometimes snaps a few seconds early and
-        # sometimes doesn't. Typing an exact time into the entry field is
-        # still the way to get sub-second (millisecond) precision.
-        frac = (x - self._track_x0) / max(1, (self._track_x1 - self._track_x0))
-        frac = min(1.0, max(0.0, frac))
-        return float(round(frac * self.duration))
+        # A dragged handle's time, to the millisecond like the playhead's:
+        # whole milliseconds, as the time fields show and ffmpeg is given,
+        # so the time on screen is exactly the one the cut uses.
+        return round(self._x_to_exact_time(x), 3)
 
     def _time_to_x(self, t):
         frac = t / self.duration if self.duration else 0

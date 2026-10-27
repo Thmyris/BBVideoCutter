@@ -50,6 +50,9 @@ app's update box shows as "What's new").
   playhead. The video previews the handle's frame while you drag, and
   goes back to the playhead when you let go (and plays on, if it was
   playing).
+- **Cut tab:** dragging a Start / End handle sets its time to the
+  millisecond, like dragging the playhead, instead of snapping to whole
+  seconds.
 
 ### Project and docs
 
