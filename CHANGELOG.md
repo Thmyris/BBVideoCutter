@@ -65,11 +65,11 @@ app's update box shows as "What's new").
   buttons only when that row itself runs out of room.
 
 - **Cut tab (to try out):** the small Cut Start / Cut End radio buttons
-  were easy to miss. They are now big radio circles (E), and Options >
-  Cut Start / Cut End picker offers three other looks: K field cards
-  (each label and its time field in one card, the picked card tinted),
-  L outlined tabs (a pill outline round each, the picked one blue and
-  underlined) and M the same with square boxes. The choice is remembered.
+  were easy to miss. Each label and its time field now sit in one card,
+  and the picked card is tinted and edged in its slider handle's colour.
+  Options > Cut Start / Cut End picker offers two other looks: big radio
+  circles, and outlined boxes (the picked one blue and underlined). The
+  choice is remembered.
 - **Cut tab:** clicking (or tabbing) into the Cut Start or Cut End time
   field picks that marker for the step buttons, so after typing a time
   you can fine-tune it with the step buttons straight away.

@@ -3162,9 +3162,9 @@ class LosslessVideoApp(_BaseTk):
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
         # Cut tab: how Cut Start / Cut End is picked (MARKER_PICKERS).
-        picker = self.settings.get("marker_picker", "big_radio")
+        picker = self.settings.get("marker_picker", "cards")
         self.marker_picker_var = tk.StringVar(
-            value=picker if picker in dict(self.MARKER_PICKERS) else "big_radio")
+            value=picker if picker in dict(self.MARKER_PICKERS) else "cards")
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -5038,13 +5038,12 @@ class LosslessVideoApp(_BaseTk):
     # ---- Cut Start / Cut End picker (Options > Cut Start / Cut End picker) --
     # Ways to show it, to try side by side: (setting value, menu label).
     MARKER_PICKERS = (
-        ("big_radio", "E: Big radio circles"),
-        ("cards", "K: Field cards"),
-        ("outlined_tabs", "L: Outlined tabs, underlined"),
-        ("outlined_boxes", "M: Outlined boxes, underlined"),
+        ("big_radio", "Big radio circles"),
+        ("cards", "Field cards"),
+        ("outlined_boxes", "Outlined boxes, underlined"),
     )
-    # Drawn on a canvas (with Pillow, for smooth rounded shapes).
-    CANVAS_PICKERS = ("outlined_tabs", "outlined_boxes")
+    # Drawn on a canvas (with Pillow).
+    CANVAS_PICKERS = ("outlined_boxes",)
 
     def _on_marker_picker_changed(self):
         self._save_option("marker_picker", self.marker_picker_var)
@@ -5142,17 +5141,18 @@ class LosslessVideoApp(_BaseTk):
         return cache[key]
 
     def _draw_marker_canvases(self, layout, picked, dark):
-        """Draws the canvas pickers (L, M) for the pick and the theme."""
+        """Draws the canvas pickers (the outlined boxes) for the pick and the
+        theme."""
         panel = DARK["panel"] if dark else "#f0f0f0"
         dim = DARK["text_dim"] if dark else "#555555"
         accent = DARK["select"] if dark else "#0078d4"
         font, bold = self._marker_fonts()
         h = max(self.start_entry.winfo_reqheight(), font.metrics("linespace") + px(8))
-        if layout in ("outlined_tabs", "outlined_boxes"):
-            # A pill (L) or box (M) outline round each; the picked one's
-            # outline, text and underline in the accent colour.
+        if layout == "outlined_boxes":
+            # A box outline round each; the picked one's outline, text and
+            # underline in the accent colour.
             edge = DARK["border"] if dark else "#8c8c8c"
-            radius = h // 2 if layout == "outlined_tabs" else 0
+            radius = 0
             for which, c in self._marker_pickers.items():
                 name = "Cut Start" if which == "start" else "Cut End"
                 on = which == picked
