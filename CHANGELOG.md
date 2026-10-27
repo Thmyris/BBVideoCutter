@@ -77,6 +77,12 @@ app's update box shows as "What's new").
 - **Cut tab:** clicking (or tabbing) into the Cut Start or Cut End time
   field picks that marker for the step buttons, so after typing a time
   you can fine-tune it with the step buttons straight away.
+- **Volume controls (to try out):** Options > Volume control look offers
+  15 looks for the speaker icon and the slider ball (Windows 11, white
+  ball, ring, small dot, bar, square, diamond, pill, round badge, fill
+  only, halo and more). The default is the look from before. It applies to
+  the Cut and Crop/Rotate volume sliders and the Audio tab's track volume
+  sliders, and the choice is remembered.
 
 ### Project and docs
 

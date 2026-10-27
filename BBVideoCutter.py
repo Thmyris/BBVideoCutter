@@ -1596,10 +1596,30 @@ class TimeSlider(tk.Canvas):
         self._track_color = track_color
         self._fill_color = fill_color
         self._handle_color = handle_color
+        self._knob = "classic"        # the ball's look (set_look; KNOBS)
+        self._track_width = 5
+        self._hover = False
         self.bind("<Configure>", lambda e: self._redraw())
         self.bind("<Button-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
         self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", lambda e: self._set_hover(True), add="+")
+        self.bind("<Leave>", lambda e: self._set_hover(False), add="+")
+
+    # The balls set_look takes; "classic" is the blue ball with a white edge.
+    KNOBS = ("classic", "fluent", "white", "ring", "dot", "bar", "square", "diamond",
+             "pill", "big", "none", "halo")
+
+    def set_look(self, knob, track_width):
+        """The ball's look (one of KNOBS) and the track's width (unscaled px)."""
+        if (knob, track_width) != (self._knob, self._track_width):
+            self._knob, self._track_width = knob, track_width
+            self._redraw()
+
+    def _set_hover(self, on):
+        self._hover = on
+        if self._knob in ("fluent", "dot", "none", "halo"):   # the looks that react to it
+            self._redraw()
 
     def config_range(self, to, frm=0.0):
         self._minv = frm
@@ -1659,17 +1679,64 @@ class TimeSlider(tk.Canvas):
         x0, x1 = self._track_bounds()
         h = self.winfo_height() or px(28)
         y = h / 2
-        self.create_line(x0, y, x1, y, fill=self._track_color, width=px(5), capstyle="round")
+        tw = max(1, px(self._track_width))
+        self.create_line(x0, y, x1, y, fill=self._track_color, width=tw, capstyle="round")
         hx = self._x_for(self._value)
         if hx > x0:
-            self.create_line(x0, y, hx, y, fill=self._fill_color, width=px(5), capstyle="round")
+            self.create_line(x0, y, hx, y, fill=self._fill_color, width=tw, capstyle="round")
         for v in self._marks:
             mx = self._x_for(v)
             self.create_line(mx, y - px(7), mx, y + px(7), fill=self.MARK_COLOR,
                              width=max(1, px(2)), tags=("mark",))
-        r = px(9) if self._dragging else px(7)
-        self.create_oval(hx - r, y - r, hx + r, y + r,
-                          fill=self._handle_color, outline="#ffffff", width=px(2))
+        self._draw_knob(hx, y)
+
+    def _draw_knob(self, x, y):
+        knob, accent, drag = self._knob, self._handle_color, self._dragging
+        oval = lambda r, **kw: self.create_oval(x - r, y - r, x + r, y + r, **kw)  # noqa: E731
+        # Dark or light, from the canvas's own (themed) background.
+        dark = sum(self.winfo_rgb(self.cget("bg"))) < 3 * 32768
+        edge = max(1, px(2))
+        if knob == "fluent":          # Windows 11: a disc with a dot that grows under the mouse
+            oval(px(9), fill="#454545" if dark else "#ffffff",
+                 outline="#5a5a5a" if dark else "#c8c8c8", width=1)
+            oval(px(3) if drag else px(5) if self._hover else px(4), fill=accent, outline="")
+        elif knob == "white":         # a white ball with a soft shadow
+            r = px(9) if drag else px(8)
+            self.create_oval(x - r, y - r + px(1), x + r, y + r + px(1),
+                             fill="#101010" if dark else "#bdbdbd", outline="")
+            oval(r, fill="#ffffff", outline="#9a9a9a" if not dark else "#ffffff", width=1)
+        elif knob == "ring":
+            oval(px(8) if drag else px(7), fill=self.cget("bg"), outline=accent, width=px(3))
+        elif knob == "dot":
+            oval(px(6) if drag or self._hover else px(4), fill=accent, outline="")
+        elif knob == "bar":
+            half = px(8) if drag else px(7)
+            self.create_line(x, y - half, x, y + half, fill="#ffffff", width=px(8), capstyle="round")
+            self.create_line(x, y - half, x, y + half, fill=accent, width=px(5), capstyle="round")
+        elif knob == "square":
+            r = px(7) if drag else px(6)
+            self.create_rectangle(x - r, y - r, x + r, y + r, fill=accent, outline="#ffffff", width=edge)
+        elif knob == "diamond":
+            r = px(10) if drag else px(8)
+            self.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
+                                fill=accent, outline="#ffffff", width=edge)
+        elif knob == "pill":
+            half = px(6) if drag else px(5)
+            self.create_line(x - half, y, x + half, y, fill="#ffffff", width=px(13), capstyle="round")
+            self.create_line(x - half, y, x + half, y, fill=accent, width=px(9), capstyle="round")
+        elif knob == "big":           # a big ball with a white centre
+            oval(px(10) if drag else px(9), fill=accent, outline="#ffffff", width=edge)
+            oval(px(3), fill="#ffffff", outline="")
+        elif knob == "none":          # just the fill; a dot while dragging or under the mouse
+            if drag or self._hover:
+                oval(px(6), fill=accent, outline="")
+        elif knob == "halo":          # a ball with a pale ring round it under the mouse
+            if drag or self._hover:
+                oval(px(11), fill="#28456f" if dark else "#cfe2ff", outline="")
+            oval(px(7), fill=accent, outline="")
+        else:                         # classic
+            r = px(9) if drag else px(7)
+            oval(r, fill=accent, outline="#ffffff", width=edge)
 
     def _emit(self):
         if self._command:
@@ -2375,6 +2442,7 @@ class PlayerAudioControls:
         self.volume_slider = TimeSlider(parent, command=self.volume_changed, width=100, height=22)
         self.volume_slider.config_range(to=100.0)
         self.volume_slider.set(player.volume)
+        app._style_volume_slider(self.volume_slider)
         self.volume_slider.pack(side="left")
         self.volume_slider.bind(
             "<MouseWheel>", lambda e: self.volume_step(5 if e.delta > 0 else -5))
@@ -2442,16 +2510,77 @@ class PlayerAudioControls:
         if self.hover:
             c.create_rectangle(0, 0, 26 * k, 22 * k, fill=self.app._theme_color("icon_hover"),
                                width=0)
-        c.create_polygon(*[v * k for v in (3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5)],
-                         fill=color, outline=color)
+        style = self.app._volume_look()[0]
+        muted, waves = icon == "muted", 0 if icon == "muted" else int(icon[-1])
         line = max(1.0, 1.6 * k)
-        if icon == "muted":
-            c.create_line(15 * k, 8 * k, 21 * k, 14 * k, fill=color, width=line, capstyle="round")
-            c.create_line(15 * k, 14 * k, 21 * k, 8 * k, fill=color, width=line, capstyle="round")
+        g = lambda *pts: [v * k for v in pts]  # noqa: E731
+        speaker = (3, 8.5, 7, 8.5, 12, 4, 12, 18, 7, 13.5, 3, 13.5)
+
+        def cross(x=18, y=11, s=3, width=line):
+            c.create_line(*g(x - s, y - s, x + s, y + s), fill=color, width=width, capstyle="round")
+            c.create_line(*g(x - s, y + s, x + s, y - s), fill=color, width=width, capstyle="round")
+
+        def arcs(cx=12, width=line, radii=(4, 7.5)):
+            for r in radii[:waves]:
+                c.create_arc(*g(cx - r, 11 - r, cx + r, 11 + r), start=-50, extent=100,
+                             style="arc", outline=color, width=width)
+
+        if style == "mdl2" and self.app.ICON_FONT_FAMILY in tkfont.families(c):
+            # The Windows icon font's speakers: muted, then 0-3 waves.
+            level = 0 if self.player.volume <= 0 else 1 + min(2, int(self.player.volume // 34))
+            glyph = "" if muted else ""[level]
+            c.create_text(*g(13, 11), text=glyph, fill=color,
+                          font=(self.app.ICON_FONT_FAMILY, 12))
+        elif style == "levels":
+            # Four rising bars, lit up to the volume; crossed out when muted.
+            lit = 0 if muted else math.ceil(min(100.0, self.player.volume) / 25)
+            dim = self.app._theme_color("slider_track")
+            for i in range(4):
+                x, top = 4 + i * 5, 15 - i * 3.5
+                c.create_rectangle(*g(x, top, x + 3, 18), fill=color if i < lit else dim, width=0)
+            if muted:
+                c.create_line(*g(3, 19, 22, 4), fill=color, width=line, capstyle="round")
+        elif style == "badge":
+            # A white speaker on a round badge, blue (grey when muted).
+            c.create_oval(*g(2, 0.5, 23, 21.5), fill="#8c8c8c" if muted else "#1a73e8", width=0)
+            pts = (5.5, 9, 8.5, 9, 12, 5.5, 12, 16.5, 8.5, 13, 5.5, 13)
+            c.create_polygon(*g(*pts), fill="#ffffff", outline="#ffffff")
+            if muted:
+                c.create_line(*g(14, 8.5, 19, 13.5), fill="#ffffff", width=line, capstyle="round")
+                c.create_line(*g(14, 13.5, 19, 8.5), fill="#ffffff", width=line, capstyle="round")
+            else:
+                for r in (3.5, 6.5)[:waves]:
+                    c.create_arc(*g(12 - r, 11 - r, 12 + r, 11 + r), start=-50, extent=100,
+                                 style="arc", outline="#ffffff", width=line)
         else:
-            for r in (4, 7.5)[:int(icon[-1])]:
-                c.create_arc((12 - r) * k, (11 - r) * k, (12 + r) * k, (11 + r) * k,
-                             start=-50, extent=100, style="arc", outline=color, width=line)
+            if style == "outline":
+                c.create_polygon(*g(*speaker), fill="", outline=color, width=max(1.0, 1.3 * k),
+                                 joinstyle="round")
+            elif style == "thin":
+                c.create_polygon(*g(*speaker), fill="", outline=color, width=1)
+            elif style == "round":
+                c.create_polygon(*g(3, 8, 7.5, 8, 12.5, 3.5, 12.5, 18.5, 7.5, 14, 3, 14),
+                                 fill=color, outline=color, width=max(1.0, 1.5 * k),
+                                 joinstyle="round")
+            elif style == "cone":
+                c.create_polygon(*g(3, 11, 12, 3.5, 12, 18.5), fill=color, outline=color,
+                                 joinstyle="round")
+            else:      # classic, bars, dots
+                c.create_polygon(*g(*speaker), fill=color, outline=color)
+            if muted:
+                cross(width=1 if style == "thin" else line)
+            elif style == "bars":
+                for i in range(waves + 1 if waves else 0):
+                    x, half = 15.5 + i * 3.5, 2 + i * 2
+                    c.create_line(*g(x, 11 - half, x, 11 + half), fill=color, width=line,
+                                  capstyle="round")
+            elif style == "dots":
+                for i in range(waves + 1 if waves else 0):
+                    for dy in ((0,) if i == 0 else (-2.5 * i, 0, 2.5 * i)):
+                        x = 15 + i * 3.5
+                        c.create_oval(*g(x - 1, 11 + dy - 1, x + 1, 11 + dy + 1), fill=color, width=0)
+            else:
+                arcs(width=1 if style == "thin" else max(1.0, 2.2 * k) if style == "round" else line)
 
     def post_track_menu(self):
         menu = self.track_menu
@@ -3165,6 +3294,10 @@ class LosslessVideoApp(_BaseTk):
         picker = self.settings.get("marker_picker", "cards")
         self.marker_picker_var = tk.StringVar(
             value=picker if picker in dict(self.MARKER_PICKERS) else "cards")
+        # The volume controls' look: speaker icon, ball and track (VOLUME_LOOKS).
+        look = self.settings.get("volume_look", "classic")
+        self.volume_look_var = tk.StringVar(
+            value=look if look in {v[0] for v in self.VOLUME_LOOKS} else "classic")
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -3373,6 +3506,11 @@ class LosslessVideoApp(_BaseTk):
             picker_menu.add_radiobutton(label=label, variable=self.marker_picker_var, value=value,
                                         command=self._on_marker_picker_changed)
         options_menu.add_cascade(label="Cut Start / Cut End picker", menu=picker_menu)
+        volume_menu = tk.Menu(options_menu, tearoff=0)
+        for value, label, *_look in self.VOLUME_LOOKS:
+            volume_menu.add_radiobutton(label=label, variable=self.volume_look_var, value=value,
+                                        command=self._on_volume_look_changed)
+        options_menu.add_cascade(label="Volume control look", menu=volume_menu)
 
         help_menu = self._add_menu_bar_menu("Help")
         help_menu.add_command(label="Check for updates...", command=self._check_for_update)
@@ -5045,6 +5183,52 @@ class LosslessVideoApp(_BaseTk):
     # Drawn on a canvas (with Pillow).
     CANVAS_PICKERS = ("outlined_boxes",)
 
+    # Options > Volume control look: (setting value, menu label, speaker icon
+    # (PlayerAudioControls.draw_speaker), ball (TimeSlider.KNOBS), track
+    # width). For the Cut and Crop/Rotate tabs' volume and the Audio tab's
+    # track volumes.
+    VOLUME_LOOKS = (
+        ("classic", "Classic (as before)", "classic", "classic", 5),
+        ("win11", "Windows 11", "mdl2", "fluent", 4),
+        ("win11_outline", "Windows 11, outlined speaker", "outline", "fluent", 4),
+        ("white_ball", "White ball", "classic", "white", 4),
+        ("ring", "Ring", "outline", "ring", 4),
+        ("small_dot", "Small dot, thin line", "thin", "dot", 3),
+        ("bar", "Bar handle, bar waves", "bars", "bar", 4),
+        ("square", "Square handle", "classic", "square", 5),
+        ("diamond", "Diamond, speaker cone", "cone", "diamond", 4),
+        ("pill", "Pill handle, level bars", "levels", "pill", 4),
+        ("badge", "Round badge, big ball", "badge", "big", 5),
+        ("fill_only", "Fill only (a dot under the mouse)", "mdl2", "none", 6),
+        ("rounded", "Rounded speaker, white ball", "round", "white", 5),
+        ("dotted", "Dotted waves, ring", "dots", "ring", 3),
+        ("halo", "Halo ball", "round", "halo", 4),
+    )
+
+    def _volume_look(self):
+        """(speaker icon, ball, track width) of the look picked in Options."""
+        key = self.volume_look_var.get()
+        return next(look[2:] for look in self.VOLUME_LOOKS if look[0] == key)
+
+    def _volume_sliders(self):
+        """Every volume slider there is now."""
+        sliders = [a.volume_slider for a in (getattr(self, "cut_audio", None), self.resize_audio)
+                   if a is not None]
+        sliders += [t["volume_slider"] for t in getattr(self, "audio_tracks", ())
+                    if t.get("volume_slider") is not None]
+        return sliders
+
+    def _style_volume_slider(self, slider):
+        slider.set_look(*self._volume_look()[1:])
+
+    def _on_volume_look_changed(self):
+        self._save_option("volume_look", self.volume_look_var)
+        for slider in self._volume_sliders():
+            self._style_volume_slider(slider)
+        for a in (getattr(self, "cut_audio", None), self.resize_audio):
+            if a is not None:
+                a.draw_speaker()
+
     def _on_marker_picker_changed(self):
         self._save_option("marker_picker", self.marker_picker_var)
         self._build_marker_picker()
@@ -5119,6 +5303,14 @@ class LosslessVideoApp(_BaseTk):
             w.bind("<Button-1>", lambda e, m=which: self._pick_marker(m))
         card._bbvc_parts = (bar, label)
         return card
+
+    def _pixel_image(self):
+        """A blank 1 x 1 image: a label or button showing it (compound
+        "center") takes its width and height in pixels, not characters."""
+        image = self.__dict__.get("_blank_image")
+        if image is None:
+            image = self._blank_image = tk.PhotoImage(width=1, height=1)
+        return image
 
     def _marker_fonts(self):
         """(normal, bold) fonts for the pickers' labels."""
@@ -5301,14 +5493,6 @@ class LosslessVideoApp(_BaseTk):
                  f"{seconds_to_ffmpeg_time(end)} ({n} scene{'' if n == 1 else 's'} of "
                  f"{os.path.basename(path)} there)")
         self._bulk_list_changed()
-
-    def _pixel_image(self):
-        """A blank 1 x 1 image: a label or button showing it (compound
-        "center") takes its width and height in pixels, not characters."""
-        image = self.__dict__.get("_blank_image")
-        if image is None:
-            image = self._blank_image = tk.PhotoImage(width=1, height=1)
-        return image
 
     def _update_cut_range_buttons(self):
         if not hasattr(self, "cut_ranges_btn"):
@@ -9467,6 +9651,7 @@ class LosslessVideoApp(_BaseTk):
             )
             vol_slider.config_range(to=self.AUDIO_MAX_GAIN)
             vol_slider.set(1.0)
+            self._style_volume_slider(vol_slider)
             vol_slider.pack(side="right", padx=(6, 6))
             track["volume_slider"] = vol_slider
             track["volume_lbl"] = vol_lbl
