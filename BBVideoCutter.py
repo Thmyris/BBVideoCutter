@@ -1043,12 +1043,6 @@ UPDATE_PAGE_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 UPDATE_CHECK_INTERVAL = 24 * 3600     # seconds between the automatic checks
 UPDATE_SETUP_ASSET = "BBVideoCutter-Setup.exe"        # what an installed copy downloads
 UPDATE_PORTABLE_ASSET = "BBVideoCutter-Portable.zip"  # what a portable copy downloads
-# A stand-in for GitHub's answer, to try the update box without a real
-# release, e.g. {"tag_name": "v1.1", "html_url": UPDATE_PAGE_URL,
-# "body": "What's new...", "assets": []}. None: GitHub is asked. (GitHub
-# tells an app without a login nothing about a private repository's
-# releases, so until the repository is public the check finds nothing.)
-FAKE_LATEST_RELEASE = None
 
 
 def version_tuple(text):
@@ -1068,8 +1062,6 @@ def fetch_latest_release(timeout=15):
     tag_name, html_url, body (the release notes) and assets (name,
     browser_download_url, size). Raises OSError or ValueError when it
     can't be had."""
-    if FAKE_LATEST_RELEASE is not None:
-        return dict(FAKE_LATEST_RELEASE)
     import urllib.request
     request = urllib.request.Request(UPDATE_API_URL, headers={
         "Accept": "application/vnd.github+json",
