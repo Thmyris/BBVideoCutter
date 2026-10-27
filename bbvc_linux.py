@@ -32,6 +32,11 @@ app = None   # BBVideoCutter's module, once installed
 LINUX_ASSET = "BBVideoCutter-Linux-x86_64.tar.gz"
 LINUX_DEB = "BBVideoCutter-Linux-amd64.deb"
 DEB_DIR = "/opt/bbvideocutter/"
+# The main window's class name: its WM_CLASS is ("bbvideocutter",
+# "Bbvideocutter"), which the .deb's menu entry names (StartupWMClass), so
+# docks and app switchers show the window as that app, with its icon.
+# Tk's default, "Tk", is every Tk program's.
+WM_CLASS = "bbvideocutter"
 
 # mpv options for every player, over the app's own.
 MPV_OPTIONS = {
@@ -68,6 +73,7 @@ def install(module):
     cls._restart_from_source = _restart_from_source
     _wrap_start_update(cls)
     _wrap_init(cls)
+    _wrap_tk_class(cls, module._BaseTk)
 
 
 def _init_x11_threads():
@@ -201,6 +207,19 @@ def _wrap_init(cls):
         self.bind_all("<Button-5>", lambda e: _wheel(e, -120), add="+")
 
     cls.__init__ = __init__
+
+
+def _wrap_tk_class(cls, base):
+    """The app's main window is made with className=WM_CLASS (the app
+    calls its Tk base's __init__ without one)."""
+    real = base.__init__
+
+    def __init__(self, *args, **kwargs):
+        if isinstance(self, cls):
+            kwargs.setdefault("className", WM_CLASS)
+        real(self, *args, **kwargs)
+
+    base.__init__ = __init__
 
 
 def _wheel(event, delta):
