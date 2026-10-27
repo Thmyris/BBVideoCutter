@@ -3,7 +3,6 @@
 <h1><img src="docs/logo.png" width="44" align="absmiddle" alt=""> BarkBark Lossless Video Cutter</h1>
 
 The fastest and the most stable video editor for your simple video editing needs. Built with ffmpeg and mpv.
-For Windows 10 / 11, and Linux ([beta](#linux-beta)).
 
 [![Latest release](https://img.shields.io/github/v/release/Thmyris/BBVideoCutter?style=for-the-badge&color=2ea043)](https://github.com/Thmyris/BBVideoCutter/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Thmyris/BBVideoCutter/releases/latest)
