@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>BarkBark Lossless Video Cutter</h1>
+<h1><img src="docs/logo.png" width="44" align="absmiddle" alt=""> BarkBark Lossless Video Cutter</h1>
 
 The fastest and the most stable video editor for your simple video editing needs. Built with ffmpeg and mpv.
 For Windows 10 / 11, and Linux ([beta](#linux-beta)).
@@ -11,28 +11,9 @@ For Windows 10 / 11, and Linux ([beta](#linux-beta)).
 [![GitHub stars](https://img.shields.io/github/stars/Thmyris/BBVideoCutter?style=for-the-badge&logo=github&color=e3b341)](https://github.com/Thmyris/BBVideoCutter/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
-<img src="docs/screenshots/cut.png" width="860" alt="Cut tab: scenes marked on a long recording">
+<img src="docs/screenshots/cut.png" width="640" alt="Cut tab: scenes marked on a long recording">
 
 </div>
-
-## Download
-
-On the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/latest)** page:
-
-- **`BBVideoCutter-Setup.exe`** — Windows installer.
-- **`BBVideoCutter-Portable.zip`** — extract and run
-  `BBVideoCutter.exe`, no install.
-- **`BBVideoCutter-Linux-amd64.deb`** — Linux, [beta](#linux-beta), for
-  Ubuntu 24.04 or later (and Debian-based distros as new):
-  `sudo apt install ./BBVideoCutter-Linux-amd64.deb` installs it with what
-  it needs, and adds it to the app menu (or run `bbvideocutter`).
-- **`BBVideoCutter-Linux-x86_64.tar.gz`** — the same Linux build for
-  other distros: extract and run `BBVideoCutter/BBVideoCutter`. Needs
-  `ffmpeg` and `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and
-  glibc 2.38 or newer.
-
-  The Linux build tells you when a new version is out, but doesn't
-  install it itself yet.
 
 ## Features
 
@@ -56,6 +37,24 @@ On the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/late
   </tr>
 </table>
 
+## Download
+
+Go to the [release](https://github.com/Thmyris/BBVideoCutter/releases/latest) page, or download a file directly:
+
+- **[`BBVideoCutter-Win-Setup.exe`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Win-Setup.exe)** — Windows installer.
+- **[`BBVideoCutter-Win-Portable.zip`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Win-Portable.zip)** — extract and run
+  `BBVideoCutter.exe`, no install.
+- **[`BBVideoCutter-Linux-amd64.deb`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Linux-amd64.deb)** — Linux, [beta](#linux-beta), for
+  Ubuntu 24.04 or later (and Debian-based distros as new):
+  `sudo apt install ./BBVideoCutter-Linux-amd64.deb` installs it with what
+  it needs, and adds it to the app menu (or run `bbvideocutter`).
+- **[`BBVideoCutter-Linux-x86_64.tar.gz`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Linux-x86_64.tar.gz)** — the same Linux build for
+  other distros: extract and run `BBVideoCutter/BBVideoCutter`. Needs
+  `ffmpeg` and `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and
+  glibc 2.38 or newer.
+
+  The Linux build tells you when a new version is out, but doesn't
+  install it itself yet.
 
 ## Running from source
 
@@ -105,8 +104,8 @@ Scripts in `release/build/` (PyInstaller onedir + optional Inno Setup
 installer):
 
 - `build_exe.bat` — quick test build
-- `build_setup.bat` — installer → `release/BBVideoCutter-Setup.exe`
-- `build_portable.bat` — zip → `release/BBVideoCutter-Portable.zip`
+- `build_setup.bat` — installer → `release/BBVideoCutter-Win-Setup.exe`
+- `build_portable.bat` — zip → `release/BBVideoCutter-Win-Portable.zip`
 - `build_portable_and_setup.bat` — both of the above, one after the
   other, from a single app build
 
