@@ -1,6 +1,6 @@
 @echo off
 REM ===================================================================
-REM Builds ..\BBVideoCutter-Win-Setup.exe (a real Windows installer) from
+REM Builds ..\BBVideoCutter-Setup.exe (a real Windows installer) from
 REM ..\..\BBVideoCutter.py.
 REM
 REM RUN THIS ON WINDOWS. Requires:
@@ -25,7 +25,7 @@ REM      dist\BBVideoCutter\ into a proper installer (per-user install to
 REM      %LOCALAPPDATA%\Programs, Start Menu shortcut, uninstaller) -- also
 REM      using ..\..\assets\barkbark2.ico as the installer's own icon.
 REM   4) Copies the finished installer out to release\ (one level up)
-REM      as BBVideoCutter-Win-Setup.exe, then deletes every intermediate
+REM      as BBVideoCutter-Setup.exe, then deletes every intermediate
 REM      byproduct this script created (build\, dist\, the .spec file,
 REM      installer_output\) -- none of that is the deliverable, just
 REM      scratch work along the way, and it's all regenerable by
@@ -107,7 +107,7 @@ echo       version %APP_VERSION%
 %ISCC% /DMyAppVersion=%APP_VERSION% installer.iss
 if errorlevel 1 goto :error
 
-copy /y "installer_output\BBVideoCutter-Win-Setup.exe" "..\BBVideoCutter-Win-Setup.exe" >nul
+copy /y "installer_output\BBVideoCutter-Setup.exe" "..\BBVideoCutter-Setup.exe" >nul
 
 echo.
 echo [4/4] Cleaning up build byproducts...
@@ -117,7 +117,7 @@ if exist "installer_output" rmdir /s /q "installer_output"
 if exist "BBVideoCutter.spec" del /f /q "BBVideoCutter.spec"
 
 echo.
-echo Done! BBVideoCutter-Win-Setup.exe is ready in release\.
+echo Done! BBVideoCutter-Setup.exe is ready in release\.
 goto :end
 
 :error

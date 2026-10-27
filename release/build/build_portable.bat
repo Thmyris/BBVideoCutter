@@ -1,6 +1,6 @@
 @echo off
 REM ===================================================================
-REM Builds ..\BBVideoCutter-Win-Portable.zip from ..\..\BBVideoCutter.py.
+REM Builds ..\BBVideoCutter-Portable.zip from ..\..\BBVideoCutter.py.
 REM
 REM RUN THIS ON WINDOWS. Requires:
 REM   - Python + pip on PATH
@@ -18,7 +18,7 @@ REM      why onedir over onefile). If ffmpeg.exe/ffprobe.exe are sitting
 REM      in this same folder, they're included so the app needs nothing
 REM      on the system PATH. Uses ..\..\assets\barkbark2.ico as the
 REM      app's icon.
-REM   3) Zips dist\BBVideoCutter\ into ..\BBVideoCutter-Win-Portable.zip (one
+REM   3) Zips dist\BBVideoCutter\ into ..\BBVideoCutter-Portable.zip (one
 REM      level up, in release\) -- extract it anywhere and run
 REM      BBVideoCutter.exe, no install needed.
 REM   4) Deletes every intermediate byproduct this script created
@@ -88,9 +88,9 @@ python -m PyInstaller ^
 if errorlevel 1 goto :error
 
 echo.
-echo [3/4] Zipping dist\BBVideoCutter\ into BBVideoCutter-Win-Portable.zip...
-if exist "..\BBVideoCutter-Win-Portable.zip" del /f /q "..\BBVideoCutter-Win-Portable.zip"
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\BBVideoCutter' -DestinationPath '..\BBVideoCutter-Win-Portable.zip' -Force"
+echo [3/4] Zipping dist\BBVideoCutter\ into BBVideoCutter-Portable.zip...
+if exist "..\BBVideoCutter-Portable.zip" del /f /q "..\BBVideoCutter-Portable.zip"
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\BBVideoCutter' -DestinationPath '..\BBVideoCutter-Portable.zip' -Force"
 if errorlevel 1 goto :error
 
 echo.
@@ -100,7 +100,7 @@ if exist "dist" rmdir /s /q "dist"
 if exist "BBVideoCutter.spec" del /f /q "BBVideoCutter.spec"
 
 echo.
-echo Done! BBVideoCutter-Win-Portable.zip is ready in release\.
+echo Done! BBVideoCutter-Portable.zip is ready in release\.
 goto :end
 
 :error
