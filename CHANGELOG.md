@@ -96,6 +96,9 @@ app's update box shows as "What's new").
   the Cut and Crop/Rotate volume sliders and the Audio tab's track volume
   sliders, and the choice is remembered.
 
+- The tab boxes on the menu bar are in a new order: Cut, Bulk Cut,
+  Combine, Crop/Rotate, Audio (Bulk Cut and Combine swapped places).
+
 ### Project and docs
 
 - README rewritten: screenshots, badges (release, Windows, Linux beta,

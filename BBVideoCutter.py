@@ -3597,13 +3597,14 @@ class LosslessVideoApp(_BaseTk):
         self._style_tab_boxes()
 
     # The tabs, as boxes on the menu bar: (box label, the tab's full name,
-    # its icon in Segoe MDL2 Assets, Windows 10's icon font).
+    # its icon in Segoe MDL2 Assets, Windows 10's icon font), in the order
+    # shown, each with its tab's index in the notebook.
     TAB_BOXES = (
-        ("Cut", "Cut Clip", "\ue8c6"),               # scissors
-        ("Combine", "Combine Videos", "\ue71b"),     # chain links
-        ("Bulk Cut", "Bulk Cut", "\ue8b9"),          # a stack of clips
-        ("Crop/Rotate", "Crop/Rotate", "\ue7a8"),    # crop corners
-        ("Audio", "Audio", "\ue8d6"),                # notes
+        (0, "Cut", "Cut Clip", "\ue8c6"),               # scissors
+        (2, "Bulk Cut", "Bulk Cut", "\ue8b9"),          # a stack of clips
+        (1, "Combine", "Combine Videos", "\ue71b"),     # chain links
+        (3, "Crop/Rotate", "Crop/Rotate", "\ue7a8"),    # crop corners
+        (4, "Audio", "Audio", "\ue8d6"),                # notes
     )
     ICON_FONT_FAMILY = "Segoe MDL2 Assets"
     NOTEBOOK_STYLE = "Boxed.TNotebook"   # the notebook, its own tabs hidden
@@ -3621,8 +3622,9 @@ class LosslessVideoApp(_BaseTk):
         up when the mouse rests on one)."""
         bar = self.tab_box_bar = tk.Frame(self.menu_bar)
         has_icons = self.ICON_FONT_FAMILY in tkfont.families(self)
-        self._tab_boxes = []          # (box, icon label or None, name label)
-        for idx, (label, name, glyph) in enumerate(self.TAB_BOXES):
+        # (box, icon label or None, name label), by notebook index.
+        self._tab_boxes = [None] * len(self.TAB_BOXES)
+        for idx, label, name, glyph in self.TAB_BOXES:
             box = tk.Frame(bar, highlightthickness=px(1), cursor="hand2")
             box.pack(side="left", padx=px(3))
             icon = None
@@ -3638,7 +3640,7 @@ class LosslessVideoApp(_BaseTk):
                     w.bind("<Leave>", lambda e: self.after_idle(self._style_tab_boxes), add="+")
                     if w is not box:   # the labels cover the box
                         Tooltip(w, name)
-            self._tab_boxes.append((box, icon, text))
+            self._tab_boxes[idx] = (box, icon, text)
         # Between the boxes the bar still moves the window.
         self._bind_window_drag(bar, lambda e: True)
         self._tab_boxes_compact = False
