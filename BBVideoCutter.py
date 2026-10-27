@@ -5064,9 +5064,10 @@ class LosslessVideoApp(_BaseTk):
         ("switch", "J: Start / End switch"),
         ("cards", "K: Field cards"),
         ("outlined_tabs", "L: Outlined tabs, underlined"),
+        ("outlined_boxes", "M: Outlined boxes, underlined"),
     )
     # Drawn on a canvas (with Pillow, for smooth rounded shapes).
-    CANVAS_PICKERS = ("segmented", "tabs", "chips", "switch", "outlined_tabs")
+    CANVAS_PICKERS = ("segmented", "tabs", "chips", "switch", "outlined_tabs", "outlined_boxes")
 
     def _on_marker_picker_changed(self):
         self._save_option("marker_picker", self.marker_picker_var)
@@ -5109,7 +5110,7 @@ class LosslessVideoApp(_BaseTk):
                 Tooltip(w, "Shortcuts: I / O set the start / end at the frame on screen")
                 self._marker_pickers["start"] = w
                 continue
-            if layout in ("tabs", "chips", "outlined_tabs"):
+            if layout in ("tabs", "chips", "outlined_tabs", "outlined_boxes"):
                 w = tk.Canvas(row, highlightthickness=0, borderwidth=0, cursor="hand2")
                 w.pack(side="left", padx=(0, px(4)), before=entry)
                 w.bind("<Button-1>", lambda e, m=which: self._pick_marker(m))
@@ -5198,7 +5199,7 @@ class LosslessVideoApp(_BaseTk):
         return cache[key]
 
     def _draw_marker_canvases(self, layout, picked, dark):
-        """Draws the canvas pickers (G-J, L) for the pick and the theme."""
+        """Draws the canvas pickers (G-J, L, M) for the pick and the theme."""
         panel = DARK["panel"] if dark else "#f0f0f0"
         text = DARK["text"] if dark else "#000000"
         dim = DARK["text_dim"] if dark else "#555555"
@@ -5271,10 +5272,11 @@ class LosslessVideoApp(_BaseTk):
                     c.create_image(0, 0, anchor="nw",
                                    image=self._rounded(width, h, h // 2, panel, edge, max(1, px(1))))
                     c.create_text(width // 2, h // 2, text=name, font=font, fill=text)
-        elif layout == "outlined_tabs":
-            # A pill outline round each; the picked one's outline, text and
-            # underline in the accent colour.
+        elif layout in ("outlined_tabs", "outlined_boxes"):
+            # A pill (L) or box (M) outline round each; the picked one's
+            # outline, text and underline in the accent colour.
             edge = DARK["border"] if dark else "#8c8c8c"
+            radius = h // 2 if layout == "outlined_tabs" else 0
             for which, c in self._marker_pickers.items():
                 name = "Cut Start" if which == "start" else "Cut End"
                 on = which == picked
@@ -5283,7 +5285,7 @@ class LosslessVideoApp(_BaseTk):
                 c.configure(width=width, height=h, background=panel)
                 c.delete("all")
                 c.create_image(0, 0, anchor="nw", image=self._rounded(
-                    width, h, h // 2, panel, accent if on else edge, max(1, px(1))))
+                    width, h, radius, panel, accent if on else edge, max(1, px(1))))
                 c.create_text(width // 2, h // 2 - px(1), text=name, font=bold if on else font,
                               fill=accent if on else dim)
                 if on:
