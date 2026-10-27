@@ -4674,6 +4674,18 @@ class LosslessVideoApp(_BaseTk):
         self._marker_pickers = {}      # "start" / "end" -> its picker widget
         self._marker_dots = None       # the big radio circles: (dark?, off image, on image)
         self._marker_styled = None     # what _style_marker_picker last styled for
+        self.cut_mark_buttons = ()
+        if self.cut_player is not None:
+            # Mark Cut Start left of Cut Start, Mark Cut End right of Cut End
+            # (placed by _build_marker_picker).
+            mark_start = tk.Button(time_row, text="Mark Cut Start", state="disabled",
+                                   command=lambda: self._cut_mark("start"))
+            mark_end = tk.Button(time_row, text="Mark Cut End", state="disabled",
+                                 command=lambda: self._cut_mark("end"))
+            Tooltip(mark_start, "Sets the start at the frame on screen. Shortcut: I")
+            Tooltip(mark_end, "Sets the end at the frame on screen. Shortcut: O")
+            self.cut_mark_buttons = (mark_start, mark_end)
+            self.cut_transport_buttons += [mark_start, mark_end]
         self._build_marker_picker()
         self.handle_var.trace_add("write", lambda *a: self._style_marker_picker())
 
@@ -4840,17 +4852,14 @@ class LosslessVideoApp(_BaseTk):
             self.cut_transport_buttons.append(b)
             return b
 
+        # Mark Cut Start / End are in the Start / End row, either side of
+        # the fields (_build_cut_mark_buttons).
         button("|◀ Start", lambda: self._cut_go_to("start"))
-        mark_start = button("Mark Cut Start", lambda: self._cut_mark("start"))
         frame_back = button("◀ Frame", lambda: self._cut_frame_step(False))
         self.cut_play_btn = button("▶ Play", self._cut_toggle_play, width=8)
         row.center_on(self.cut_play_btn)
         frame_fwd = button("Frame ▶", lambda: self._cut_frame_step(True))
-        mark_end = button("Mark Cut End", lambda: self._cut_mark("end"))
         button("End ▶|", lambda: self._cut_go_to("end"))
-        self.cut_mark_buttons = (mark_start, mark_end)
-        Tooltip(mark_start, "Sets the start at the frame on screen. Shortcut: I")
-        Tooltip(mark_end, "Sets the end at the frame on screen. Shortcut: O")
         # Shown only with Options > Show frame by frame movement buttons in
         # the video player;
         # the , and . keys move the selected Start / End a frame either way.
@@ -5531,6 +5540,14 @@ class LosslessVideoApp(_BaseTk):
                 w.pack(side="left", padx=(0, px(2)), before=entry)
             Tooltip(w, f"Shortcut: {key} sets the {which} at the frame on screen")
             self._marker_pickers[which] = w
+        if self.cut_mark_buttons:
+            # Outside the pickers and fields: first and last in the row.
+            mark_start, mark_end = self.cut_mark_buttons
+            mark_start.pack_forget()
+            mark_end.pack_forget()
+            others = row.pack_slaves()
+            mark_start.pack(side="left", padx=(0, px(8)), before=others[0])
+            mark_end.pack(side="left", padx=(px(8), 0), after=others[-1])
         self._style_marker_picker()
 
     def _pick_marker(self, which):

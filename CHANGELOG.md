@@ -86,6 +86,9 @@ app's update box shows as "What's new").
 - **Crop/Rotate tab:** the picked rotate button (0° / 90° / 180° / 270°)
   looks like the Cut tab's picked marker: tinted, edged in blue and bold,
   instead of pressed in. Picking one moves none of them.
+- **Cut tab:** Mark Cut Start and Mark Cut End moved from the play row to
+  either side of the Cut Start / Cut End fields: Mark Cut Start on the
+  left, Mark Cut End on the right.
 - **Cut tab:** clicking (or tabbing) into the Cut Start or Cut End time
   field picks that marker for the step buttons, so after typing a time
   you can fine-tune it with the step buttons straight away.
