@@ -4334,6 +4334,7 @@ class LosslessVideoApp(_BaseTk):
         self.slider_canvas.bind("<Button-3>", self._cut_ranges_menu)
         self._drag_target = None
         self._grab_x = None   # where a handle was pressed, until it is dragged
+        self._scrub_seek_id = None   # the seek waiting for the dragging mouse to rest
 
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", pady=(2, 1))
@@ -5470,11 +5471,10 @@ class LosslessVideoApp(_BaseTk):
                 return   # a wobble while clicking: still a click
             self._grab_x = None
         if self._drag_target == "playhead":
-            # Keyframe seeks while dragging (fast); the exact frame on release.
             t = self._x_to_exact_time(event.x)
             self._cut_scrub_time = t
             self._move_playhead(t)
-            self.cut_player.seek(t, exact=False)
+            self._scrub_seek_later(t)
             return
         t = self._x_to_time(event.x)
         if self._drag_target == "start":
@@ -5488,11 +5488,33 @@ class LosslessVideoApp(_BaseTk):
         self._sync_entries()
         self._redraw_slider()
         if self._cut_player_on:
-            self.cut_player.seek(t, exact=False)
+            self._scrub_seek_later(t)
         else:
             self._update_preview(t)
 
+    SCRUB_REST_MS = 50
+
+    def _scrub_seek_later(self, t):
+        """While a playhead or handle is dragged, the video follows once the
+        mouse rests (SCRUB_REST_MS), with a keyframe seek (fast); release
+        shows the exact frame. A seek on every mouse move kept the player
+        decoding frames that were stale a moment later, and the drag
+        stuttered."""
+        self._cancel_scrub_seek()
+        self._scrub_seek_id = self.after(self.SCRUB_REST_MS, self._scrub_seek_now, t)
+
+    def _scrub_seek_now(self, t):
+        self._scrub_seek_id = None
+        if self._cut_player_on:
+            self.cut_player.seek(t, exact=False)
+
+    def _cancel_scrub_seek(self):
+        if self._scrub_seek_id is not None:
+            self.after_cancel(self._scrub_seek_id)
+            self._scrub_seek_id = None
+
     def _slider_release(self, event):
+        self._cancel_scrub_seek()   # release seeks itself, exactly
         target, self._drag_target = self._drag_target, None
         clicked, self._grab_x = self._grab_x is not None, None
         if not self._cut_player_on or target is None or clicked:
