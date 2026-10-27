@@ -95,6 +95,10 @@ app's update box shows as "What's new").
   only, halo and more). The default is the look from before. It applies to
   the Cut and Crop/Rotate volume sliders and the Audio tab's track volume
   sliders, and the choice is remembered.
+- **Sliders:** every slider's knob, and the round ends of its track, now
+  have smooth edges instead of jagged ones (the Cut slider's Start / End
+  balls too). Six more volume looks: macOS, iOS, Material 3, glossy ball,
+  blue ball with a soft shadow, and a soft (neumorphic) knob.
 
 - The tab boxes on the menu bar are in a new order: Cut, Bulk Cut,
   Combine, Crop/Rotate, Audio (Bulk Cut and Combine swapped places).

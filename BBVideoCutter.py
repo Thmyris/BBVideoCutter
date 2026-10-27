@@ -1575,6 +1575,64 @@ def render_waveform(path, a_index, width, height, color="white", span=None, on_s
     return img
 
 
+# ---- smooth shapes ----------------------------------------------------------
+# Tk's canvas draws ovals, polygons and round line ends without
+# anti-aliasing, so their edges step. The sliders' knobs and round track
+# ends are drawn with Pillow instead: SMOOTH_SCALE times as large, averaged
+# down (Image.reduce), at the quarter pixel they fall on. Each one is drawn
+# once and kept (per Tk interpreter, which an image belongs to).
+SMOOTH_SCALE = 4
+
+
+def color_hex(widget, color):
+    """Any Tk colour (a name, "System...", #rgb) as #rrggbb, for Pillow."""
+    r, g, b = widget.winfo_rgb(color)
+    return f"#{r >> 8:02x}{g >> 8:02x}{b >> 8:02x}"
+
+
+def draw_smooth(canvas, cx, cy, reach, key, paint, **item_options):
+    """Puts a smooth shape on canvas, centred on (cx, cy) and no more than
+    reach px from it. paint(img, draw, ox, oy, k) draws it on img (RGBA, k
+    times the size; draw is its ImageDraw), centred on (ox, oy) in img's
+    pixels, and returns the image to show: img, or a new one (e.g. with a
+    blurred shadow under it). key names the shape for the cache. Returns
+    the canvas item."""
+    from PIL import ImageDraw
+    k = SMOOTH_SCALE
+    reach = int(math.ceil(reach)) + 1
+    left, top = cx - reach, cy - reach
+    ix, iy = math.floor(left), math.floor(top)
+    fx, fy = round((left - ix) * k) / k, round((top - iy) * k) / k
+    size = 2 * reach + 2
+    cache = canvas._root().__dict__.setdefault("_bbvc_smooth", {})
+    full_key = (key, size, fx, fy)
+    photo = cache.get(full_key)
+    if photo is None:
+        img = Image.new("RGBA", (size * k, size * k), (0, 0, 0, 0))
+        img = paint(img, ImageDraw.Draw(img), (reach + fx) * k, (reach + fy) * k, k) or img
+        photo = cache[full_key] = ImageTk.PhotoImage(img.reduce(k), master=canvas)
+    return canvas.create_image(ix, iy, anchor="nw", image=photo, **item_options)
+
+
+def smooth_disc(canvas, cx, cy, r, color, **item_options):
+    """A smooth filled circle of radius r (px) on canvas."""
+    def paint(img, d, ox, oy, k):
+        d.ellipse((ox - r * k, oy - r * k, ox + r * k, oy + r * k), fill=color)
+    return draw_smooth(canvas, cx, cy, r, ("disc", r, color), paint, **item_options)
+
+
+def _shadow_under(img, k, shape, dx, dy, blur, rgba):
+    """img with a blurred shadow under it: shape(draw, dx, dy) draws the
+    shadow's outline (offset dx, dy in img pixels) on a layer, which is
+    blurred by blur px (at 1x) and put under img."""
+    from PIL import ImageDraw, ImageFilter
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    shape(ImageDraw.Draw(layer), dx, dy, rgba)
+    if blur > 0:
+        layer = layer.filter(ImageFilter.GaussianBlur(blur * k))
+    return Image.alpha_composite(layer, img)
+
+
 class TimeSlider(tk.Canvas):
     # The marks (set_marks): where the parts of a joined video meet. Gray
     # shows on the track in both themes.
@@ -1608,7 +1666,10 @@ class TimeSlider(tk.Canvas):
 
     # The balls set_look takes; "classic" is the blue ball with a white edge.
     KNOBS = ("classic", "fluent", "white", "ring", "dot", "bar", "square", "diamond",
-             "pill", "big", "none", "halo")
+             "pill", "big", "none", "halo", "mac", "ios", "material", "glossy", "soft",
+             "neumorphic")
+    # The looks that change under the mouse.
+    HOVER_KNOBS = ("fluent", "dot", "none", "halo", "soft")
 
     def set_look(self, knob, track_width):
         """The ball's look (one of KNOBS) and the track's width (unscaled px)."""
@@ -1618,7 +1679,7 @@ class TimeSlider(tk.Canvas):
 
     def _set_hover(self, on):
         self._hover = on
-        if self._knob in ("fluent", "dot", "none", "halo"):   # the looks that react to it
+        if self._knob in self.HOVER_KNOBS:
             self._redraw()
 
     def config_range(self, to, frm=0.0):
@@ -1680,15 +1741,183 @@ class TimeSlider(tk.Canvas):
         h = self.winfo_height() or px(28)
         y = h / 2
         tw = max(1, px(self._track_width))
-        self.create_line(x0, y, x1, y, fill=self._track_color, width=tw, capstyle="round")
         hx = self._x_for(self._value)
-        if hx > x0:
-            self.create_line(x0, y, hx, y, fill=self._fill_color, width=tw, capstyle="round")
+        if PIL_AVAILABLE:
+            # The track on whole pixel rows, with smooth round ends; the
+            # knob centred on it to the quarter pixel.
+            top = round(y - tw / 2)
+            y = top + tw / 2
+            track, fill = color_hex(self, self._track_color), color_hex(self, self._fill_color)
+            self.create_rectangle(x0, top, x1, top + tw, fill=track, outline="")
+            smooth_disc(self, x1, y, tw / 2, fill if hx >= x1 else track)
+            smooth_disc(self, x0, y, tw / 2, fill if hx > x0 else track)
+            if hx > x0:
+                self.create_rectangle(x0, top, hx, top + tw, fill=fill, outline="")
+                smooth_disc(self, hx, y, tw / 2, fill)
+        else:
+            self.create_line(x0, y, x1, y, fill=self._track_color, width=tw, capstyle="round")
+            if hx > x0:
+                self.create_line(x0, y, hx, y, fill=self._fill_color, width=tw, capstyle="round")
         for v in self._marks:
             mx = self._x_for(v)
             self.create_line(mx, y - px(7), mx, y + px(7), fill=self.MARK_COLOR,
                              width=max(1, px(2)), tags=("mark",))
-        self._draw_knob(hx, y)
+        if PIL_AVAILABLE:
+            self._draw_smooth_knob(hx, y)
+        else:
+            self._draw_knob(hx, y)
+
+    def _draw_smooth_knob(self, x, y):
+        """The knob (KNOBS) drawn smooth with Pillow; sizes as _draw_knob's."""
+        knob, drag, hover = self._knob, self._dragging, self._hover
+        u = UI_SCALE
+        bg = color_hex(self, self.cget("bg"))
+        dark = sum(self.winfo_rgb(bg)) < 3 * 32768
+        accent = color_hex(self, self._handle_color)
+        track_w = max(1, px(self._track_width))
+        white = "#ffffff"
+        if knob == "none" and not (drag or hover):
+            return
+
+        def disc(d, ox, oy, r, fill, k):
+            d.ellipse((ox - r * k, oy - r * k, ox + r * k, oy + r * k), fill=fill)
+
+        def round_bar(d, ox, oy, w, h, fill, k):
+            """A w x h bar (px) with round ends, centred on (ox, oy)."""
+            d.rounded_rectangle((ox - w * k / 2, oy - h * k / 2, ox + w * k / 2, oy + h * k / 2),
+                                radius=min(w, h) * k / 2, fill=fill)
+
+        def disc_shadow(img, ox, oy, k, r, dy, blur, alpha, dx=0.0, color=(0, 0, 0)):
+            def shape(d, sx, sy, rgba):
+                disc(d, ox + sx, oy + sy, r, rgba, k)
+            return _shadow_under(img, k, shape, dx * k, dy * k, blur,
+                                 color + (int(255 * alpha),))
+
+        def paint(img, d, ox, oy, k):
+            if knob == "fluent":          # Windows 11: a disc with a dot that grows under the mouse
+                disc(d, ox, oy, 9 * u, "#5a5a5a" if dark else "#c8c8c8", k)
+                disc(d, ox, oy, 8 * u, "#454545" if dark else white, k)
+                disc(d, ox, oy, (3 if drag else 5 if hover else 4) * u, accent, k)
+                return disc_shadow(img, ox, oy, k, 9 * u, 0.6 * u, 0.8 * u, 0.25)
+            if knob == "white":           # a white ball with a soft shadow
+                r = (9 if drag else 8) * u
+                if not dark:
+                    disc(d, ox, oy, r, "#9a9a9a", k)
+                disc(d, ox, oy, r - (0 if dark else u), white, k)
+                return disc_shadow(img, ox, oy, k, r, 1.2 * u, 1.0 * u, 0.7 if dark else 0.35)
+            if knob == "ring":
+                r = (8 if drag else 7) * u
+                disc(d, ox, oy, r + 1.5 * u, accent, k)
+                disc(d, ox, oy, r - 1.5 * u, bg, k)
+            elif knob == "dot":
+                disc(d, ox, oy, (6 if drag or hover else 4) * u, accent, k)
+            elif knob == "bar":
+                half = (8 if drag else 7) * u
+                round_bar(d, ox, oy, 8 * u, 2 * half + 8 * u, white, k)
+                round_bar(d, ox, oy, 5 * u, 2 * half + 5 * u, accent, k)
+            elif knob == "square":
+                r = (7 if drag else 6) * u
+                d.rectangle((ox - (r + u) * k, oy - (r + u) * k, ox + (r + u) * k, oy + (r + u) * k),
+                            fill=white)
+                d.rectangle((ox - (r - u) * k, oy - (r - u) * k, ox + (r - u) * k, oy + (r - u) * k),
+                            fill=accent)
+            elif knob == "diamond":
+                r = (10 if drag else 8) * u
+                for rr, fill in ((r + 1.4 * u, white), (r - 1.4 * u, accent)):
+                    rr *= k
+                    d.polygon((ox, oy - rr, ox + rr, oy, ox, oy + rr, ox - rr, oy), fill=fill)
+            elif knob == "pill":
+                half = (6 if drag else 5) * u
+                round_bar(d, ox, oy, 2 * half + 13 * u, 13 * u, white, k)
+                round_bar(d, ox, oy, 2 * half + 9 * u, 9 * u, accent, k)
+            elif knob == "big":           # a big ball with a white centre
+                r = (10 if drag else 9) * u
+                disc(d, ox, oy, r + u, white, k)
+                disc(d, ox, oy, r - u, accent, k)
+                disc(d, ox, oy, 3 * u, white, k)
+            elif knob == "none":          # just the fill; a dot while dragging or under the mouse
+                disc(d, ox, oy, 6 * u, accent, k)
+            elif knob == "halo":          # a ball with a pale ring round it under the mouse
+                if drag or hover:
+                    disc(d, ox, oy, 11 * u, "#28456f" if dark else "#cfe2ff", k)
+                disc(d, ox, oy, 7 * u, accent, k)
+            elif knob == "mac":           # macOS: a white knob, a thin edge, a soft shadow
+                disc(d, ox, oy, 8.5 * u, "#b8b8b8" if not dark else "#d0d0d0", k)
+                disc(d, ox, oy, 8.5 * u - max(0.6, 0.6 * u), "#ececec" if drag else white, k)
+                return disc_shadow(img, ox, oy, k, 8.5 * u, 0.8 * u, 1.0 * u, 0.6 if dark else 0.3)
+            elif knob == "ios":           # iOS: a big white knob on a wide, soft shadow
+                r = 9.5 * u               # with its shadow, inside the 22 px slider
+                disc(d, ox, oy, r, "#ececec" if drag else white, k)
+                img = disc_shadow(img, ox, oy, k, r, 0, 0.5 * u, 0.14)
+                return disc_shadow(img, ox, oy, k, r, 1.0 * u, 1.3 * u, 0.6 if dark else 0.28)
+            elif knob == "material":      # Material 3: a tall thin handle in a gap in the track
+                w = (2 if drag else 4) * u
+                gap = 4 * u + 3 * u
+                d.rectangle((ox - gap * k, oy - (track_w / 2 + 1) * k,
+                             ox + gap * k, oy + (track_w / 2 + 1) * k), fill=bg)
+                round_bar(d, ox, oy, w, 22 * u, accent, k)
+            elif knob == "glossy":        # a shiny ball: lit from the top left
+                r = (9 if drag else 8) * u
+                return self._glossy_ball(img, ox, oy, r, accent, k, dark)
+            elif knob == "soft":          # a blue ball floating on a soft shadow
+                r = (9 if drag else 8) * u
+                if hover or drag:
+                    disc(d, ox, oy, r + 4 * u, "#28456f" if dark else "#dbe7fb", k)
+                disc(d, ox, oy, r, accent, k)
+                return disc_shadow(img, ox, oy, k, r, 1.5 * u, 1.6 * u, 0.7 if dark else 0.35)
+            elif knob == "neumorphic":    # pressed out of the background: lit top left, shadow bottom right
+                r = 8 * u
+                disc(d, ox, oy, r, bg, k)
+                disc(d, ox, oy, (3.5 if drag else 2.5) * u, accent, k)
+                img = disc_shadow(img, ox, oy, k, r, 1.0 * u, 1.2 * u, 0.7 if dark else 0.3,
+                                  dx=1.0 * u)
+                return disc_shadow(img, ox, oy, k, r, -1.0 * u, 1.2 * u, 0.10 if dark else 1.0,
+                                   dx=-1.0 * u, color=(255, 255, 255))
+            else:                         # classic
+                r = (9 if drag else 7) * u
+                disc(d, ox, oy, r + u, white, k)
+                disc(d, ox, oy, r - u, accent, k)
+            return img
+
+        key = ("knob", knob, drag, hover and knob in self.HOVER_KNOBS, bg, accent, track_w, u)
+        draw_smooth(self, x, y, 22 * u, key, paint)   # room for the widest shadow
+
+    @staticmethod
+    def _glossy_ball(img, ox, oy, r, accent, k, dark):
+        """A ball in accent, lit from the top left: a gradient from a light
+        to a dark shade of it, a white glint, a small shadow under it."""
+        from PIL import ImageChops, ImageDraw, ImageFilter
+        rgb = tuple(int(accent[i:i + 2], 16) for i in (1, 3, 5))
+        light = tuple(min(255, int(c + (255 - c) * 0.55)) for c in rgb)
+        deep = tuple(int(c * 0.55) for c in rgb)
+        rk = r * k
+        ball = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(ball)
+        # Shrinking circles drift toward the light: from the dark edge to
+        # the light spot.
+        steps = max(8, int(rk))
+        for i in range(steps):
+            t = i / (steps - 1)
+            cr = rk * (1 - 0.85 * t)
+            cx, cy = ox - rk * 0.35 * t, oy - rk * 0.35 * t
+            color = tuple(int(deep[j] + (light[j] - deep[j]) * t ** 0.8) for j in range(3))
+            d.ellipse((cx - cr, cy - cr, cx + cr, cy + cr), fill=color + (255,))
+        ball = ball.filter(ImageFilter.GaussianBlur(k * 0.6))
+        mask = Image.new("L", img.size, 0)
+        ImageDraw.Draw(mask).ellipse((ox - rk, oy - rk, ox + rk, oy + rk), fill=255)
+        ball.putalpha(ImageChops.multiply(ball.getchannel("A"), mask))
+        glint = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        gx, gy = ox - rk * 0.38, oy - rk * 0.45
+        ImageDraw.Draw(glint).ellipse((gx - rk * 0.42, gy - rk * 0.26, gx + rk * 0.42, gy + rk * 0.26),
+                                      fill=(255, 255, 255, 170))
+        glint = glint.filter(ImageFilter.GaussianBlur(k * 0.5))
+        glint.putalpha(ImageChops.multiply(glint.getchannel("A"), mask))
+        ball = Image.alpha_composite(ball, glint)
+
+        def shape(sd, sx, sy, rgba):
+            sd.ellipse((ox - rk + sx, oy - rk + sy, ox + rk + sx, oy + rk + sy), fill=rgba)
+        return _shadow_under(Image.alpha_composite(img, ball), k, shape, 0, 1.2 * k,
+                             1.2, (0, 0, 0, 170 if dark else 90))
 
     def _draw_knob(self, x, y):
         knob, accent, drag = self._knob, self._handle_color, self._dragging
@@ -5222,7 +5451,15 @@ class LosslessVideoApp(_BaseTk):
         ("rounded", "Rounded speaker, white ball", "round", "white", 5),
         ("dotted", "Dotted waves, ring", "dots", "ring", 3),
         ("halo", "Halo ball", "round", "halo", 4),
+        ("mac", "macOS: white knob, soft shadow", "round", "mac", 4),
+        ("ios", "iOS: big white knob", "outline", "ios", 4),
+        ("material", "Material 3: tall handle in a gap", "mdl2", "material", 6),
+        ("glossy", "Glossy ball", "classic", "glossy", 4),
+        ("soft", "Blue ball, soft shadow", "mdl2", "soft", 4),
+        ("neumorphic", "Soft (neumorphic) knob", "outline", "neumorphic", 4),
     )
+    # The letters the Options menus give their choices, in keyboard order.
+    MENU_LETTERS = "QWERTYUIOPASDFGHJKLZXCVBNM"
 
     def _volume_look(self):
         """(speaker icon, ball, track width) of the look picked in Options."""
@@ -5810,8 +6047,7 @@ class LosslessVideoApp(_BaseTk):
         # Always draw the bare track, even with no file loaded yet, so the
         # slider doesn't visibly pop into existence the moment a video is
         # opened -- it's there from the start, just inert.
-        c.create_line(track_x0, y, track_x1, y, fill=self._theme_color("slider_track"),
-                      width=px(4), capstyle="round")
+        self._smooth_bar(c, track_x0, track_x1, y, px(4), self._theme_color("slider_track"))
         self._track_x0, self._track_x1 = track_x0, track_x1
         self._redraw_waveform()   # the selection is shown there too
         if not self.input_path or self.duration <= 0:
@@ -5837,7 +6073,7 @@ class LosslessVideoApp(_BaseTk):
                     c.create_line(x, y - px(5), x, y + px(5), fill=edge, width=max(1, px(1)),
                                   tags=("range",))
         sx, ex = x_for(self.start_sec), x_for(self.end_sec)
-        c.create_line(sx, y, ex, y, fill="#3d8bfd", width=px(4), capstyle="round")
+        self._smooth_bar(c, sx, ex, y, px(4), "#3d8bfd")
         if self._cut_player_on:
             # The playhead: where the player is. Under the handles, so they
             # stay visible and grabbable when it sits on one.
@@ -5852,9 +6088,27 @@ class LosslessVideoApp(_BaseTk):
             else:
                 self._move_playhead(self.cut_player.position)
         r = px(7)
-        c.create_oval(sx - r, y - r, sx + r, y + r, fill=self._theme_color("slider_start"),
-                      outline="")
-        c.create_oval(ex - r, y - r, ex + r, y + r, fill="#1a73e8", outline="")
+        start_color = self._theme_color("slider_start")
+        if PIL_AVAILABLE:   # smooth edges (draw_smooth)
+            smooth_disc(c, sx, y, r, color_hex(c, start_color))
+            smooth_disc(c, ex, y, r, "#1a73e8")
+        else:
+            c.create_oval(sx - r, y - r, sx + r, y + r, fill=start_color, outline="")
+            c.create_oval(ex - r, y - r, ex + r, y + r, fill="#1a73e8", outline="")
+
+    @staticmethod
+    def _smooth_bar(c, x0, x1, y, width, color):
+        """A line from x0 to x1 at y with round ends: smooth ends with
+        Pillow, otherwise the canvas's own."""
+        if not PIL_AVAILABLE:
+            c.create_line(x0, y, x1, y, fill=color, width=width, capstyle="round")
+            return
+        color = color_hex(c, color)
+        top = round(y - width / 2)
+        mid = top + width / 2
+        c.create_rectangle(x0, top, x1, top + width, fill=color, outline="")
+        for x in (x0, x1):
+            smooth_disc(c, x, mid, width / 2, color)
 
     def _move_playhead(self, t):
         c = self.slider_canvas
