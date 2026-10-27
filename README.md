@@ -39,22 +39,7 @@ For Windows 10 / 11, and Linux ([beta](#linux-beta)).
 
 ## Download
 
-Go to the [release](https://github.com/Thmyris/BBVideoCutter/releases/latest) page, or download a file directly:
-
-- **[`BBVideoCutter-Win-Setup.exe`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Win-Setup.exe)** — Windows installer.
-- **[`BBVideoCutter-Win-Portable.zip`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Win-Portable.zip)** — extract and run
-  `BBVideoCutter.exe`, no install.
-- **[`BBVideoCutter-Linux-amd64.deb`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Linux-amd64.deb)** — Linux, [beta](#linux-beta), for
-  Ubuntu 24.04 or later (and Debian-based distros as new):
-  `sudo apt install ./BBVideoCutter-Linux-amd64.deb` installs it with what
-  it needs, and adds it to the app menu (or run `bbvideocutter`).
-- **[`BBVideoCutter-Linux-x86_64.tar.gz`](https://github.com/Thmyris/BBVideoCutter/releases/latest/download/BBVideoCutter-Linux-x86_64.tar.gz)** — the same Linux build for
-  other distros: extract and run `BBVideoCutter/BBVideoCutter`. Needs
-  `ffmpeg` and `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and
-  glibc 2.38 or newer.
-
-  The Linux build tells you when a new version is out, but doesn't
-  install it itself yet.
+Go to the [latest release](https://github.com/Thmyris/BBVideoCutter/releases/latest) page.
 
 ## Running from source
 
