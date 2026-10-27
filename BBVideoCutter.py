@@ -3393,7 +3393,7 @@ class LosslessVideoApp(_BaseTk):
         UI_SCALE = max(1.0, round(self.winfo_fpixels("1i") / 96.0, 2))
         # The list thumbnails' size, scaled like everything else.
         self.THUMB_SIZE = (px(self.THUMB_SIZE[0]), px(self.THUMB_SIZE[1]))
-        self.title("BarkBark Lossless Video Cutter")
+        self.title(f"BarkBark Lossless Video Cutter v{APP_VERSION}")
         self._set_window_icon()
         # 900x700 at 100% scaling, never bigger than the screen at high scaling.
         # Plus the app-drawn menu bar, which is inside this size where the

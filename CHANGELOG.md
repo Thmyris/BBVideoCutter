@@ -7,6 +7,7 @@ app's update box shows as "What's new").
 ## Unreleased (since v1.2)
 
 - **The app's icon on its windows** instead of the default feather.
+- **The version in the window title.**
 
 ## v1.2 (2026-10-27)
 
