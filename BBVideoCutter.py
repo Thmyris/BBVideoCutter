@@ -4825,11 +4825,16 @@ class LosslessVideoApp(_BaseTk):
                 + sum(pack_padx(w) for w in steps.winfo_children())
             if row is None:
                 return step_w, 0
-            shown = [w for w in row.center.winfo_children() if w.winfo_manager()]
-            center = sum(self._cut_fit_base[w][0] + 2 * pad(w, extra) + pack_padx(w)
-                         for w in shown)
-            row_w = (row.left.winfo_reqwidth() + center + row.right.winfo_reqwidth()
-                     + 2 * px(CenteredRow.GAP))
+            shown = [w for w in row.center.pack_slaves() if w in self._cut_fit_base]
+            widths = [self._cut_fit_base[w][0] + 2 * pad(w, extra) + pack_padx(w) for w in shown]
+            # Play in the middle of the row: each half holds its side (the
+            # time, or the volume) and its half of the buttons.
+            i = shown.index(self.cut_play_btn) if self.cut_play_btn in shown else len(shown) // 2
+            half_left = sum(widths[:i]) + widths[i] / 2 if widths else 0
+            half_right = sum(widths[i + 1:]) + widths[i] / 2 if widths else 0
+            gap = px(CenteredRow.GAP)
+            row_w = 2 * max(row.left.winfo_reqwidth() + gap + half_left,
+                            row.right.winfo_reqwidth() + gap + half_right)
             return step_w, row_w
 
         # Each row by its own share, so the frame buttons (when shown) take
@@ -5310,6 +5315,59 @@ class LosslessVideoApp(_BaseTk):
             mark_start.pack(side="left", padx=(0, px(5)), fill="y", before=others[0])
             mark_end.pack(side="left", padx=(px(5), 0), fill="y", after=others[-1])
         self._style_marker_picker()
+        self._marker_outer_padx = {}
+        for w in row.pack_slaves():
+            if not getattr(w, "_bbvc_balances", False):
+                w.bind("<Configure>", lambda e: self._balance_marker_row(), add="+")
+                w._bbvc_balances = True
+        self._balance_marker_row()
+
+    def _balance_marker_row(self):
+        """The markers' row's middle (Replay, or the gap between the cards)
+        at the row's centre, like Play above it and the step buttons' gap
+        under it: the narrower side gets the difference as room at its
+        outer end."""
+        row = self.start_entry.master
+        slaves = row.pack_slaves()
+        if len(slaves) < 2:
+            return
+        if self.cut_replay_btn in slaves:
+            mid = slaves.index(self.cut_replay_btn)
+            left, right = slaves[:mid], slaves[mid + 1:]
+        else:
+            left, right = slaves[:len(slaves) // 2], slaves[len(slaves) // 2:]
+        if not left or not right:
+            return
+        outer = getattr(self, "_marker_outer_padx", {})
+        for w in (left[0], right[-1]):
+            if w not in outer:
+                padx = w.pack_info().get("padx", 0)
+                parts = padx if isinstance(padx, (tuple, list)) else str(padx).split()
+                pads = [w.winfo_pixels(str(p)) for p in parts] or [0]
+                outer[w] = (pads[0], pads[-1])
+        self._marker_outer_padx = outer
+
+        def width(ws):
+            total = 0
+            for w in ws:
+                padx = w.pack_info().get("padx", 0)
+                parts = padx if isinstance(padx, (tuple, list)) else str(padx).split()
+                pads = [w.winfo_pixels(str(p)) for p in parts] or [0]
+                inner = (pads[0], pads[-1])
+                if w in outer:
+                    inner = outer[w]   # without what an earlier balance added
+                total += w.winfo_reqwidth() + inner[0] + inner[1]
+            return total
+
+        diff = width(left) - width(right)
+        (l0, l1), (r0, r1) = outer[left[0]], outer[right[-1]]
+        want = ((l0 + max(0, -diff), l1), (r0, r1 + max(0, diff)))
+        for w, padx in ((left[0], want[0]), (right[-1], want[1])):
+            now = w.pack_info().get("padx", 0)
+            parts = now if isinstance(now, (tuple, list)) else str(now).split()
+            pads = tuple(w.winfo_pixels(str(p)) for p in parts) or (0,)
+            if (pads[0], pads[-1]) != padx:
+                w.pack_configure(padx=padx)
 
     def _pick_marker(self, which):
         self.handle_var.set(which)
