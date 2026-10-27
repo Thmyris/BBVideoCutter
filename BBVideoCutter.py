@@ -5316,57 +5316,71 @@ class LosslessVideoApp(_BaseTk):
             mark_end.pack(side="left", padx=(px(5), 0), fill="y", after=others[-1])
         self._style_marker_picker()
         self._marker_outer_padx = {}
-        for w in row.pack_slaves():
+        for w in row.pack_slaves() + [row.master]:
             if not getattr(w, "_bbvc_balances", False):
                 w.bind("<Configure>", lambda e: self._balance_marker_row(), add="+")
                 w._bbvc_balances = True
         self._balance_marker_row()
 
+    @staticmethod
+    def _pack_padx(w):
+        """(left, right) of w's pack padx, in pixels."""
+        padx = w.pack_info().get("padx", 0)
+        parts = padx if isinstance(padx, (tuple, list)) else str(padx).split()
+        pads = [w.winfo_pixels(str(p)) for p in parts] or [0]
+        return pads[0], pads[-1]
+
     def _balance_marker_row(self):
         """The markers' row's middle (Replay, or the gap between the cards)
         at the row's centre, like Play above it and the step buttons' gap
         under it: the narrower side gets the difference as room at its
-        outer end."""
+        outer end. When that doesn't fit (Linux's wider buttons), the Mark
+        buttons and Replay give up their inner padding, all alike."""
         row = self.start_entry.master
         slaves = row.pack_slaves()
         if len(slaves) < 2:
             return
         if self.cut_replay_btn in slaves:
-            mid = slaves.index(self.cut_replay_btn)
-            left, right = slaves[:mid], slaves[mid + 1:]
+            i = slaves.index(self.cut_replay_btn)
+            left, middle, right = slaves[:i], [self.cut_replay_btn], slaves[i + 1:]
         else:
-            left, right = slaves[:len(slaves) // 2], slaves[len(slaves) // 2:]
+            i = len(slaves) // 2
+            left, middle, right = slaves[:i], [], slaves[i:]
         if not left or not right:
             return
-        outer = getattr(self, "_marker_outer_padx", {})
+        # What each had before any balancing: outer padding, button padding.
+        outer = self._marker_outer_padx
         for w in (left[0], right[-1]):
-            if w not in outer:
-                padx = w.pack_info().get("padx", 0)
-                parts = padx if isinstance(padx, (tuple, list)) else str(padx).split()
-                pads = [w.winfo_pixels(str(p)) for p in parts] or [0]
-                outer[w] = (pads[0], pads[-1])
-        self._marker_outer_padx = outer
+            outer.setdefault(w, self._pack_padx(w))
+        buttons = [w for w in (*self.cut_mark_buttons, self.cut_replay_btn) if w in slaves]
+        inner = self.__dict__.setdefault("_marker_button_padx", {})
+        for w in buttons:
+            inner.setdefault(w, w.winfo_pixels(w.cget("padx")))
 
-        def width(ws):
+        def width(ws, shrink=0):
             total = 0
             for w in ws:
-                padx = w.pack_info().get("padx", 0)
-                parts = padx if isinstance(padx, (tuple, list)) else str(padx).split()
-                pads = [w.winfo_pixels(str(p)) for p in parts] or [0]
-                inner = (pads[0], pads[-1])
-                if w in outer:
-                    inner = outer[w]   # without what an earlier balance added
-                total += w.winfo_reqwidth() + inner[0] + inner[1]
+                pad = outer.get(w) or self._pack_padx(w)
+                req = w.winfo_reqwidth()
+                if w in inner:   # as it is with its own padding, less shrink
+                    req += 2 * (inner[w] - w.winfo_pixels(w.cget("padx")) - shrink)
+                total += req + pad[0] + pad[1]
             return total
 
-        diff = width(left) - width(right)
+        room = row.master.winfo_width()
+        shrink = 0
+        if room > 1 and buttons:
+            most = min(inner[w] for w in buttons) - 1   # at least 1 px of padding left
+            while shrink < most and (2 * max(width(left, shrink), width(right, shrink))
+                                     + width(middle, shrink)) > room:
+                shrink += 1
+        for w in buttons:
+            if w.winfo_pixels(w.cget("padx")) != inner[w] - shrink:
+                w.configure(padx=inner[w] - shrink)
+        diff = width(left, shrink) - width(right, shrink)
         (l0, l1), (r0, r1) = outer[left[0]], outer[right[-1]]
-        want = ((l0 + max(0, -diff), l1), (r0, r1 + max(0, diff)))
-        for w, padx in ((left[0], want[0]), (right[-1], want[1])):
-            now = w.pack_info().get("padx", 0)
-            parts = now if isinstance(now, (tuple, list)) else str(now).split()
-            pads = tuple(w.winfo_pixels(str(p)) for p in parts) or (0,)
-            if (pads[0], pads[-1]) != padx:
+        for w, padx in ((left[0], (l0 + max(0, -diff), l1)), (right[-1], (r0, r1 + max(0, diff)))):
+            if self._pack_padx(w) != padx:
                 w.pack_configure(padx=padx)
 
     def _pick_marker(self, which):
