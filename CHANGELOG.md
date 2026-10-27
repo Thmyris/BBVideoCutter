@@ -60,6 +60,10 @@ app's update box shows as "What's new").
   the video catches up. It also no longer flicks back to an old spot
   when you let go of a playhead or handle drag.
 
+- **Cut tab:** turning on the frame-by-frame buttons no longer makes the
+  step buttons (1 sec ... 3 min) smaller. Each button row now shrinks its
+  buttons only when that row itself runs out of room.
+
 ### Project and docs
 
 - README rewritten: screenshots, badges (release, Windows, Linux beta,

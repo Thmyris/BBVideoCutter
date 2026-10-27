@@ -4541,9 +4541,9 @@ class LosslessVideoApp(_BaseTk):
             self._save_option("show_frame_buttons", self.show_frame_buttons_var)
 
     # The Cut tab's play / step / jump buttons and the 1 sec ... 3 min ones
-    # are made wider than their text by the same share: 45%, or less in 5%
-    # steps until both rows fit the window. The Play / Pause button always
-    # keeps room for "Pause".
+    # are made wider than their text: 45%, or less in 5% steps until their
+    # row fits the window, each row on its own. The Play / Pause button
+    # always keeps room for "Pause".
     CUT_BUTTON_EXTRA = (0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.0)
 
     def _init_cut_button_fit(self):
@@ -4604,14 +4604,17 @@ class LosslessVideoApp(_BaseTk):
                      + 2 * px(CenteredRow.GAP))
             return step_w, row_w
 
+        # Each row by its own share, so the frame buttons (when shown) take
+        # room from the play row only, not from the step buttons too.
         row_room = row.winfo_width() if row is not None else room
-        extra = next((x for x in self.CUT_BUTTON_EXTRA
-                      if all(w <= r for w, r in zip(needed(x), (room, row_room)))), 0.0)
-        if extra == self._cut_fit_extra:
+        step_extra = next((x for x in self.CUT_BUTTON_EXTRA if needed(x)[0] <= room), 0.0)
+        row_extra = next((x for x in self.CUT_BUTTON_EXTRA if needed(x)[1] <= row_room), 0.0)
+        if (step_extra, row_extra) == self._cut_fit_extra:
             return
-        self._cut_fit_extra = extra
+        self._cut_fit_extra = (step_extra, row_extra)
+        steps_set = set(self.step_buttons)
         for b, (width, padx) in self._cut_fit_base.items():
-            b.config(padx=padx + pad(b, extra))
+            b.config(padx=padx + pad(b, step_extra if b in steps_set else row_extra))
 
     def _build_cut_audio_controls(self, parent):
         """Mute, volume and the audio track heard. A cut keeps every audio
