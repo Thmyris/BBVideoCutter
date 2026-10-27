@@ -8,6 +8,7 @@ app's update box shows as "What's new").
 
 - **The app's icon on its windows** instead of the default feather.
 - **The version in the window title.**
+- **The update box shows what every skipped version brought**, each under its own version.
 
 ## v1.2 (2026-10-27)
 

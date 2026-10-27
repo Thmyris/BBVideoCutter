@@ -1057,6 +1057,7 @@ def save_settings(settings):
 # --------------------------------------------------------------------------
 UPDATE_REPO = "Thmyris/BBVideoCutter"
 UPDATE_API_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_RELEASES_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases?per_page=100"
 UPDATE_PAGE_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 UPDATE_CHECK_INTERVAL = 24 * 3600     # seconds between the automatic checks
 # What an installed / a portable copy downloads: the first of these names
@@ -1109,6 +1110,37 @@ def fetch_latest_release(timeout=15):
     if not isinstance(release, dict) or version_tuple(release.get("tag_name")) is None:
         raise ValueError("GitHub's answer names no release version.")
     return release
+
+
+def fetch_releases_since(current=APP_VERSION, timeout=15):
+    """The published releases newer than current, newest first: [(tag,
+    notes)], so the update box can show what every skipped version
+    brought. Raises OSError or ValueError when the list can't be had."""
+    import urllib.request
+    request = urllib.request.Request(UPDATE_RELEASES_URL, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"BBVideoCutter/{APP_VERSION}",
+    })
+    with urllib.request.urlopen(request, timeout=timeout, context=https_context()) as response:
+        releases = json.loads(response.read().decode("utf-8"))
+    if not isinstance(releases, list):
+        raise ValueError("GitHub's answer isn't a list of releases.")
+    now = version_tuple(current)
+    newer = [r for r in releases
+             if isinstance(r, dict) and not r.get("draft") and not r.get("prerelease")
+             and version_tuple(r.get("tag_name")) is not None and version_tuple(r.get("tag_name")) > now]
+    newer.sort(key=lambda r: version_tuple(r.get("tag_name")), reverse=True)
+    return [(str(r.get("tag_name")), str(r.get("body") or "").strip()) for r in newer]
+
+
+def update_notes(release, since=None):
+    """The update box's "What's new": the notes of every version since
+    this one (since: fetch_releases_since's list), each under its version
+    as a heading; just the release's own notes when there's only that one
+    or the list is missing."""
+    if since and len(since) > 1:
+        return "\n\n".join(f"## {tag}\n\n{notes or '(no notes)'}" for tag, notes in since)
+    return str(release.get("body") or "").strip()
 
 
 def markdown_runs(line):
@@ -3981,6 +4013,13 @@ class LosslessVideoApp(_BaseTk):
                 release, error = fetch_latest_release(), None
             except Exception as exc:
                 release, error = None, exc
+            if release is not None and is_newer_release(release):
+                # Every skipped version's notes for the update box; without
+                # the list, just the latest's.
+                try:
+                    release["_since"] = fetch_releases_since()
+                except Exception:
+                    pass
             self.after(0, lambda: self._update_check_done(release, error, manual))
 
         threading.Thread(target=work, daemon=True).start()
@@ -4031,7 +4070,7 @@ class LosslessVideoApp(_BaseTk):
                  text=f"Version {version} is available").pack(fill="x")
         tk.Label(body, bg="#f0f0f0", anchor="w",
                  text=f"You have version {APP_VERSION}.").pack(fill="x", pady=(px(2), 0))
-        notes = str(release.get("body") or "").strip()
+        notes = update_notes(release, release.get("_since"))
         if notes:
             tk.Label(body, bg="#f0f0f0", anchor="w", font=("Segoe UI", 9, "bold"),
                      text="What's new").pack(fill="x", pady=(px(10), px(2)))
@@ -4049,12 +4088,25 @@ class LosslessVideoApp(_BaseTk):
                 """As tall as the notes (tall pixels), up to 12 lines; more
                 scrolls."""
                 lines = max(1, -(-tall // max(1, line)))
-                text.config(height=min(lines, 12))
+                if int(text.cget("height")) != min(lines, 12):
+                    text.config(height=min(lines, 12))
                 if lines > 12 and not bar.winfo_manager():
                     text.config(yscrollcommand=bar.set)
                     bar.pack(side="right", fill="y")
+                elif lines <= 12 and bar.winfo_manager():
+                    bar.pack_forget()
+                    text.config(yscrollcommand="")
+
+            def remeasure(event):
+                """Tk's own measure, once the text has its real width
+                (before that it's 1 px wide and every word wraps)."""
+                if event.width < 50:
+                    return
+                tall = text.count("1.0", "end", "update", "ypixels")
+                fit(tall[0] if isinstance(tall, tuple) else tall or 0)
 
             fit(tall)
+            text.bind("<Configure>", remeasure, add="+")
             self._update_notes = text     # for the tests
 
         def choose(choice):
@@ -4093,12 +4145,6 @@ class LosslessVideoApp(_BaseTk):
         y = self.winfo_rooty() + (self.winfo_height() - h) // 3
         dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
         dlg.deiconify()
-        if notes:
-            # Laid out at its real width only now (hidden, a Text is 1 px
-            # wide): Tk's own measure corrects the estimate.
-            dlg.update_idletasks()
-            tall = text.count("1.0", "end", "update", "ypixels")
-            fit(tall[0] if isinstance(tall, tuple) else tall or 0)
         update_btn.focus_set()
         dlg.grab_set()
         self.wait_window(dlg)
