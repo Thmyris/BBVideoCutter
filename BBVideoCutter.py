@@ -5105,7 +5105,11 @@ class LosslessVideoApp(_BaseTk):
         card.pack(side="left", padx=(0, px(10)), before=entry)
         bar = tk.Frame(card, width=px(4))
         bar.pack(side="left", fill="y")
-        label = tk.Label(card, text=name, cursor="hand2")
+        # As wide as the name in bold, so bolding the picked one moves
+        # nothing (a label with an image is sized in pixels).
+        font, bold = self._marker_fonts()
+        label = tk.Label(card, text=name, cursor="hand2", image=self._pixel_image(), compound="center",
+                         width=bold.measure(name), height=bold.metrics("linespace"))
         label.pack(side="left", padx=(px(6), px(4)), pady=px(3))
         # The field is the row's child; the card only lays it out, above it.
         entry.pack_forget()
@@ -5168,11 +5172,9 @@ class LosslessVideoApp(_BaseTk):
                     c.create_image((width - tw) // 2, h - px(5), anchor="nw",
                                    image=self._rounded(tw, px(2), px(1), accent))
 
-    def _marker_colors(self, which):
-        """(background, text) of a picked marker in its slider handle's colour."""
-        if which == "start":
-            return self._theme_color("slider_start"), "#000000" if self._is_dark() else "#ffffff"
-        return "#1a73e8", "#ffffff"
+    # The picked marker's card edge and bar, Cut Start and Cut End alike: the
+    # blue of the End handle.
+    MARKER_PICKED_COLOR = "#1a73e8"
 
     def _make_marker_dots(self):
         """The big radio circles: (off, on) images in the current theme,
@@ -5217,12 +5219,12 @@ class LosslessVideoApp(_BaseTk):
                 bar, label = card._bbvc_parts
                 on = which == picked
                 bg = self._theme_color("tabbox_selected") if on else panel
-                edge = (self._marker_colors(which)[0] if on
+                edge = (self.MARKER_PICKED_COLOR if on
                         else DARK["border"] if dark else "#c4c4c8")
                 for w in (card, label):
                     self._configure_light(w, background=bg)
                 self._configure_light(card, highlightbackground=edge, highlightcolor=edge)
-                self._configure_light(bar, background=self._marker_colors(which)[0] if on else bg)
+                self._configure_light(bar, background=self.MARKER_PICKED_COLOR if on else bg)
                 font, bold = self._marker_fonts()
                 self._configure_light(label, foreground=text, font=bold if on else font)
         elif layout == "big_radio" and self._marker_dots is not None:
@@ -5299,6 +5301,14 @@ class LosslessVideoApp(_BaseTk):
                  f"{seconds_to_ffmpeg_time(end)} ({n} scene{'' if n == 1 else 's'} of "
                  f"{os.path.basename(path)} there)")
         self._bulk_list_changed()
+
+    def _pixel_image(self):
+        """A blank 1 x 1 image: a label or button showing it (compound
+        "center") takes its width and height in pixels, not characters."""
+        image = self.__dict__.get("_blank_image")
+        if image is None:
+            image = self._blank_image = tk.PhotoImage(width=1, height=1)
+        return image
 
     def _update_cut_range_buttons(self):
         if not hasattr(self, "cut_ranges_btn"):

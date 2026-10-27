@@ -66,7 +66,8 @@ app's update box shows as "What's new").
 
 - **Cut tab (to try out):** the small Cut Start / Cut End radio buttons
   were easy to miss. Each label and its time field now sit in one card,
-  and the picked card is tinted and edged in its slider handle's colour.
+  and the picked card is tinted, edged in blue and its name bold (Cut
+  Start and Cut End alike); picking one moves nothing in the row.
   Options > Cut Start / Cut End picker offers two other looks: big radio
   circles, and outlined boxes (the picked one blue and underlined). The
   choice is remembered.
