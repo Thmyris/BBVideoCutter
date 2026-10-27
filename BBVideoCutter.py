@@ -1250,20 +1250,61 @@ def _ps_quote(text):
     return "'" + str(text).replace("'", "''") + "'"
 
 
-def update_helper_script(pid, app_dir, setup=None, new_build=None, relaunch=True):
+def update_helper_script(pid, app_dir, setup=None, new_build=None, relaunch=True, version="",
+                         visible=True):
     """PowerShell that waits for the app (process pid) to exit, then
     installs the update: runs the installer setup silently over the
     installed copy, or copies the unpacked portable build new_build over
     app_dir (its _internal folder put back as it was if that fails). Then
-    the app starts again (relaunch=False only in tests)."""
+    the app starts again (relaunch=False only in tests). Meanwhile a small
+    window shows how far it is (a progress bar; per file for a portable
+    copy); visible=False makes it fully transparent (tests). Without it
+    (no Windows Forms) the update runs all the same."""
     lines = [
         "$ErrorActionPreference = 'Stop'",
-        f"Wait-Process -Id {int(pid)} -ErrorAction SilentlyContinue",
+        "$form = $null",
+        "try {",
+        "    Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
+        "    Add-Type -Name Win -Namespace BBVC -MemberDefinition "
+        "'[DllImport(\"user32.dll\")] public static extern bool ShowWindow(System.IntPtr h, int n);'",
+        "    $form = New-Object System.Windows.Forms.Form",
+        "    $form.Text = 'BarkBark Lossless Video Cutter'",
+        "    $form.FormBorderStyle = 'FixedDialog'",
+        "    $form.ControlBox = $false",
+        "    $form.StartPosition = 'CenterScreen'",
+        "    $form.ClientSize = New-Object System.Drawing.Size(380, 92)",
+        f"    $form.Opacity = {1 if visible else 0}",
+        "    $label = New-Object System.Windows.Forms.Label",
+        "    $label.SetBounds(16, 16, 348, 22)",
+        "    $label.Text = 'Waiting for the app to close...'",
+        "    $bar = New-Object System.Windows.Forms.ProgressBar",
+        "    $bar.SetBounds(16, 48, 348, 24)",
+        "    $bar.Style = 'Marquee'",
+        "    $bar.MarqueeAnimationSpeed = 30",
+        "    $form.Controls.Add($label)",
+        "    $form.Controls.Add($bar)",
+        # Shown without taking the keyboard from whatever has it.
+        # Alt+F4 can't close it halfway: only the script, when done.
+        "    $script:done = $false",
+        "    $form.Add_FormClosing({ if (-not $script:done) { $_.Cancel = $true } })",
+        "    [void][BBVC.Win]::ShowWindow($form.Handle, 4)",
+        "} catch { $form = $null }",
+        # The window never stops the update.
+        "function Pump { if ($form) { try { [System.Windows.Forms.Application]::DoEvents() } catch {} } }",
+        "function Say($text) { if ($form) { try { $label.Text = $text } catch {}; Pump } }",
+        "function Done { if ($form) { $script:done = $true; try { $form.Close() } catch {} } }",
+        f"while (Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue) {{ Pump; Start-Sleep -Milliseconds 50 }}",
+        f"Say {_ps_quote(f'Installing version {version}...' if version else 'Installing the update...')}",
     ]
     if setup is not None:
-        args = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] + (["/RELAUNCH=1"] if relaunch else [])
-        lines.append(f"Start-Process -FilePath {_ps_quote(setup)} -ArgumentList "
-                     + ",".join(_ps_quote(a) for a in args))
+        # Very silent: this window, not the installer's own, shows it.
+        args = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] + (["/RELAUNCH=1"] if relaunch else [])
+        lines += [
+            f"$setup = Start-Process -PassThru -FilePath {_ps_quote(setup)} -ArgumentList "
+            + ",".join(_ps_quote(a) for a in args),
+            "while (-not $setup.HasExited) { Pump; Start-Sleep -Milliseconds 50 }",
+            "Done",
+        ]
         return "\n".join(lines) + "\n"
     app, new = _ps_quote(app_dir), _ps_quote(new_build)
     lines += [
@@ -1274,7 +1315,18 @@ def update_helper_script(pid, app_dir, setup=None, new_build=None, relaunch=True
         "if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }",
         "if (Test-Path -LiteralPath $internal) { Rename-Item -LiteralPath $internal -NewName '_internal.old' }",
         "try {",
-        "    Copy-Item -Path (Join-Path $new '*') -Destination $app -Recurse -Force",
+        # File by file, so the bar can count them.
+        "    $files = @(Get-ChildItem -LiteralPath $new -Recurse -File)",
+        "    if ($form) { $bar.Style = 'Continuous'; $bar.Maximum = [Math]::Max(1, $files.Count) }",
+        "    $i = 0",
+        "    foreach ($f in $files) {",
+        "        $dst = Join-Path $app $f.FullName.Substring($new.Length).TrimStart([char]92)",
+        "        $dir = Split-Path -Parent $dst",
+        "        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }",
+        "        Copy-Item -LiteralPath $f.FullName -Destination $dst -Force",
+        "        $i++",
+        "        if ($form) { $bar.Value = $i; if ($i % 10 -eq 0) { Pump } }",
+        "    }",
         "    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }",
         "} catch {",
         "    if (Test-Path -LiteralPath $old) {",
@@ -1283,9 +1335,11 @@ def update_helper_script(pid, app_dir, setup=None, new_build=None, relaunch=True
         "    }",
         "}",
         "Remove-Item -LiteralPath (Split-Path -Parent $new) -Recurse -Force -ErrorAction SilentlyContinue",
+        "Say 'Starting the app...'",
     ]
     if relaunch:
         lines.append("Start-Process -FilePath (Join-Path $app 'BBVideoCutter.exe')")
+    lines.append("Done")
     return "\n".join(lines) + "\n"
 
 
@@ -4115,7 +4169,8 @@ class LosslessVideoApp(_BaseTk):
         script = os.path.join(folder, "update.ps1")
         try:
             with open(script, "w", encoding="utf-8-sig") as f:
-                f.write(update_helper_script(os.getpid(), _app_dir(), setup=setup, new_build=new_build))
+                f.write(update_helper_script(os.getpid(), _app_dir(), setup=setup, new_build=new_build,
+                                             version=version))
             self._launch_update_helper(script)
         except OSError as exc:
             messagebox.showerror("Update", f"Couldn't start the update:\n{exc}")
