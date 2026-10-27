@@ -6425,7 +6425,6 @@ class LosslessVideoApp(_BaseTk):
         end_sec): (start, end), negative = earlier, positive = later. Found
         by matching the cut's first and last frames to the source's frames
         near start_sec and end_sec. None when they can't be matched."""
-        from concurrent.futures import ThreadPoolExecutor
         origin = self._probe_start_time(ffprobe, input_path)
 
         def around(at_sec, pad):
