@@ -40,9 +40,9 @@ app's update box shows as "What's new").
   Dragging the handle still moves it and shows its frame.
 - **Cut tab:** the Start / End fields are labelled "Cut Start:" and
   "Cut End:", so they read as the cut's limits, not the playhead.
-- **Cut tab:** each step button (1 sec, 5 sec, 30 sec, 3 min) has a hint
-  naming the marker it moves right now, e.g. "Moves the End marker 5 s
-  earlier. Pick Cut Start or Cut End above to change."
+- **Cut tab:** each step button (1 sec, 5 sec, 30 sec, 3 min) has a short hint
+  naming the marker it moves right now and by how much, e.g.
+  "Cut start -> -5s".
 - **Cut tab:** while you drag the playhead or a handle, the video shows
   the frame once the mouse rests for 50 ms, instead of seeking on every
   mouse move. Letting go still shows the exact frame.

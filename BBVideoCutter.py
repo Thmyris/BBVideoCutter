@@ -4298,22 +4298,21 @@ class LosslessVideoApp(_BaseTk):
         step_row.pack(pady=(1, 2))  # no fill -> centers horizontally by default
         self.step_buttons = []
 
-        def step_tip(amount, way):
+        def step_tip(step):
             # These move a cut marker, not the playhead: the hint names the
-            # marker they move now.
-            which = "Start" if self.active_handle == "start" else "End"
-            return (f"Moves the {which} marker {amount} {way}. "
-                    "Pick Cut Start or Cut End above to change.")
+            # marker they move now, e.g. "Cut start -> -5s".
+            which = "start" if self.active_handle == "start" else "end"
+            return f"Cut {which} -> {step}"
 
         for label, secs in (("1 sec", 1), ("5 sec", 5), ("30 sec", 30), ("3 min", 180)):
             tk.Label(step_row, text=f"{label}:", bg="#f0f0f0").pack(side="left", padx=(10, 2))
-            amount = label.replace(" sec", " s")
+            amount = label.replace(" sec", "s").replace(" min", "min")
             b1 = tk.Button(step_row, text="<", width=7, command=lambda s=secs: self._nudge(-s))
             b1.pack(side="left")
-            Tooltip(b1, lambda a=amount: step_tip(a, "earlier"))
+            Tooltip(b1, lambda a=amount: step_tip("-" + a))
             b2 = tk.Button(step_row, text=">", width=7, command=lambda s=secs: self._nudge(s))
             b2.pack(side="left", padx=(0, 4))
-            Tooltip(b2, lambda a=amount: step_tip(a, "later"))
+            Tooltip(b2, lambda a=amount: step_tip("+" + a))
             self.step_buttons += [b1, b2]
         self.cut_step_row = step_row
         self._init_cut_button_fit()
