@@ -12,6 +12,7 @@ app's update box shows as "What's new").
 - **Cut Start and Cut End show 00:00:00.000 before a video is open**, instead of being empty.
 - **A shorter About box.**
 - **Saving the whole video as a scene is refused**, with a box that says so.
+- **So is saving a scene 0.000 s long.**
 
 ## v1.2 (2026-10-27)
 

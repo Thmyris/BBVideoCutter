@@ -6524,11 +6524,17 @@ class LosslessVideoApp(_BaseTk):
     def _save_scene_clicked(self):
         if not self.input_path:
             return
+        # A scene 0.000 s long (to the ms shown in the fields), or the whole
+        # video: refused, with a joke.
+        if round(self.end_sec, 3) == round(self.start_sec, 3):
+            self._refuse_box("Good job", "You just cut air, good job.", "Thanks.")
+            return
         if self.end_sec <= self.start_sec:
             messagebox.showerror("Invalid range", "End time must be after start time.")
             return
         if round(self.start_sec, 3) <= 0 and round(self.end_sec, 3) >= round(self.duration, 3):
-            self._nice_try_whole_video()
+            self._refuse_box("Nice try", "You just tried cutting the entire video out of the video, nice try.",
+                             "Oops.")
             return
 
         source_dir = os.path.dirname(os.path.abspath(self.input_path))
@@ -6563,22 +6569,21 @@ class LosslessVideoApp(_BaseTk):
             target=self._run_cut, args=(out_path, cut_mode, search_window), daemon=True
         ).start()
 
-    def _nice_try_whole_video(self):
-        """Saving the whole video as a scene is refused: a box with one
-        button, "Oops.". Waits until it is closed."""
+    def _refuse_box(self, title, text, button):
+        """A save that is refused: a box with text and one button (the
+        whole video: "Oops."; nothing at all: "Thanks."). Waits until it is
+        closed."""
         dlg = tk.Toplevel(self, bg="#f0f0f0")
         dlg.withdraw()
-        dlg.title("Nice try")
+        dlg.title(title)
         dlg.transient(self)
         dlg.resizable(False, False)
-        self._nice_try_dialog = dlg     # for the tests
+        self._refuse_dialog = dlg     # for the tests
         body = tk.Frame(dlg, bg="#f0f0f0", padx=px(16), pady=px(12))
         body.pack(fill="both", expand=True)
-        tk.Label(body, bg="#f0f0f0", justify="left", anchor="w",
-                 text="You just tried cutting the entire video out of the video, nice try."
-                 ).pack(fill="x")
-        oops = tk.Button(body, text="Oops.", width=10, command=dlg.destroy)
-        oops.pack(side="right", pady=(px(12), 0))
+        tk.Label(body, bg="#f0f0f0", justify="left", anchor="w", text=text).pack(fill="x")
+        btn = tk.Button(body, text=button, width=10, command=dlg.destroy)
+        btn.pack(side="right", pady=(px(12), 0))
         for key in ("<Return>", "<Escape>"):
             dlg.bind(key, lambda e: dlg.destroy())
 
@@ -6590,10 +6595,10 @@ class LosslessVideoApp(_BaseTk):
         y = self.winfo_rooty() + (self.winfo_height() - h) // 3
         dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
         dlg.deiconify()
-        oops.focus_set()
+        btn.focus_set()
         dlg.grab_set()
         self.wait_window(dlg)
-        self._nice_try_dialog = None
+        self._refuse_dialog = None
 
     def _run_cut(self, out_path, cut_mode, search_window):
         try:
