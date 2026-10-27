@@ -26,8 +26,12 @@ import tkinter as tk
 
 app = None   # BBVideoCutter's module, once installed
 
-# The Linux build's file on a release (build_linux.sh makes it).
+# The Linux build's files on a release: the folder to unpack anywhere
+# (build_linux.sh makes it), and the same as a package installed into
+# DEB_DIR (build_deb.sh).
 LINUX_ASSET = "BBVideoCutter-Linux-x86_64.tar.gz"
+LINUX_DEB = "BBVideoCutter-Linux-amd64.deb"
+DEB_DIR = "/opt/bbvideocutter/"
 
 # mpv options for every player, over the app's own.
 MPV_OPTIONS = {
@@ -249,9 +253,10 @@ def _wrap_start_update(cls):
     def _start_update(self, release):
         # Run from source, git pull updates it as on Windows.
         if app.running_built_app():
+            from_deb = os.path.realpath(sys.executable).startswith(DEB_DIR)
             self._update_offer_page(
                 release, "The Linux build can't update itself yet: the new version is "
-                f"{LINUX_ASSET} on the release's page.")
+                f"{LINUX_DEB if from_deb else LINUX_ASSET} on the release's page.")
             return
         real(self, release)
 

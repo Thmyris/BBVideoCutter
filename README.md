@@ -21,10 +21,16 @@ On the **[latest release](https://github.com/Thmyris/BBVideoCutter/releases/late
 - **`BBVideoCutter-Setup.exe`** — Windows installer.
 - **`BBVideoCutter-Portable.zip`** — extract and run
   `BBVideoCutter.exe`, no install.
-- **`BBVideoCutter-Linux-x86_64.tar.gz`** — Linux, [beta](#linux-beta):
-  extract and run `BBVideoCutter/BBVideoCutter`. Needs `ffmpeg` and
-  `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and glibc 2.38
-  or newer (Ubuntu 24.04 or later). It doesn't update itself yet.
+- **`BBVideoCutter-Linux-amd64.deb`** — Linux, [beta](#linux-beta), for
+  Ubuntu 24.04 or later (and Debian-based distros as new):
+  `sudo apt install ./BBVideoCutter-Linux-amd64.deb` installs it with what
+  it needs, and adds it to the app menu (or run `bbvideocutter`).
+- **`BBVideoCutter-Linux-x86_64.tar.gz`** — the same Linux build for
+  other distros: extract and run `BBVideoCutter/BBVideoCutter`. Needs
+  `ffmpeg` and `libmpv2` installed (`sudo apt install ffmpeg libmpv2`), and
+  glibc 2.38 or newer.
+
+  Neither Linux file updates itself yet.
 
 ## Features
 
@@ -109,7 +115,9 @@ bundled.
 Linux: `sh release/build/build_linux.sh` (run on Linux; needs
 `python3-tk python3-venv`) → `release/BBVideoCutter-Linux-x86_64.tar.gz`.
 A Linux `deep-filter` (and `ffmpeg`/`ffprobe`) in `release/build/` gets
-bundled; libmpv is always the system's.
+bundled; libmpv is always the system's. Then `sh release/build/build_deb.sh`
+packs that build as `release/BBVideoCutter-Linux-amd64.deb` (needs
+`dpkg-deb`; its dependencies are read from the system it runs on).
 
 ## License
 

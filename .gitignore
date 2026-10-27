@@ -15,6 +15,7 @@ release/build/installer_output/
 release/BBVideoCutter-Setup.exe
 release/BBVideoCutter-Portable.zip
 release/BBVideoCutter-Linux-x86_64.tar.gz
+release/BBVideoCutter-Linux-amd64.deb
 
 # ffmpeg/ffprobe binaries used only for bundling into the build, not part
 # of the source itself

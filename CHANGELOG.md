@@ -15,6 +15,12 @@ app's update box shows as "What's new").
   `libmpv2`, and glibc 2.38 or newer. All the Linux-only code lives in
   `bbvc_linux.py`, which the Windows build leaves out, so the Windows app
   is unchanged by it.
+  - Also as a package for Ubuntu 24.04 or later (and Debian-based distros
+    as new): `BBVideoCutter-Linux-amd64.deb`, made by
+    `release/build/build_deb.sh` from the same build.
+    `sudo apt install ./BBVideoCutter-Linux-amd64.deb` installs it with
+    ffmpeg and libmpv2, adds it to the app menu with its icon, and adds a
+    `bbvideocutter` command.
   - Uses the system's libmpv for the players, and works on machines
     without a GPU driver (VMs, remote desktops): when OpenGL runs on the
     CPU, the players switch to plain X11 output, which draws correctly.
