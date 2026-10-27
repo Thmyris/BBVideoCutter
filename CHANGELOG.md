@@ -64,17 +64,13 @@ app's update box shows as "What's new").
   step buttons (1 sec ... 3 min) smaller. Each button row now shrinks its
   buttons only when that row itself runs out of room.
 
-- **Cut tab (to try out):** Options > Cut Start / Cut End picker offers
-  thirteen ways to show the Cut Start / Cut End choice, since the small
-  radio buttons were easy to miss: A radio buttons (as before), B toggle
-  buttons, C toggle buttons in the slider handles' colours, D radio
-  buttons with the picked time field framed in its handle's colour, E big
-  radio circles, F Windows themed radio buttons, G a segmented control,
-  H underlined tabs, I pill chips with a tick, J a Start / End switch,
-  K field cards, L outlined tabs (a pill outline round each, the picked
-  one underlined), M the same with square boxes. Plus "Clicking a time
-  field picks its marker". The
-  choice is remembered.
+- **Cut tab (to try out):** the small Cut Start / Cut End radio buttons
+  were easy to miss. They are now big radio circles (E), and Options >
+  Cut Start / Cut End picker offers three other looks: K field cards
+  (each label and its time field in one card, the picked card tinted),
+  L outlined tabs (a pill outline round each, the picked one blue and
+  underlined) and M the same with square boxes. Plus "Clicking a time
+  field picks its marker". The choice is remembered.
 
 ### Project and docs
 
