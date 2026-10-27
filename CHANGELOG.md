@@ -55,6 +55,10 @@ app's update box shows as "What's new").
   seconds.
 - **Cut tab:** the step buttons keep the milliseconds: 5 sec back from
   `00:00:12.345` is `00:00:07.345`, not `00:00:07.000`.
+- **Cut tab:** the red playhead moves at once with the step buttons (and
+  the time fields, and Go to Start / End), instead of a moment later when
+  the video catches up. It also no longer flicks back to an old spot
+  when you let go of a playhead or handle drag.
 
 ### Project and docs
 

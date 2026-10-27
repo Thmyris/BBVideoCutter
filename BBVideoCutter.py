@@ -4337,6 +4337,9 @@ class LosslessVideoApp(_BaseTk):
         # While a handle is dragged the video shows its frame, but the
         # playhead stays: where the player was, to go back to on release.
         self._handle_preview = None
+        # (time, deadline): a seek just sent; the playhead shows it at once
+        # and stays there until the player reports a position at it.
+        self._playhead_pin = None
 
         save_row = tk.Frame(controls, bg="#f0f0f0")
         save_row.pack(fill="x", pady=(2, 1))
@@ -4792,6 +4795,8 @@ class LosslessVideoApp(_BaseTk):
                 self.cut_player.show_last_frame_before(t)
             else:
                 self.cut_player.show_first_frame_from(t)
+            if not self._cut_scrubbing:
+                self._pin_playhead(t)
         else:
             self._update_preview(t)
 
@@ -4844,6 +4849,15 @@ class LosslessVideoApp(_BaseTk):
             self.status_lbl.config(text="The player can't open this file; showing still frames")
             return
         playing, pos = not player.paused, player.position
+        pin = self._playhead_pin
+        if pin is not None:
+            target, until = pin
+            if pos is None or abs(pos - target) <= 2 * player.frame_duration + 0.01 \
+                    or time.monotonic() > until:
+                # The player is there (or never got there, or a new file is opening).
+                self._playhead_pin = None
+            else:
+                pos = target
         if self._handle_preview is not None:
             # A handle's frame is shown for the drag only: the controls
             # keep showing where the player is and goes back to.
@@ -5398,8 +5412,13 @@ class LosslessVideoApp(_BaseTk):
             c.create_line(0, 0, 0, 0, fill=PLAYHEAD_COLOR, width=px(2), tags=("playhead",))
             c.create_polygon(0, 0, 0, 0, 0, 0, fill=PLAYHEAD_COLOR, outline="",
                              tags=("playhead_top",))
-            back = self._handle_preview   # a dragged handle's frame is on screen
-            self._move_playhead(self.cut_player.position if back is None else back["pos"])
+            back, pin = self._handle_preview, self._playhead_pin
+            if back is not None:           # a dragged handle's frame is on screen
+                self._move_playhead(back["pos"])
+            elif pin is not None:          # a seek on its way
+                self._move_playhead(pin[0])
+            else:
+                self._move_playhead(self.cut_player.position)
         r = px(7)
         c.create_oval(sx - r, y - r, sx + r, y + r, fill=self._theme_color("slider_start"),
                       outline="")
@@ -5418,6 +5437,14 @@ class LosslessVideoApp(_BaseTk):
         c.coords("playhead_top", x - a, 0, x + a, 0, x, a + px(1))
         c.itemconfigure("playhead", state="normal")
         c.itemconfigure("playhead_top", state="normal")
+
+    def _pin_playhead(self, t):
+        """For a seek just sent to time t: the playhead goes there now, not
+        when the player's next report (polled every 33 ms) arrives, and
+        stays until the player is there, so it never steps back to the old
+        position in between. Released after a second regardless."""
+        self._playhead_pin = (t, time.monotonic() + 1.0)
+        self._move_playhead(t)
 
     def _x_to_time(self, x):
         # A dragged handle's time, to the millisecond like the playhead's:
@@ -5530,6 +5557,7 @@ class LosslessVideoApp(_BaseTk):
             self._cut_scrubbing = False
             if self._cut_player_on and back["pos"] is not None:
                 self.cut_player.seek(back["pos"])
+                self._pin_playhead(back["pos"])   # not at the handle's frame meanwhile
                 if back["playing"]:
                     self.cut_player.set_paused(False)
             return
@@ -5538,6 +5566,7 @@ class LosslessVideoApp(_BaseTk):
         if target == "playhead":
             self._cut_scrubbing = False
             self.cut_player.seek(self._cut_scrub_time)
+            self._pin_playhead(self._cut_scrub_time)
 
     def _x_to_exact_time(self, x):
         frac = (x - self._track_x0) / max(1, (self._track_x1 - self._track_x0))
