@@ -90,8 +90,41 @@ quiet.uninstall()
 print("FAILED:" if fails else "ALL PASSED", fails)
 ```
 
-Never call `app.mainloop()`. Drive Tk yourself with `settle()` / `app.update()`
-so the test can't hang forever in the loop.
+### When the app's worker threads run: inside `mainloop()`
+Saves, waveforms, keyframe scans and noise reduction run in threads that
+hand their results back with `self.after(0, ...)`. Tkinter only allows that
+while the main thread is in `mainloop()`. With a test that only pumps
+`app.update()`, every such call raises `RuntimeError: main thread is not in
+main loop`. The work may still finish (the file gets written), but progress,
+the done box and the buttons coming back never happen, and the test fails
+for no app reason.
+
+So for any test that starts background work, put the test body in a
+function, start it from `mainloop()`, and quit at the end. `settle()` /
+`app.update()` inside it are fine:
+
+```python
+def body():
+    try:
+        ...                              # the whole test, settle() as usual
+        check("focus never ours", not quiet.foreground_is_ours())
+    finally:
+        app.quit()                       # ends mainloop, even on an exception
+
+
+app.after(0, body)
+app.mainloop()
+app._on_app_close()
+quiet.uninstall()
+```
+
+Tests that only check layout and widgets can skip this and pump
+`settle()` at the top level. Either way, every wait has a time limit, so a
+test can't hang.
+
+The other way, used by older tests: call the worker function itself in the
+test thread (e.g. `app._run_cut(out, mode, 8.0)`), so its `after()` calls
+are queued from the main thread and run in `settle()`.
 
 ## What `tests/quiet_windows.py` does
 
