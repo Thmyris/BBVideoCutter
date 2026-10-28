@@ -3575,6 +3575,8 @@ class LosslessVideoApp(_BaseTk):
         self.dark_mode_var = tk.BooleanVar(value=bool(self.settings.get("dark_mode", True)))
         self.show_frame_buttons_var = tk.BooleanVar(
             value=bool(self.settings.get("show_frame_buttons", False)))
+        self.show_separate_tracks_var = tk.BooleanVar(
+            value=bool(self.settings.get("show_save_tracks_separately", False)))
         # Every tab saves next to the source video, or asks where to save.
         self.save_to_source_var = tk.BooleanVar(
             value=bool(self.settings.get("save_to_current_folder", True)))
@@ -3777,6 +3779,11 @@ class LosslessVideoApp(_BaseTk):
             label="Show frame by frame movement buttons in the video player",
             variable=self.show_frame_buttons_var,
             command=self._on_show_frame_buttons_toggled,
+        )
+        options_menu.add_checkbutton(
+            label='Show "Save enabled tracks separately" on the Audio tab',
+            variable=self.show_separate_tracks_var,
+            command=self._on_show_separate_tracks_toggled,
         )
 
         help_menu = self._add_menu_bar_menu("Help")
@@ -5026,6 +5033,18 @@ class LosslessVideoApp(_BaseTk):
             self._fit_resize_buttons()
         if save:
             self._save_option("show_frame_buttons", self.show_frame_buttons_var)
+
+    def _on_show_separate_tracks_toggled(self, save=True):
+        """The Audio tab's "Save enabled tracks separately" button, right of
+        "Save enabled tracks together!", or hidden (the default)."""
+        btn = getattr(self, "audio_separate_btn", None)   # the tab is built when first opened
+        if btn is not None:
+            if self.show_separate_tracks_var.get():
+                btn.pack(side="right", padx=(2, 0), fill="y", before=self.audio_finalize_btn)
+            else:
+                btn.pack_forget()
+        if save:
+            self._save_option("show_save_tracks_separately", self.show_separate_tracks_var)
 
     # The Cut tab's play / step / jump buttons and the 1 sec ... 3 min ones
     # are made wider than their text: 45%, or less in 5% steps until their
@@ -10058,16 +10077,28 @@ class LosslessVideoApp(_BaseTk):
 
         self._audio_rebuild_track_rows()
 
-        # ---- finalize
+        # ---- finalize: the enabled tracks mixed into one, or each kept as
+        # its own track
+        save_row = tk.Frame(root, bg="#f0f0f0")
+        save_row.grid(row=6, column=0, sticky="ew", padx=3, pady=(4, 6))
+        self.audio_separate_btn = tk.Button(
+            save_row, text="Save enabled tracks\nseparately", height=2, width=20,
+            command=lambda: self._audio_finalize_clicked(separate=True)
+        )
+        self.audio_separate_btn.config(state="disabled")
+        Tooltip(self.audio_separate_btn, "Each enabled track stays its own track, at its volume.\n"
+                                         "Only the audio part will be re-encoded.")
         self.audio_finalize_btn = tk.Button(
-            root, text="Save enabled tracks together!", height=2,
+            save_row, text="Save enabled tracks together!", height=2,
             font=("Segoe UI", 10, "bold"), command=self._audio_finalize_clicked
         )
-        self.audio_finalize_btn.grid(row=6, column=0, sticky="ew", padx=3, pady=(4, 6))
+        self.audio_finalize_btn.pack(side="left", fill="x", expand=True)
         self.audio_finalize_btn.config(state="disabled")
         Tooltip(self.audio_finalize_btn, "Only the audio part will be re-encoded.")
+        # Shown only when Options > Show "Save enabled tracks separately" is on.
+        self._on_show_separate_tracks_toggled(save=False)
 
-        targets = [self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner]
+        targets =[self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner]
         if self.audio_player is not None:
             targets.append(self.audio_player.frame)
         for target in targets:
@@ -10101,7 +10132,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_tracks = []
         self._dfn_reset()
         self._audio_rebuild_track_rows()
-        for btn in (self.audio_balance_btn, self.audio_finalize_btn):
+        for btn in (self.audio_balance_btn, self.audio_finalize_btn, self.audio_separate_btn):
             btn.config(state="disabled")
         self.audio_filename_lbl.config(text=os.path.basename(path))
         self.audio_info_lbl.config(text="no audio tracks")
@@ -10230,7 +10261,7 @@ class LosslessVideoApp(_BaseTk):
             })
 
         self._audio_rebuild_track_rows()
-        for btn in (self.audio_balance_btn, self.audio_finalize_btn):
+        for btn in (self.audio_balance_btn, self.audio_finalize_btn, self.audio_separate_btn):
             btn.config(state="normal")
         status = "Ready"
         if self.audio_player is not None:
@@ -10673,16 +10704,19 @@ class LosslessVideoApp(_BaseTk):
             self.audio_play_after_id = None
         self._audio_stop_ffplay()
 
-    def _audio_build_filter_complex(self, track_settings):
+    def _audio_build_filter_complex(self, track_settings, separate=False):
         """track_settings: list of (source, filters, volume) for the tracks
         to include, as _audio_mix_sources gives them. Shared by live
         playback (ffplay) and Finalize (ffmpeg) so what you hear while
-        scrubbing matches what gets written to the output file."""
+        scrubbing matches what gets written to the output file. Mixed into
+        [aout]; separate: each track on its own, [v0], [v1]..."""
         n = len(track_settings)
         parts = [
             f"[{source}]{filters + ',' if filters else ''}volume={vol:.4f}[v{i}]"
             for i, (source, filters, vol) in enumerate(track_settings)
         ]
+        if separate:
+            return ";".join(parts)
         if n == 1:
             return parts[0].replace("[v0]", "[aout]")
         mix_inputs = "".join(f"[v{i}]" for i in range(n))
@@ -10911,7 +10945,10 @@ class LosslessVideoApp(_BaseTk):
         self.status_lbl.config(text="Auto balance applied — review levels, then Finalize")
 
     # ---- finalize (mix + save) ---------------------------------------------
-    def _audio_finalize_clicked(self):
+    def _audio_finalize_clicked(self, separate=False):
+        """Saves the video with the enabled tracks mixed into one; separate:
+        each kept as its own track (with its volume, noise reduction and
+        Mono, and its name and language from the source)."""
         if not self.audio_input_path:
             return
         enabled = [t for t in self.audio_tracks if t["enabled_var"].get()]
@@ -10925,16 +10962,18 @@ class LosslessVideoApp(_BaseTk):
         source_dir = os.path.dirname(os.path.abspath(self.audio_input_path))
         base_name = os.path.splitext(os.path.basename(self.audio_input_path))[0]
         ext = os.path.splitext(self.audio_input_path)[1] or ".mp4"
-        default_name = f"{base_name}.AUDIOMIX{ext}"
+        tag = "AUDIOTRACKS" if separate else "AUDIOMIX"
+        default_name = f"{base_name}.{tag}{ext}"
 
         from_dialog = not self.save_to_source_var.get()
         if not from_dialog:
             out_path = os.path.join(source_dir, default_name)
             if os.path.abspath(out_path) == os.path.abspath(self.audio_input_path):
-                out_path = os.path.join(source_dir, base_name + ".AUDIOMIX2" + ext)
+                out_path = os.path.join(source_dir, f"{base_name}.{tag}2{ext}")
         else:
             out_path = filedialog.asksaveasfilename(
-                title="Save mixed video as", initialdir=source_dir,
+                title="Save video with separate tracks as" if separate else "Save mixed video as",
+                initialdir=source_dir,
                 initialfile=default_name, defaultextension=ext,
                 filetypes=[("Same format", f"*{ext}"), ("All files", "*.*")],
             )
@@ -10949,19 +10988,27 @@ class LosslessVideoApp(_BaseTk):
         mix = [(t, t["volume_slider"].get() if t["volume_slider"] else 1.0, t["denoise_var"].get(),
                 t["mono_var"].get()) for t in enabled]
 
+        sources = [t["a_index"] for t in enabled] if separate else None
+
         def start():
             extra_inputs, track_settings = self._audio_mix_sources(mix)
-            self.status_lbl.config(text="Mixing audio tracks... 0%")
+            self.status_lbl.config(text=f"{self._audio_saving_text(separate)} 0%")
             threading.Thread(
-                target=self._audio_run_finalize, args=(out_path, track_settings, extra_inputs),
-                daemon=True
+                target=self._audio_run_finalize,
+                args=(out_path, track_settings, extra_inputs, sources), daemon=True
             ).start()
 
-        self.audio_finalize_btn.config(state="disabled")
+        for btn in (self.audio_finalize_btn, self.audio_separate_btn):
+            btn.config(state="disabled")
         keys = self._dfn_keys({t["a_index"]: level for t, _vol, level, _mono in mix})
         if any(key not in self._dfn_done for key in keys):
             self.status_lbl.config(text="Saving once the noise reduction is done...")
-        self._dfn_when_ready(keys, start, lambda error: self._audio_finalize_done(error, False))
+        self._dfn_when_ready(keys, start,
+                             lambda error: self._audio_finalize_done(error, False, separate))
+
+    @staticmethod
+    def _audio_saving_text(separate):
+        return "Saving audio tracks..." if separate else "Mixing audio tracks..."
 
     def _audio_mix_sources(self, mix):
         """mix: (track, volume), (track, volume, noise reduction level) or
@@ -10985,40 +11032,54 @@ class LosslessVideoApp(_BaseTk):
             settings.append((source, ",".join(f for f in (chain, fold) if f), vol))
         return extra_inputs, settings
 
-    def _audio_run_finalize(self, out_path, track_settings, extra_inputs=()):
+    def _audio_run_finalize(self, out_path, track_settings, extra_inputs=(), sources=None):
+        """Mixes the tracks into one; with sources (each track's audio
+        index in the source), keeps each as its own track instead."""
+        separate = sources is not None
         try:
             ffmpeg = find_exe("ffmpeg")
-            filter_complex = self._audio_build_filter_complex(track_settings)
+            filter_complex = self._audio_build_filter_complex(track_settings, separate)
             cmd = [ffmpeg, "-y", "-i", self.audio_input_path]
             for wav in extra_inputs:
                 cmd += ["-i", wav]
+            cmd += ["-filter_complex", filter_complex, "-map", "0:v:0"]
+            if separate:
+                for i, a_index in enumerate(sources):
+                    # Its name and language, as in the source.
+                    cmd += ["-map", f"[v{i}]", f"-map_metadata:s:a:{i}", f"0:s:a:{a_index}"]
+            else:
+                cmd += ["-map", "[aout]"]
             cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "0:v:0", "-map", "[aout]",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "256k",
                 "-movflags", "+faststart",
                 out_path,
             ]
             proc = run_ffmpeg(
-                cmd, self.audio_duration, self._progress_reporter("Mixing audio tracks...", "audio_mix")
+                cmd, self.audio_duration,
+                self._progress_reporter(self._audio_saving_text(separate), "audio_mix")
             )
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr[-3000:])
 
-            self.after(0, lambda p=out_path: self._audio_finalize_done(p, True))
+            self.after(0, lambda p=out_path: self._audio_finalize_done(p, True, separate))
         except Exception as exc:
-            self.after(0, lambda e=str(exc): self._audio_finalize_done(e, False))
+            self.after(0, lambda e=str(exc): self._audio_finalize_done(e, False, separate))
 
-    def _audio_finalize_done(self, info, success):
+    def _audio_finalize_done(self, info, success, separate=False):
         self._end_progress("audio_mix")
-        self.audio_finalize_btn.config(state="normal")
+        for btn in (self.audio_finalize_btn, self.audio_separate_btn):
+            btn.config(state="normal")
         if success:
             self.status_lbl.config(text=f"Saved: {info}")
-            self._saved_ask_open(f"Mixed video saved to:\n{info}", info, 4, "mixed video")
+            if separate:
+                self._saved_ask_open(f"Video with separate tracks saved to:\n{info}", info, 4, "saved video")
+            else:
+                self._saved_ask_open(f"Mixed video saved to:\n{info}", info, 4, "mixed video")
         else:
-            self.status_lbl.config(text="Audio mix failed")
-            messagebox.showerror("ffmpeg error", "The audio mix failed.\n\n" + info)
+            self.status_lbl.config(text="Saving the audio tracks failed" if separate else "Audio mix failed")
+            messagebox.showerror("ffmpeg error", ("Saving the audio tracks failed." if separate
+                                                  else "The audio mix failed.") + "\n\n" + info)
 
     # ---- noise reduction ------------------------------------------------------
     def _audio_denoise_files(self, refresh=False):

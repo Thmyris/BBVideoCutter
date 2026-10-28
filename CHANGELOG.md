@@ -12,6 +12,7 @@ app's update box shows as "What's new").
 - **Cut Start and Cut End show 00:00:00.000 before a video is open**, instead of being empty.
 - **A shorter About box.**
 - **Added easter eggs.**
+- **Audio: save the enabled tracks separately**, each kept as its own track at its own volume. Turn it on in Options.
 
 ## v1.2 (2026-10-27)
 
