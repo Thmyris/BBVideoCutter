@@ -3781,7 +3781,7 @@ class LosslessVideoApp(_BaseTk):
             command=self._on_show_frame_buttons_toggled,
         )
         options_menu.add_checkbutton(
-            label='Show "Save enabled tracks separately" on the Audio tab',
+            label='Show "Save enabled tracks without combining" on the Audio tab',
             variable=self.show_separate_tracks_var,
             command=self._on_show_separate_tracks_toggled,
         )
@@ -5035,7 +5035,7 @@ class LosslessVideoApp(_BaseTk):
             self._save_option("show_frame_buttons", self.show_frame_buttons_var)
 
     def _on_show_separate_tracks_toggled(self, save=True):
-        """The Audio tab's "Save enabled tracks separately" button, right of
+        """The Audio tab's "Save enabled tracks without combining" button, right of
         "Save enabled tracks together!", or hidden (the default)."""
         btn = getattr(self, "audio_separate_btn", None)   # the tab is built when first opened
         if btn is not None:
@@ -10082,7 +10082,7 @@ class LosslessVideoApp(_BaseTk):
         save_row = tk.Frame(root, bg="#f0f0f0")
         save_row.grid(row=6, column=0, sticky="ew", padx=3, pady=(4, 6))
         self.audio_separate_btn = tk.Button(
-            save_row, text="Save enabled tracks\nseparately", height=2, width=20,
+            save_row, text="Save enabled tracks\nwithout combining", height=2, width=20,
             command=lambda: self._audio_finalize_clicked(separate=True)
         )
         self.audio_separate_btn.config(state="disabled")
@@ -10095,7 +10095,7 @@ class LosslessVideoApp(_BaseTk):
         self.audio_finalize_btn.pack(side="left", fill="x", expand=True)
         self.audio_finalize_btn.config(state="disabled")
         Tooltip(self.audio_finalize_btn, "Only the audio part will be re-encoded.")
-        # Shown only when Options > Show "Save enabled tracks separately" is on.
+        # Shown only when Options > Show "Save enabled tracks without combining" is on.
         self._on_show_separate_tracks_toggled(save=False)
 
         targets =[self.audio_canvas, self.audio_tracks_canvas, self.audio_tracks_inner]
