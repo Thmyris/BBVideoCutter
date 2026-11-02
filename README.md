@@ -16,7 +16,7 @@ The fastest and the most stable video editor for your simple video editing needs
 
 ## Features
 
-**Cut:** Losslessly cut any video down to the millisecond easily. Cuts are <u>instant</u>, the only bottleneck is the disk write speed.
+**Cut:** Losslessly cut any video down to the millisecond easily. Cuts are <u>instant</u>, the only bottleneck is the disk write speed. Lossless means true lossless, 0 data loss, compression or re-encoding.
 
 **Bulk Cut:** Batch cut hundreds of files with one click.
 
